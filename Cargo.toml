@@ -1,0 +1,22 @@
+[package]
+name = "rapsqlite"
+version = "0.0.1"
+edition = "2021"
+authors = ["RAP Project"]
+license = "MIT"
+description = "True async SQLite — no fake async, no GIL stalls."
+repository = "https://github.com/rap-project/rapsqlite"
+
+[lib]
+name = "rapsqlite"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module"] }
+tokio = { version = "1.35", features = ["full"] }
+# TODO: Add async-safe SQLite bindings
+
+[features]
+extension-module = ["pyo3/extension-module"]
+default = []
+
