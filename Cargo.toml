@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["RAP Project"]
 license = "MIT"
 description = "True async SQLite — no fake async, no GIL stalls."
-repository = "https://github.com/rap-project/rapsqlite"
+repository = "https://github.com/eddiethedean/rapsqlite"
 
 [lib]
 name = "rapsqlite"
