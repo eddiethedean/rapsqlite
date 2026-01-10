@@ -10,11 +10,13 @@
 
 `rapsqlite` provides true async SQLite operations for Python, backed by Rust, Tokio, and sqlx. Unlike libraries that wrap blocking database calls in `async` syntax, `rapsqlite` guarantees that all database operations execute **outside the Python GIL**, ensuring event loops never stall under load.
 
+**Roadmap Goal**: Achieve drop-in replacement compatibility with `aiosqlite`, enabling seamless migration with true async performance. See [ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/main/ROADMAP.md) for details.
+
 ## Why `rap*`?
 
 Packages prefixed with **`rap`** stand for **Real Async Python**. Unlike many libraries that merely wrap blocking I/O in `async` syntax, `rap*` packages guarantee that all I/O work is executed **outside the Python GIL** using native runtimes (primarily Rust). This means event loops are never stalled by hidden thread pools, blocking syscalls, or cooperative yielding tricks. If a `rap*` API is `async`, it is *structurally non-blocking by design*, not by convention. The `rap` prefix is a contract: measurable concurrency, real parallelism, and verifiable async behavior under load.
 
-See the [rap-manifesto](https://github.com/rap-project/rap-manifesto) for philosophy and guarantees.
+See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philosophy and guarantees.
 
 ## Features
 
@@ -40,7 +42,7 @@ pip install rapsqlite
 ### Building from Source
 
 ```bash
-git clone https://github.com/rap-project/rapsqlite.git
+git clone https://github.com/eddiethedean/rapsqlite.git
 cd rapsqlite
 pip install maturin
 maturin develop
@@ -161,7 +163,7 @@ Execute a SELECT query and return all rows.
 
 ## Benchmarks
 
-This package passes the [Fake Async Detector](https://github.com/rap-project/rap-bench). Benchmarks are available in the [rap-bench](https://github.com/rap-project/rap-bench) repository.
+This package passes the [Fake Async Detector](https://github.com/eddiethedean/rap-bench). Benchmarks are available in the [rap-bench](https://github.com/eddiethedean/rap-bench) repository.
 
 Run the detector yourself:
 
@@ -170,22 +172,39 @@ pip install rap-bench
 rap-bench detect rapsqlite
 ```
 
+## Roadmap
+
+See [ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/main/ROADMAP.md) for detailed development plans. Key goals include:
+- Drop-in replacement for `aiosqlite` (Phase 1)
+- Connection pooling and transaction support
+- Prepared statements and parameterized queries
+- Comprehensive SQLite feature support
+- Advanced query optimization and ecosystem integration
+
 ## Related Projects
 
-- [rap-manifesto](https://github.com/rap-project/rap-manifesto) - Philosophy and guarantees
-- [rap-bench](https://github.com/rap-project/rap-bench) - Fake Async Detector CLI
-- [rapfiles](https://github.com/rap-project/rapfiles) - True async filesystem I/O
-- [rapcsv](https://github.com/rap-project/rapcsv) - Streaming async CSV
+- [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) - Philosophy and guarantees
+- [rap-bench](https://github.com/eddiethedean/rap-bench) - Fake Async Detector CLI
+- [rapfiles](https://github.com/eddiethedean/rapfiles) - True async filesystem I/O
+- [rapcsv](https://github.com/eddiethedean/rapcsv) - Streaming async CSV
 
-## Limitations
+## Limitations (MVP v0.0.1)
 
-- Not a drop-in replacement for `sqlite3` or `aiosqlite`
-- Not compatible with all SQLite features (yet)
+**Current MVP limitations:**
+- Connection creates a new pool on every operation (extremely inefficient)
+- No connection pooling or reuse
+- No transaction support
+- No prepared statements or parameterized queries
+- Limited error handling and SQL error context
+- All values returned as strings (limited type support)
+- Not yet a drop-in replacement for `aiosqlite` (goal for Phase 1)
 - Not designed for synchronous use cases
+
+**Roadmap**: See [ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/main/ROADMAP.md) for planned improvements. Our goal is to achieve drop-in replacement compatibility with `aiosqlite` while providing true async performance with GIL-independent database operations.
 
 ## Contributing
 
-Contributions are welcome! Please see our [contributing guidelines](https://github.com/rap-project/rapsqlite/blob/main/CONTRIBUTING.md) (coming soon).
+Contributions are welcome! Please see our [contributing guidelines](https://github.com/eddiethedean/rapsqlite/blob/main/CONTRIBUTING.md) (coming soon).
 
 ## License
 
@@ -193,4 +212,4 @@ MIT
 
 ## Changelog
 
-See [CHANGELOG.md](https://github.com/rap-project/rapsqlite/blob/main/CHANGELOG.md) (coming soon) for version history.
+See [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/main/CHANGELOG.md) (coming soon) for version history.
