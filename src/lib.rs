@@ -1,3 +1,5 @@
+#![allow(non_local_definitions)] // False positive from pyo3 macros
+
 use pyo3::prelude::*;
 use pyo3_asyncio::tokio::future_into_py;
 use sqlx::{Row, SqlitePool};
@@ -28,13 +30,18 @@ impl Connection {
         let path = self_.path.clone();
         Python::with_gil(|py| {
             let future = async move {
-                let pool = SqlitePool::connect(&format!("sqlite:{}", path))
+                let pool = SqlitePool::connect(&format!("sqlite:{path}"))
                     .await
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to connect: {}", e)))?;
-                sqlx::query(&query)
-                    .execute(&pool)
-                    .await
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to execute query: {}", e)))?;
+                    .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to connect: {e}"
+                        ))
+                    })?;
+                sqlx::query(&query).execute(&pool).await.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to execute query: {e}"
+                    ))
+                })?;
                 Ok(())
             };
             future_into_py(py, future).map(|awaitable| awaitable.to_object(py))
@@ -46,15 +53,20 @@ impl Connection {
         let path = self_.path.clone();
         Python::with_gil(|py| {
             let future = async move {
-                let pool = SqlitePool::connect(&format!("sqlite:{}", path))
+                let pool = SqlitePool::connect(&format!("sqlite:{path}"))
                     .await
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to connect: {}", e)))?;
-                
-                let rows = sqlx::query(&query)
-                    .fetch_all(&pool)
-                    .await
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to fetch rows: {}", e)))?;
-                
+                    .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to connect: {e}"
+                        ))
+                    })?;
+
+                let rows = sqlx::query(&query).fetch_all(&pool).await.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to fetch rows: {e}"
+                    ))
+                })?;
+
                 let mut results = Vec::new();
                 for row in rows {
                     let mut row_data = Vec::new();
