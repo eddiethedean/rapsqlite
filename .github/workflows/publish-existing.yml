@@ -27,6 +27,7 @@ jobs:
           merge-multiple: true
           path: artifacts/wheels
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          if-no-files-found: error
 
       - name: Download sdist artifact from run
         uses: actions/download-artifact@v4
@@ -36,6 +37,7 @@ jobs:
           merge-multiple: true
           path: artifacts/sdist
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          if-no-files-found: error
 
       - name: Combine artifacts
         shell: bash
