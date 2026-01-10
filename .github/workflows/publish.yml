@@ -298,6 +298,36 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
+          set -e
           pip install twine
-          twine upload dist/*
+          
+          # Check if we have files to upload
+          echo "=== Files to upload ==="
+          ls -lah dist/
+          echo ""
+          
+          # Verify token is set (without exposing it)
+          if [ -z "$TWINE_PASSWORD" ]; then
+            echo "ERROR: PYPI_API_TOKEN secret is not set!"
+            exit 1
+          fi
+          
+          echo "✅ PyPI token is configured"
+          echo ""
+          
+          # Upload with verbose output for debugging
+          echo "=== Uploading to PyPI ==="
+          twine upload dist/* --verbose || {
+            echo ""
+            echo "❌ Upload failed. Common issues:"
+            echo "  1. Package version already exists on PyPI"
+            echo "  2. Invalid or expired PyPI API token"
+            echo "  3. Network/authentication error"
+            echo ""
+            echo "Check PyPI: https://pypi.org/project/rapsqlite/"
+            exit 1
+          }
+          
+          echo ""
+          echo "✅ Successfully published to PyPI!"
 
