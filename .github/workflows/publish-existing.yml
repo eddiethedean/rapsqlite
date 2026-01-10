@@ -1,0 +1,122 @@
+name: Publish Existing Artifacts to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'GitHub Actions Run ID containing the artifacts to publish'
+        required: true
+        type: string
+
+env:
+  MATURIN_PROFILE: release
+
+jobs:
+  publish-existing:
+    name: Publish Existing Artifacts to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Download all wheel artifacts from run
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          pattern: wheel-*
+          merge-multiple: true
+          path: artifacts/wheels
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download sdist artifact from run
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          pattern: sdist
+          merge-multiple: true
+          path: artifacts/sdist
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Combine artifacts
+        shell: bash
+        run: |
+          set -e
+          
+          # Debug: Show what we downloaded
+          echo "=== Artifacts structure ==="
+          find artifacts -type f -o -type d 2>/dev/null | sort || true
+          echo ""
+          
+          # Create clean dist directory
+          mkdir -p dist
+          
+          # Copy wheels from artifacts directory (handle all possible structures)
+          echo "=== Copying wheels ==="
+          find artifacts -name "*.whl" -type f -exec cp -v {} dist/ \; || true
+          
+          # Copy sdist from artifacts directory (handle all possible structures)
+          echo "=== Copying sdist ==="
+          find artifacts -name "*.tar.gz" -type f -exec cp -v {} dist/ \; || true
+          
+          # Verify we have files
+          echo ""
+          echo "=== Final dist contents ==="
+          ls -lah dist/ || echo "dist/ is empty or doesn't exist"
+          echo ""
+          echo "=== Distribution files ==="
+          find dist -type f \( -name "*.whl" -o -name "*.tar.gz" \) 2>/dev/null | sort || echo "No files found"
+          echo ""
+          
+          # Count files
+          WHEEL_COUNT=$(find dist -name "*.whl" -type f 2>/dev/null | wc -l || echo "0")
+          SDIST_COUNT=$(find dist -name "*.tar.gz" -type f 2>/dev/null | wc -l || echo "0")
+          echo "Wheels: $WHEEL_COUNT"
+          echo "Source distributions: $SDIST_COUNT"
+          
+          if [ "$WHEEL_COUNT" -eq 0 ] && [ "$SDIST_COUNT" -eq 0 ]; then
+            echo "ERROR: No distribution files found in dist/!"
+            echo "Checking artifacts directory:"
+            find artifacts -type f 2>/dev/null || true
+            exit 1
+          fi
+          
+          echo "✅ Successfully prepared $((WHEEL_COUNT + SDIST_COUNT)) distribution files"
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -e
+          pip install twine
+          
+          # Check if we have files to upload
+          echo "=== Files to upload ==="
+          ls -lah dist/
+          echo ""
+          
+          # Verify token is set (without exposing it)
+          if [ -z "$TWINE_PASSWORD" ]; then
+            echo "ERROR: PYPI_API_TOKEN secret is not set!"
+            exit 1
+          fi
+          
+          echo "✅ PyPI token is configured"
+          echo ""
+          
+          # Upload with verbose output for debugging
+          echo "=== Uploading to PyPI ==="
+          twine upload dist/* --verbose || {
+            echo ""
+            echo "❌ Upload failed. Common issues:"
+            echo "  1. Package version already exists on PyPI"
+            echo "  2. Invalid or expired PyPI API token"
+            echo "  3. Network/authentication error"
+            echo ""
+            echo "Check PyPI: https://pypi.org/project/rapsqlite/"
+            exit 1
+          }
+          
+          echo ""
+          echo "✅ Successfully published to PyPI!"
+
