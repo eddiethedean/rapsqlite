@@ -1,10 +1,10 @@
-name: Publish Existing Artifacts to PyPI
+name: Publish Existing Wheels + Rebuild Sdist
 
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: 'GitHub Actions Run ID containing the artifacts to publish'
+        description: 'GitHub Actions Run ID containing the wheel artifacts to use'
         required: true
         type: string
 
@@ -12,14 +12,33 @@ env:
   MATURIN_PROFILE: release
 
 jobs:
-  publish-existing:
-    name: Publish Existing Artifacts to PyPI
+  publish-existing-rebuild-sdist:
+    name: Publish Existing Wheels + Rebuild Sdist
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
     steps:
-      - name: Download all wheel artifacts from run
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin
+
+      - name: Build sdist (with fixed metadata)
+        run: maturin sdist --out dist
+
+      - name: Download all wheel artifacts from existing run
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ inputs.run_id }}
@@ -28,35 +47,14 @@ jobs:
           path: artifacts/wheels
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download sdist artifact from run
-        uses: actions/download-artifact@v4
-        with:
-          run-id: ${{ inputs.run_id }}
-          pattern: sdist
-          merge-multiple: true
-          path: artifacts/sdist
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Combine artifacts
         shell: bash
         run: |
           set -e
           
-          # Debug: Show what we downloaded
-          echo "=== Artifacts structure ==="
-          find artifacts -type f -o -type d 2>/dev/null | sort || true
-          echo ""
-          
-          # Create clean dist directory
-          mkdir -p dist
-          
-          # Copy wheels from artifacts directory (handle all possible structures)
+          # Copy wheels from artifacts directory
           echo "=== Copying wheels ==="
           find artifacts -name "*.whl" -type f -exec cp -v {} dist/ \; || true
-          
-          # Copy sdist from artifacts directory (handle all possible structures)
-          echo "=== Copying sdist ==="
-          find artifacts -name "*.tar.gz" -type f -exec cp -v {} dist/ \; || true
           
           # Verify we have files
           echo ""
@@ -73,10 +71,10 @@ jobs:
           echo "Wheels: $WHEEL_COUNT"
           echo "Source distributions: $SDIST_COUNT"
           
-          if [ "$WHEEL_COUNT" -eq 0 ] && [ "$SDIST_COUNT" -eq 0 ]; then
-            echo "ERROR: No distribution files found in dist/!"
-            echo "Checking artifacts directory:"
-            find artifacts -type f 2>/dev/null || true
+          if [ "$WHEEL_COUNT" -eq 0 ] || [ "$SDIST_COUNT" -eq 0 ]; then
+            echo "ERROR: Missing distribution files!"
+            echo "Wheels found: $WHEEL_COUNT"
+            echo "Source distributions found: $SDIST_COUNT"
             exit 1
           fi
           
