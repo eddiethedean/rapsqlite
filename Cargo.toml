@@ -13,8 +13,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = { version = "0.20", features = ["extension-module"] }
+pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }
 tokio = { version = "1.35", features = ["full"] }
-# TODO: Add async-safe SQLite bindings
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite"] }
 
 [features]
 extension-module = ["pyo3/extension-module"]
