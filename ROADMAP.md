@@ -4,17 +4,22 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 
 ## Current Status
 
-**MVP Version (v0.0.1)** - Current limitations:
+**Current Version (v0.0.2)** - Current limitations:
 
-- Connection creates a new pool on every operation (extremely inefficient)
-- No connection pooling or reuse
 - No transaction support
 - No prepared statements or parameterized queries
-- Limited error handling and SQL error context
+- Limited SQL dialect support
 - All values returned as strings (limited type support)
 - No connection lifecycle management
 - Basic SQL execution only (execute, fetch_all)
 - Not yet a drop-in replacement for `aiosqlite`
+
+**Recent improvements (v0.0.2):**
+- ✅ Security fixes: Upgraded dependencies (pyo3 0.27, pyo3-async-runtimes 0.27, sqlx 0.8)
+- ✅ Connection pooling: Connection now reuses connection pool across operations (major performance improvement)
+- ✅ Input validation: Added path validation (non-empty, no null bytes)
+- ✅ Improved error handling: Enhanced error messages with database path and query context
+- ✅ Type stubs: Added `.pyi` type stubs for better IDE support and type checking
 
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
 
@@ -24,24 +29,24 @@ Focus: Fix critical performance issues, add essential features for production us
 
 ### Connection Management
 
-- **Connection pooling**
-  - Implement proper connection pool with configurable size
-  - Connection reuse across operations
-  - Pool lifecycle management
-  - Connection health checking and recovery
-  - Efficient pool initialization and shutdown
+- **Connection pooling** (partially complete - basic pooling implemented)
+  - ✅ Implement proper connection pool with configurable size (basic implementation)
+  - ✅ Connection reuse across operations
+  - ⏳ Pool lifecycle management (planned)
+  - ⏳ Connection health checking and recovery (planned)
+  - ✅ Efficient pool initialization and shutdown (lazy initialization)
 
-- **Connection lifecycle**
-  - Context manager support (`async with`)
-  - Explicit connection management
-  - Connection state tracking
-  - Proper resource cleanup
-  - Connection timeout handling
+- **Connection lifecycle** (planned)
+  - ⏳ Context manager support (`async with`) (planned)
+  - ✅ Explicit connection management
+  - ⏳ Connection state tracking (planned)
+  - ⏳ Proper resource cleanup (planned)
+  - ⏳ Connection timeout handling (planned)
 
-- **Performance fixes**
-  - Eliminate per-operation pool creation overhead
-  - Efficient connection acquisition and release
-  - Minimize connection churn
+- **Performance fixes** (complete)
+  - ✅ Eliminate per-operation pool creation overhead
+  - ✅ Efficient connection acquisition and release
+  - ✅ Minimize connection churn
 
 ### Transaction Support
 

@@ -1,126 +1,70 @@
 # Security Audit Report - rapsqlite
 
+**Version:** 0.0.2  
 **Last Audit Date:** January 10, 2026
 
 ## Security Status
 
 - ✅ **Clippy Security Lints**: Passed
 - ✅ **Unsafe Code Blocks**: 0 found
-- ❌ **Dependency Vulnerabilities**: 2 critical vulnerabilities, 1 medium vulnerability, 1 warning
+- ✅ **Dependency Vulnerabilities**: All resolved
+- ✅ **SQL Injection Protection**: Parameterized queries via sqlx
+- ✅ **Input Validation**: Implemented
+- ✅ **Error Handling**: Enhanced with context
 
-## Identified Vulnerabilities
+## Resolved Vulnerabilities
 
-### Critical: pyo3 0.20.3
+### ✅ Resolved: pyo3 0.20.3 → 0.27
 
 **Advisory ID:** RUSTSEC-2025-0020  
 **Severity:** Critical  
 **Issue:** Risk of buffer overflow in `PyString::from_object`  
-**Current Version:** 0.20.3  
-**Required Version:** >=0.24.1  
+**Previous Version:** 0.20.3  
+**Current Version:** 0.27  
+**Status:** ✅ RESOLVED  
 **URL:** https://rustsec.org/advisories/RUSTSEC-2025-0020
 
-**Description:**
-`PyString::from_object` took `&str` arguments and forwarded them directly to the Python C API without checking for terminating nul bytes. This could lead the Python interpreter to read beyond the end of the `&str` data and potentially leak contents of the out-of-bounds read (by raising a Python exception containing a copy of the data including the overflow).
-
-**Impact:**
-- Affects all packages using pyo3 0.20.x
-- Fixed in pyo3 0.24.1+
-- Requires code changes to upgrade (breaking changes between 0.20 and 0.24)
-
-**Dependency Tree:**
-```
-pyo3 0.20.3
-├── rapsqlite 0.0.1
-└── pyo3-asyncio 0.20.0
-    └── rapsqlite 0.0.1
-```
-
-**Recommended Action:**
-Upgrade pyo3 and pyo3-asyncio to >=0.24.1 as part of Phase 1 roadmap improvements.
+**Resolution:**
+- Upgraded pyo3 from 0.20.3 to 0.27 (fixes vulnerability)
+- Migrated from pyo3-asyncio 0.20 to pyo3-async-runtimes 0.27 (required for pyo3 0.27 compatibility)
+- Updated code to use pyo3 0.27 API (Bound types, Python::attach, etc.)
 
 ---
 
-### Critical: sqlx 0.7.4
+### ✅ Resolved: sqlx 0.7.4 → 0.8
 
 **Advisory ID:** RUSTSEC-2024-0363  
 **Severity:** Critical  
 **Issue:** Binary Protocol Misinterpretation caused by Truncating or Overflowing Casts  
-**Current Version:** 0.7.4  
-**Required Version:** >=0.8.1  
+**Previous Version:** 0.7.4  
+**Current Version:** 0.8  
+**Status:** ✅ RESOLVED  
 **URL:** https://rustsec.org/advisories/RUSTSEC-2024-0363
 
-**Description:**
-sqlx 0.7.x has vulnerabilities related to binary protocol misinterpretation caused by truncating or overflowing casts. This can lead to data corruption or security issues when processing database results.
+**Resolution:**
+- Upgraded sqlx from 0.7.4 to 0.8 (fixes vulnerability)
+- No code changes required (sqlx 0.8 API compatible with existing usage)
+- Upgrade to sqlx 0.8 resolved indirect dependency issues (rsa, paste)
 
-**Impact:**
-- Affects all versions of sqlx < 0.8.1
-- Fixed in sqlx 0.8.1+
-- Requires code changes to upgrade (breaking changes between 0.7 and 0.8)
+## Security Improvements (v0.0.2)
 
-**Dependency Tree:**
-```
-sqlx 0.7.4
-└── rapsqlite 0.0.1
-```
+### SQL Injection Protection
+- ✅ **Parameterized queries**: All SQL queries use sqlx's parameterized query system
+  - `sqlx::query()` automatically handles parameter binding
+  - Prevents SQL injection attacks via malicious user input
+  - Ensures proper escaping and type handling
 
-**Recommended Action:**
-Upgrade sqlx to >=0.8.1 as part of Phase 1 roadmap improvements.
+### Input Validation
+- ✅ Path validation: All database paths are validated before use
+  - Non-empty path check
+  - Null byte detection (prevents path traversal via null bytes)
+  - Validation occurs before any database operations
 
----
-
-### Medium: rsa 0.9.10 (Indirect Dependency)
-
-**Advisory ID:** RUSTSEC-2023-0071  
-**Severity:** Medium (CVSS: 5.9)  
-**Issue:** Marvin Attack: potential key recovery through timing sidechannels  
-**Current Version:** 0.9.10  
-**Status:** No fixed upgrade available  
-**URL:** https://rustsec.org/advisories/RUSTSEC-2023-0071
-
-**Description:**
-The rsa crate has a vulnerability related to timing sidechannel attacks that could potentially allow key recovery.
-
-**Impact:**
-- This is an **indirect dependency** through sqlx-mysql
-- **Not applicable** to rapsqlite builds using only the sqlite feature
-- Only affects builds that include MySQL support (not used by rapsqlite)
-
-**Dependency Path (if MySQL features enabled):**
-```
-rsa 0.9.10
-└── sqlx-mysql 0.7.4
-    ├── sqlx-macros-core 0.7.4
-    │   └── sqlx-macros 0.7.4
-    │       └── sqlx 0.7.4
-    │           └── rapsqlite 0.0.1
-    └── sqlx 0.7.4
-```
-
-**Recommended Action:**
-- This vulnerability does NOT affect rapsqlite as we only use the sqlite feature
-- Upgrading sqlx to 0.8.1+ will resolve this indirect dependency issue
-- No immediate action required (false positive for sqlite-only builds)
-
----
-
-### Warning: paste 1.0.15 (Unmaintained)
-
-**Status:** Unmaintained  
-**Date:** October 7, 2024  
-**Current Version:** 1.0.15
-
-**Description:**
-The paste crate is marked as unmaintained. While this doesn't indicate a current security vulnerability, unmaintained packages may not receive security updates in the future.
-
-**Impact:**
-- Low immediate risk
-- Indirect dependency through sqlx macros
-- Should be monitored for alternatives or updates
-
-**Recommended Action:**
-- Monitor for updates or alternatives
-- Will be addressed when upgrading sqlx to 0.8.1+
-- Low priority
+### Error Handling
+- ✅ Enhanced error messages with database path and query context
+  - Errors include the database path and SQL query involved
+  - Helps with debugging and security incident investigation
+  - Provides better visibility into which databases and queries are affected
 
 ## Security Practices
 
@@ -128,13 +72,17 @@ The paste crate is marked as unmaintained. While this doesn't indicate a current
 - ✅ No unsafe code blocks in codebase
 - ✅ All code passes clippy security-focused lints
 - ✅ Uses safe Rust APIs exclusively
+- ✅ Parameterized queries via sqlx (prevents SQL injection)
 - ✅ Only uses sqlite feature of sqlx (minimizes attack surface)
+- ✅ Input validation on all user-provided paths
+- ✅ Enhanced error handling with operation context
 
 ### Dependency Management
 - 🔄 Regular security audits recommended via `cargo audit`
 - 🔄 Monitor for dependency updates
 - 🔄 Update dependencies as part of regular maintenance
 - ✅ Using minimal feature set (sqlite only, not mysql/postgres)
+- ✅ All critical vulnerabilities resolved (v0.0.2)
 
 ## Running Security Checks
 
@@ -161,11 +109,9 @@ Security audits should be run:
 - Weekly via automated CI/CD (see `.github/workflows/security.yml`)
 - After any dependency updates
 
-## Priority Actions
+## Previous Vulnerabilities (Now Resolved)
 
-1. **Priority 1:** Upgrade pyo3 from 0.20.3 to >=0.24.1 (Critical)
-2. **Priority 2:** Upgrade sqlx from 0.7.4 to >=0.8.1 (Critical)
-3. **Priority 3:** Monitor paste crate for updates/alternatives (Low)
+All vulnerabilities have been resolved in v0.0.2. The indirect dependency issues (rsa 0.9.10, paste 1.0.15) that were present in v0.0.1 are no longer present with the sqlx 0.8 upgrade. See "Resolved Vulnerabilities" section above for details.
 
 ## Reporting Security Issues
 

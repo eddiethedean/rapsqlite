@@ -1,12 +1,29 @@
 #![allow(non_local_definitions)] // False positive from pyo3 macros
 
 use pyo3::prelude::*;
-use pyo3_asyncio::tokio::future_into_py;
+use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::{Row, SqlitePool};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Validate a file path for security and correctness.
+fn validate_path(path: &str) -> PyResult<()> {
+    if path.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Database path cannot be empty",
+        ));
+    }
+    if path.contains('\0') {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Database path cannot contain null bytes",
+        ));
+    }
+    Ok(())
+}
 
 /// Python bindings for rapsqlite - True async SQLite.
 #[pymodule]
-fn _rapsqlite(_py: Python, m: &PyModule) -> PyResult<()> {
+fn _rapsqlite(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Connection>()?;
     Ok(())
 }
@@ -15,57 +32,95 @@ fn _rapsqlite(_py: Python, m: &PyModule) -> PyResult<()> {
 #[pyclass]
 struct Connection {
     path: String,
+    pool: Arc<Mutex<Option<SqlitePool>>>,
 }
 
 #[pymethods]
 impl Connection {
     /// Create a new async SQLite connection.
     #[new]
-    fn new(path: String) -> Self {
-        Connection { path }
+    fn new(path: String) -> PyResult<Self> {
+        validate_path(&path)?;
+        Ok(Connection {
+            path,
+            pool: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// Execute a SQL query (does not return results).
-    fn execute(self_: PyRef<Self>, query: String) -> PyResult<PyObject> {
+    fn execute(self_: PyRef<Self>, query: String) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
-        Python::with_gil(|py| {
+        let pool = Arc::clone(&self_.pool);
+        Python::attach(|py| {
             let future = async move {
-                let pool = SqlitePool::connect(&format!("sqlite:{path}"))
+                // Get or create the pool
+                let pool_clone = {
+                    let mut pool_guard = pool.lock().await;
+                    if pool_guard.is_none() {
+                        *pool_guard = Some(
+                            SqlitePool::connect(&format!("sqlite:{path}"))
+                                .await
+                                .map_err(|e| {
+                                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                                        "Failed to connect to database at {}: {e}",
+                                        path
+                                    ))
+                                })?,
+                        );
+                    }
+                    pool_guard.as_ref().unwrap().clone()
+                };
+                // Use the cloned pool (releases lock immediately)
+                let query_clone = query.clone();
+                sqlx::query(&query)
+                    .execute(&pool_clone)
                     .await
                     .map_err(|e| {
                         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                            "Failed to connect: {e}"
+                            "Failed to execute query on database {}: {e}\nQuery: {}",
+                            path, query_clone
                         ))
                     })?;
-                sqlx::query(&query).execute(&pool).await.map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to execute query: {e}"
-                    ))
-                })?;
                 Ok(())
             };
-            future_into_py(py, future).map(|awaitable| awaitable.to_object(py))
+            future_into_py(py, future).map(|bound| bound.unbind())
         })
     }
 
     /// Fetch all rows from a SELECT query.
-    fn fetch_all(self_: PyRef<Self>, query: String) -> PyResult<PyObject> {
+    fn fetch_all(self_: PyRef<Self>, query: String) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
-        Python::with_gil(|py| {
+        let pool = Arc::clone(&self_.pool);
+        Python::attach(|py| {
             let future = async move {
-                let pool = SqlitePool::connect(&format!("sqlite:{path}"))
+                // Get or create the pool
+                let pool_clone = {
+                    let mut pool_guard = pool.lock().await;
+                    if pool_guard.is_none() {
+                        *pool_guard = Some(
+                            SqlitePool::connect(&format!("sqlite:{path}"))
+                                .await
+                                .map_err(|e| {
+                                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                                        "Failed to connect to database at {}: {e}",
+                                        path
+                                    ))
+                                })?,
+                        );
+                    }
+                    pool_guard.as_ref().unwrap().clone()
+                };
+                // Use the cloned pool (releases lock immediately)
+                let query_clone = query.clone();
+                let rows = sqlx::query(&query)
+                    .fetch_all(&pool_clone)
                     .await
                     .map_err(|e| {
                         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                            "Failed to connect: {e}"
+                            "Failed to fetch rows from database {}: {e}\nQuery: {}",
+                            path, query_clone
                         ))
                     })?;
-
-                let rows = sqlx::query(&query).fetch_all(&pool).await.map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to fetch rows: {e}"
-                    ))
-                })?;
 
                 let mut results = Vec::new();
                 for row in rows {
@@ -86,7 +141,7 @@ impl Connection {
                 }
                 Ok(results)
             };
-            future_into_py(py, future).map(|awaitable| awaitable.to_object(py))
+            future_into_py(py, future).map(|bound| bound.unbind())
         })
     }
 }

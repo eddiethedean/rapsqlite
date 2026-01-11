@@ -1,6 +1,6 @@
 [package]
 name = "rapsqlite"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 authors = ["RAP Project"]
 license = "MIT"
@@ -12,10 +12,10 @@ name = "rapsqlite"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.20", features = ["extension-module"] }
-pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }
+pyo3 = { version = "0.27", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 tokio = { version = "1.35", features = ["full"] }
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 
 [features]
 extension-module = ["pyo3/extension-module"]

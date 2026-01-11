@@ -2,7 +2,8 @@
 
 **True async SQLite — no fake async, no GIL stalls.**
 
-[![PyPI version](https://badge.fury.io/py/rapsqlite.svg)](https://badge.fury.io/py/rapsqlite)
+[![PyPI version](https://img.shields.io/pypi/v/rapsqlite.svg)](https://pypi.org/project/rapsqlite/)
+[![Downloads](https://pepy.tech/badge/rapsqlite)](https://pepy.tech/project/rapsqlite)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -188,17 +189,22 @@ See [ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/main/ROADMAP.md)
 - [rapfiles](https://github.com/eddiethedean/rapfiles) - True async filesystem I/O
 - [rapcsv](https://github.com/eddiethedean/rapcsv) - Streaming async CSV
 
-## Limitations (MVP v0.0.1)
+## Limitations (v0.0.2)
 
-**Current MVP limitations:**
-- Connection creates a new pool on every operation (extremely inefficient)
-- No connection pooling or reuse
+**Current limitations:**
 - No transaction support
 - No prepared statements or parameterized queries
-- Limited error handling and SQL error context
+- Limited SQL dialect support
 - All values returned as strings (limited type support)
 - Not yet a drop-in replacement for `aiosqlite` (goal for Phase 1)
 - Not designed for synchronous use cases
+
+**Recent improvements (v0.0.2):**
+- ✅ Security fixes: Upgraded dependencies (pyo3 0.27, pyo3-async-runtimes 0.27, sqlx 0.8)
+- ✅ Connection pooling: Connection now reuses connection pool across operations (major performance improvement)
+- ✅ Input validation: Added path validation (non-empty, no null bytes)
+- ✅ Improved error handling: Enhanced error messages with database path and query context
+- ✅ Type stubs: Added `.pyi` type stubs for better IDE support and type checking
 
 **Roadmap**: See [ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/main/ROADMAP.md) for planned improvements. Our goal is to achieve drop-in replacement compatibility with `aiosqlite` while providing true async performance with GIL-independent database operations.
 
