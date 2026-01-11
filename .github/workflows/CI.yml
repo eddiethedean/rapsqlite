@@ -51,7 +51,7 @@ jobs:
     - name: Test package import
       shell: bash
       run: |
-        python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
+        cd /tmp && python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
 
     - name: Run tests
       shell: bash
