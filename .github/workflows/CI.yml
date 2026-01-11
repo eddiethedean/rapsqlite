@@ -44,10 +44,18 @@ jobs:
       shell: bash
       run: pip install target/wheels/rapsqlite-*.whl --force-reinstall
 
+    - name: Install test dependencies
+      shell: bash
+      run: pip install pytest pytest-asyncio
+
     - name: Test package import
       shell: bash
       run: |
         python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
+
+    - name: Run tests
+      shell: bash
+      run: pytest test_rapsqlite.py -v
 
   lint:
     name: Lint
