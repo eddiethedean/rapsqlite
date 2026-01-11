@@ -3,6 +3,7 @@
 import pytest
 import tempfile
 import os
+import sys
 
 from rapsqlite import Connection
 
@@ -20,7 +21,15 @@ async def test_create_table():
         assert os.path.exists(test_db), "Database file should exist"
     finally:
         if os.path.exists(test_db):
-            os.unlink(test_db)
+            try:
+                os.unlink(test_db)
+            except (PermissionError, OSError):
+                # On Windows, database files may still be locked by SQLite
+                # This is a cleanup issue, not a test failure
+                if sys.platform == "win32":
+                    pass
+                else:
+                    raise
 
 
 @pytest.mark.asyncio
@@ -42,7 +51,15 @@ async def test_insert_data():
         )
     finally:
         if os.path.exists(test_db):
-            os.unlink(test_db)
+            try:
+                os.unlink(test_db)
+            except (PermissionError, OSError):
+                # On Windows, database files may still be locked by SQLite
+                # This is a cleanup issue, not a test failure
+                if sys.platform == "win32":
+                    pass
+                else:
+                    raise
 
 
 @pytest.mark.asyncio
@@ -68,7 +85,15 @@ async def test_fetch_all():
         assert len(rows[0]) == 3, f"Expected 3 columns, got {len(rows[0])}"
     finally:
         if os.path.exists(test_db):
-            os.unlink(test_db)
+            try:
+                os.unlink(test_db)
+            except (PermissionError, OSError):
+                # On Windows, database files may still be locked by SQLite
+                # This is a cleanup issue, not a test failure
+                if sys.platform == "win32":
+                    pass
+                else:
+                    raise
 
 
 @pytest.mark.asyncio
@@ -94,7 +119,15 @@ async def test_fetch_all_with_filter():
         assert rows[0][1] == "Alice", f"Expected name 'Alice', got '{rows[0][1]}'"
     finally:
         if os.path.exists(test_db):
-            os.unlink(test_db)
+            try:
+                os.unlink(test_db)
+            except (PermissionError, OSError):
+                # On Windows, database files may still be locked by SQLite
+                # This is a cleanup issue, not a test failure
+                if sys.platform == "win32":
+                    pass
+                else:
+                    raise
 
 
 @pytest.mark.asyncio
@@ -125,7 +158,15 @@ async def test_multiple_operations():
         assert rows[0][1] == "100", f"Expected value '100', got '{rows[0][1]}'"
     finally:
         if os.path.exists(test_db):
-            os.unlink(test_db)
+            try:
+                os.unlink(test_db)
+            except (PermissionError, OSError):
+                # On Windows, database files may still be locked by SQLite
+                # This is a cleanup issue, not a test failure
+                if sys.platform == "win32":
+                    pass
+                else:
+                    raise
 
 
 @pytest.mark.asyncio
@@ -142,4 +183,12 @@ async def test_empty_result():
         assert len(rows) == 0, f"Expected 0 rows, got {len(rows)}"
     finally:
         if os.path.exists(test_db):
-            os.unlink(test_db)
+            try:
+                os.unlink(test_db)
+            except (PermissionError, OSError):
+                # On Windows, database files may still be locked by SQLite
+                # This is a cleanup issue, not a test failure
+                if sys.platform == "win32":
+                    pass
+                else:
+                    raise
