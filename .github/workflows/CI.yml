@@ -55,7 +55,9 @@ jobs:
 
     - name: Run tests
       shell: bash
-      run: pytest test_rapsqlite.py -v
+      run: |
+        cd /tmp
+        python -m pytest "${{ github.workspace }}/test_rapsqlite.py" -v
 
   lint:
     name: Lint
