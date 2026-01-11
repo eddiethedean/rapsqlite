@@ -31,7 +31,6 @@ dependencies = []
 module-name = "rapsqlite._rapsqlite"
 features = ["pyo3/extension-module"]
 
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["."]
