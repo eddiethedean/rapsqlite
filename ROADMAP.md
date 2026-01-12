@@ -4,22 +4,29 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 
 ## Current Status
 
-**Current Version (v0.0.2)** - Current limitations:
+**Current Version (v0.1.0)** - Phase 1 in progress:
 
-- No transaction support
-- No prepared statements or parameterized queries
-- Limited SQL dialect support
-- All values returned as strings (limited type support)
-- No connection lifecycle management
-- Basic SQL execution only (execute, fetch_all)
-- Not yet a drop-in replacement for `aiosqlite`
+**Phase 1 Complete:**
+- ✅ Connection lifecycle management (async context managers)
+- ✅ Transaction support (begin, commit, rollback)
+- ✅ Type system improvements (proper Python types: int, float, str, bytes, None)
+- ✅ Enhanced error handling (custom exception classes matching aiosqlite)
+- ✅ API improvements (fetch_one, fetch_optional, execute_many, last_insert_rowid, changes)
+- ✅ Cursor API (execute, executemany, fetchone, fetchall, fetchmany)
+- ✅ aiosqlite compatibility (connect function, exception types)
+- ✅ Connection pooling (basic implementation with reuse)
+- ✅ Input validation and security improvements
+- ✅ Type stubs for IDE support
 
-**Recent improvements (v0.0.2):**
-- ✅ Security fixes: Upgraded dependencies (pyo3 0.27, pyo3-async-runtimes 0.27, sqlx 0.8)
-- ✅ Connection pooling: Connection now reuses connection pool across operations (major performance improvement)
-- ✅ Input validation: Added path validation (non-empty, no null bytes)
-- ✅ Improved error handling: Enhanced error messages with database path and query context
-- ✅ Type stubs: Added `.pyi` type stubs for better IDE support and type checking
+**Remaining for Phase 1:**
+- ⏳ Parameterized queries (placeholder implemented, full support in Phase 2)
+- ⏳ Cursor.fetchmany() size-based slicing (currently returns all rows)
+- ⏳ Complete aiosqlite drop-in replacement (some advanced features missing)
+- ⏳ Pool lifecycle management (advanced features)
+- ⏳ Connection health checking and recovery
+- ⏳ Transaction context managers
+- ⏳ Row factory compatibility
+- ⏳ Complete aiosqlite test suite validation
 
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
 
@@ -29,108 +36,118 @@ Focus: Fix critical performance issues, add essential features for production us
 
 ### Connection Management
 
-- **Connection pooling** (partially complete - basic pooling implemented)
+- **Connection pooling** ✅ (complete - basic implementation)
   - ✅ Implement proper connection pool with configurable size (basic implementation)
   - ✅ Connection reuse across operations
+  - ✅ Efficient pool initialization and shutdown (lazy initialization)
   - ⏳ Pool lifecycle management (planned)
   - ⏳ Connection health checking and recovery (planned)
-  - ✅ Efficient pool initialization and shutdown (lazy initialization)
 
-- **Connection lifecycle** (planned)
-  - ⏳ Context manager support (`async with`) (planned)
+- **Connection lifecycle** ✅ (complete - basic implementation)
+  - ✅ Context manager support (`async with`)
   - ✅ Explicit connection management
+  - ✅ Proper resource cleanup
   - ⏳ Connection state tracking (planned)
-  - ⏳ Proper resource cleanup (planned)
   - ⏳ Connection timeout handling (planned)
 
-- **Performance fixes** (complete)
+- **Performance fixes** ✅ (complete)
   - ✅ Eliminate per-operation pool creation overhead
   - ✅ Efficient connection acquisition and release
   - ✅ Minimize connection churn
 
 ### Transaction Support
 
-- **Basic transactions**
-  - `begin()`, `commit()`, `rollback()` methods
-  - Transaction context managers
-  - Nested transaction handling (savepoints)
-  - Transaction isolation level configuration
+- **Basic transactions** ✅ (complete - basic implementation)
+  - ✅ `begin()`, `commit()`, `rollback()` methods
+  - ✅ Transaction state tracking
+  - ⏳ Transaction context managers (planned)
+  - ⏳ Nested transaction handling (savepoints) (planned)
+  - ⏳ Transaction isolation level configuration (planned)
 
-- **Error handling in transactions**
-  - Automatic rollback on errors
-  - Transaction state management
-  - Deadlock detection and handling
+- **Error handling in transactions** ✅ (complete - basic implementation)
+  - ✅ Automatic rollback on connection close
+  - ✅ Transaction state management
+  - ⏳ Deadlock detection and handling (planned)
 
 ### Type System Improvements
 
-- **Better type handling**
-  - Preserve SQLite types (INTEGER, REAL, TEXT, BLOB, NULL)
-  - Type conversion utilities
-  - Optional type hints for Python types
-  - Binary data (BLOB) support
+- **Better type handling** ✅ (complete)
+  - ✅ Preserve SQLite types (INTEGER, REAL, TEXT, BLOB, NULL)
+  - ✅ Type conversion to Python types (int, float, str, bytes, None)
+  - ✅ Binary data (BLOB) support
+  - ⏳ Optional type hints for Python types (planned)
+  - ⏳ Type conversion utilities (planned)
 
-- **Return value improvements**
-  - Return proper Python types where appropriate
-  - Configurable type conversion
-  - Type inference from schema
-  - Date/time type handling
+- **Return value improvements** ✅ (complete - basic implementation)
+  - ✅ Return proper Python types where appropriate
+  - ⏳ Configurable type conversion (planned)
+  - ⏳ Type inference from schema (planned)
+  - ⏳ Date/time type handling (planned)
 
 ### Enhanced Error Handling
 
-- **SQL-specific errors**
-  - SQL syntax error detection and reporting
-  - Constraint violation errors
-  - Database locked errors with context
-  - Better error messages with SQL context
-  - Error code mapping
+- **SQL-specific errors** ✅ (complete)
+  - ✅ SQL syntax error detection and reporting
+  - ✅ Constraint violation errors (IntegrityError)
+  - ✅ Better error messages with SQL context
+  - ✅ Error code mapping to Python exceptions
+  - ⏳ Database locked errors with context (basic support, enhanced planned)
 
-- **Connection errors**
-  - Database file errors
-  - Permission errors
-  - Connection timeout errors
-  - Recovery strategies
+- **Connection errors** ✅ (complete - basic implementation)
+  - ✅ Database file errors
+  - ✅ Permission errors (via OperationalError)
+  - ⏳ Connection timeout errors (planned)
+  - ⏳ Recovery strategies (planned)
 
 ### API Improvements
 
-- **Query methods**
-  - `fetch_one()` - fetch single row
-  - `fetch_optional()` - fetch one row or None
-  - `execute_many()` - execute multiple statements
-  - `last_insert_rowid()` - get last insert ID
-  - `changes()` - get number of affected rows
+- **Query methods** ✅ (complete)
+  - ✅ `fetch_one()` - fetch single row
+  - ✅ `fetch_optional()` - fetch one row or None
+  - ✅ `execute_many()` - execute multiple statements (placeholder, parameter binding in Phase 2)
+  - ✅ `last_insert_rowid()` - get last insert ID
+  - ✅ `changes()` - get number of affected rows
 
-- **API stability**
-  - Consistent error handling patterns
-  - Resource management guarantees
-  - Thread-safety documentation
-  - Performance characteristics documented
+- **API stability** ✅ (complete - basic implementation)
+  - ✅ Consistent error handling patterns
+  - ✅ Resource management guarantees
+  - ⏳ Thread-safety documentation (planned)
+  - ⏳ Performance characteristics documented (planned)
 
 ### API Compatibility for Drop-In Replacement
 
-- **aiosqlite API compatibility**
-  - Match `aiosqlite.Connection` and `aiosqlite.Cursor` APIs
-  - Compatible connection factory pattern (`aiosqlite.connect()`)
-  - Matching method signatures (`execute()`, `executemany()`, `fetchone()`, `fetchall()`, `fetchmany()`)
-  - Compatible transaction methods (`commit()`, `rollback()`, `execute()` in transaction context)
-  - Matching exception types (`Error`, `Warning`, `DatabaseError`, `OperationalError`, etc.)
-  - Compatible context manager behavior for connections and cursors
-  - Row factory compatibility (`row_factory` parameter)
-  - Drop-in replacement validation: `import rapsqlite as aiosqlite` compatibility tests
+- **aiosqlite API compatibility** ✅ (mostly complete)
+  - ✅ Match `aiosqlite.Connection` core API
+  - ✅ Match `aiosqlite.Cursor` core API
+  - ✅ Compatible connection factory pattern (`connect()`)
+  - ✅ Matching method signatures (`execute()`, `executemany()`, `fetchone()`, `fetchall()`, `fetchmany()`)
+  - ✅ Compatible transaction methods (`commit()`, `rollback()`, `begin()`)
+  - ✅ Matching exception types (`Error`, `Warning`, `DatabaseError`, `OperationalError`, `ProgrammingError`, `IntegrityError`)
+  - ✅ Compatible context manager behavior for connections and cursors
+  - ⏳ Row factory compatibility (`row_factory` parameter) (planned)
+  - ⏳ Drop-in replacement validation: `import rapsqlite as aiosqlite` compatibility tests (planned)
 
-- **Migration support**
-  - Compatibility shim/adapter layer if needed for exact API matching
-  - Migration guide documenting any differences
-  - Backward compatibility considerations
-  - Support for common aiosqlite patterns and idioms
+- **Migration support** ⏳ (planned)
+  - ⏳ Compatibility shim/adapter layer if needed for exact API matching
+  - ⏳ Migration guide documenting any differences
+  - ⏳ Backward compatibility considerations
+  - ⏳ Support for common aiosqlite patterns and idioms
 
 ### Testing & Validation
 
-- Comprehensive test suite covering edge cases
-- Fake Async Detector validation passes under load
-- **Pass 100% of aiosqlite test suite** as drop-in replacement validation
-- Drop-in replacement compatibility tests (can swap `aiosqlite` → `rapsqlite` without code changes)
-- Benchmark comparison with existing async SQLite libraries
-- Documentation improvements including migration guide
+- **Testing** ✅ (complete - basic test suite)
+  - ✅ Comprehensive test suite covering core features
+  - ✅ Type conversion tests
+  - ✅ Transaction tests
+  - ✅ Error handling tests
+  - ✅ Cursor API tests
+  - ✅ Context manager tests
+  - ⏳ Complete edge case coverage (in progress)
+  - ⏳ Fake Async Detector validation passes under load (planned)
+  - ⏳ Pass 100% of aiosqlite test suite as drop-in replacement validation (planned)
+  - ⏳ Drop-in replacement compatibility tests (planned)
+  - ⏳ Benchmark comparison with existing async SQLite libraries (planned)
+  - ⏳ Documentation improvements including migration guide (planned)
 
 ## Phase 2 — Expansion
 
@@ -149,11 +166,16 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
   - Positional parameters (`?`, `?1`, `?2`)
   - Type-safe parameter binding
   - Array parameter binding for IN clauses
+  - Complete `execute_many()` implementation with parameter binding
 
 - **Query building utilities**
   - Helper functions for common query patterns
   - Query result mapping utilities
   - Optional ORM-like convenience methods
+
+- **Cursor improvements**
+  - Complete `fetchmany()` size-based slicing implementation
+  - Cursor state management improvements
 
 ### Advanced SQLite Features
 
@@ -190,6 +212,7 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
   - Connection timeout settings
   - Idle connection management
   - Pool monitoring and metrics
+  - Pool lifecycle management
 
 ### Concurrent Operations
 
@@ -224,6 +247,7 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
 - **Additional API compatibility**
   - Maintain and refine aiosqlite drop-in replacement (achieved in Phase 1)
   - Enhanced compatibility features beyond core aiosqlite API
+  - Row factory compatibility
   - Migration guides from other libraries (sqlite3, etc.)
   - Compatibility shims for common patterns and idioms
   - Python 3.14 support (wheels and CI builds)
@@ -317,7 +341,7 @@ Focus: Advanced features, ecosystem integration, and query optimization.
   - Multi-database transaction support
 
 - **Testing & Development**
-  - In-memory database support
+  - In-memory database support (basic support exists, enhanced planned)
   - Testing utilities and fixtures
   - Database mocking for tests
   - Migration testing tools
@@ -340,13 +364,13 @@ Focus: Advanced features, ecosystem integration, and query optimization.
 
 ## Cross-Package Dependencies
 
-- **Phase 1**: Independent development, minimal dependencies
+- **Phase 1**: ✅ Independent development, minimal dependencies (complete)
 - **Phase 2**: Potential integration with `rapfiles` for database file operations, `rapcsv` for import/export patterns
 - **Phase 3**: Integration with `rap-core` for shared primitives, serve as database foundation for rap ecosystem
 
 ## Success Criteria
 
-- **Phase 1**: Connection pooling implemented, transactions supported, stable API, **drop-in replacement for aiosqlite**, passes 100% of aiosqlite test suite, passes Fake Async Detector under all load conditions
+- **Phase 1**: ✅ Connection pooling implemented, ✅ transactions supported, ✅ stable API, ⏳ **drop-in replacement for aiosqlite** (core features complete, advanced features in progress), ⏳ passes 100% of aiosqlite test suite, ⏳ passes Fake Async Detector under all load conditions
 - **Phase 2**: Feature-complete for common SQLite use cases, competitive performance benchmarks, excellent documentation, seamless migration from aiosqlite
 - **Phase 3**: Industry-leading performance, ecosystem integration, adoption as primary async SQLite library for Python and preferred aiosqlite alternative
 
@@ -357,3 +381,4 @@ Following semantic versioning:
 - `v1.0`: Stable API, Phase 1 complete, production-ready
 - `v1.x+`: Phase 2 and 3 features, backwards-compatible additions
 
+**Current Version: v0.1.0** - Phase 1 core features complete, advanced Phase 1 features in progress.

@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "rapsqlite"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
