@@ -3,7 +3,6 @@ name = "rapsqlite"
 version = "0.0.2"
 edition = "2021"
 authors = ["RAP Project"]
-license = "MIT"
 description = "True async SQLite — no fake async, no GIL stalls."
 repository = "https://github.com/eddiethedean/rapsqlite"
 

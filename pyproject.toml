@@ -30,7 +30,6 @@ dependencies = []
 [tool.maturin]
 module-name = "rapsqlite._rapsqlite"
 features = ["pyo3/extension-module"]
-license-files = []
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
