@@ -11,7 +11,7 @@
 
 `rapsqlite` provides true async SQLite operations for Python, backed by Rust, Tokio, and sqlx. Unlike libraries that wrap blocking database calls in `async` syntax, `rapsqlite` guarantees that all database operations execute **outside the Python GIL**, ensuring event loops never stall under load.
 
-**Roadmap Goal**: Achieve drop-in replacement compatibility with `aiosqlite`, enabling seamless migration with true async performance. See [ROADMAP.md](ROADMAP.md) for details.
+**Roadmap Goal**: Achieve drop-in replacement compatibility with `aiosqlite`, enabling seamless migration with true async performance. See [docs/ROADMAP.md](docs/ROADMAP.md) for details.
 
 ## Why `rap*`?
 
@@ -452,7 +452,7 @@ rap-bench detect rapsqlite
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for detailed development plans. Key goals include:
+See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals include:
 
 - ✅ Phase 1: Connection lifecycle, transactions, type system, error handling, cursor API (complete)
 - ⏳ Phase 2: Prepared statements and parameterized queries
@@ -488,7 +488,7 @@ See [ROADMAP.md](ROADMAP.md) for detailed development plans. Key goals include:
 - ✅ Improved error handling: Enhanced error messages with database path and query context
 - ✅ Type stubs: Added `.pyi` type stubs for better IDE support and type checking
 
-**Roadmap**: See [ROADMAP.md](ROADMAP.md) for planned improvements. Our goal is to achieve drop-in replacement compatibility with `aiosqlite` while providing true async performance with GIL-independent database operations.
+**Roadmap**: See [docs/ROADMAP.md](docs/ROADMAP.md) for planned improvements. Our goal is to achieve drop-in replacement compatibility with `aiosqlite` while providing true async performance with GIL-independent database operations.
 
 ## Contributing
 
