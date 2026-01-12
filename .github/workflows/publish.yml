@@ -217,7 +217,16 @@ jobs:
           pip install maturin
 
       - name: Build sdist
-        run: maturin sdist --out dist
+        run: |
+          # Temporarily rename LICENSE to prevent maturin from adding License-File metadata
+          if [ -f LICENSE ]; then
+            mv LICENSE LICENSE.tmp
+          fi
+          maturin sdist --out dist
+          # Restore LICENSE file
+          if [ -f LICENSE.tmp ]; then
+            mv LICENSE.tmp LICENSE
+          fi
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@v4
