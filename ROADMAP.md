@@ -226,6 +226,7 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
   - Enhanced compatibility features beyond core aiosqlite API
   - Migration guides from other libraries (sqlite3, etc.)
   - Compatibility shims for common patterns and idioms
+  - Python 3.14 support (wheels and CI builds)
 
 - **Framework integration**
   - Integration examples with web frameworks
