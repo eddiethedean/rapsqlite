@@ -1,6 +1,6 @@
 # Security Audit Report - rapsqlite
 
-**Version:** 0.0.2  
+**Version:** 0.1.0  
 **Last Audit Date:** January 10, 2026
 
 ## Security Status
@@ -46,7 +46,7 @@
 - No code changes required (sqlx 0.8 API compatible with existing usage)
 - Upgrade to sqlx 0.8 resolved indirect dependency issues (rsa, paste)
 
-## Security Improvements (v0.0.2)
+## Security Improvements (v0.1.0)
 
 ### SQL Injection Protection
 - ✅ **Parameterized queries**: All SQL queries use sqlx's parameterized query system
@@ -82,7 +82,7 @@
 - 🔄 Monitor for dependency updates
 - 🔄 Update dependencies as part of regular maintenance
 - ✅ Using minimal feature set (sqlite only, not mysql/postgres)
-- ✅ All critical vulnerabilities resolved (v0.0.2)
+- ✅ All critical vulnerabilities resolved (v0.1.0)
 
 ## Running Security Checks
 
@@ -111,7 +111,7 @@ Security audits should be run:
 
 ## Previous Vulnerabilities (Now Resolved)
 
-All vulnerabilities have been resolved in v0.0.2. The indirect dependency issues (rsa 0.9.10, paste 1.0.15) that were present in v0.0.1 are no longer present with the sqlx 0.8 upgrade. See "Resolved Vulnerabilities" section above for details.
+All vulnerabilities have been resolved in v0.1.0. The indirect dependency issues (rsa 0.9.10, paste 1.0.15) that were present in v0.0.1 are no longer present with the sqlx 0.8 upgrade. See "Resolved Vulnerabilities" section above for details.
 
 ## Reporting Security Issues
 
