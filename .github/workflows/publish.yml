@@ -138,9 +138,9 @@ jobs:
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: ${{ (matrix.python == '3.13') && '1' || '' }}
         run: |
-          # Temporarily rename LICENSE to prevent maturin from adding License-File metadata
+          # Temporarily hide LICENSE to prevent maturin from adding License-File metadata
           if [ -f LICENSE ]; then
-            mv LICENSE LICENSE.tmp
+            mv LICENSE .LICENSE.backup
           fi
           PYTHON_VER="${{ matrix.python }}"
           PYTHON_TAG="cp${PYTHON_VER//./}"
@@ -168,8 +168,8 @@ jobs:
               --interpreter /opt/python/\${PYTHON_TAG}-\${PYTHON_TAG}/bin/python
             "
           # Restore LICENSE file
-          if [ -f LICENSE.tmp ]; then
-            mv LICENSE.tmp LICENSE
+          if [ -f .LICENSE.backup ]; then
+            mv .LICENSE.backup LICENSE
           fi
 
       - name: Set up Python ${{ matrix.python }} (macOS/Windows)
@@ -194,14 +194,14 @@ jobs:
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: ${{ (matrix.python == '3.13') && '1' || '' }}
         run: |
-          # Temporarily rename LICENSE to prevent maturin from adding License-File metadata
+          # Temporarily hide LICENSE to prevent maturin from adding License-File metadata
           if [ -f LICENSE ]; then
-            mv LICENSE LICENSE.tmp
+            mv LICENSE .LICENSE.backup
           fi
           maturin build --out dist --strip --release
           # Restore LICENSE file
-          if [ -f LICENSE.tmp ]; then
-            mv LICENSE.tmp LICENSE
+          if [ -f .LICENSE.backup ]; then
+            mv .LICENSE.backup LICENSE
           fi
 
       - name: Upload wheel artifact
@@ -236,14 +236,14 @@ jobs:
 
       - name: Build sdist
         run: |
-          # Temporarily rename LICENSE to prevent maturin from adding License-File metadata
+          # Temporarily hide LICENSE to prevent maturin from adding License-File metadata
           if [ -f LICENSE ]; then
-            mv LICENSE LICENSE.tmp
+            mv LICENSE .LICENSE.backup
           fi
           maturin sdist --out dist
           # Restore LICENSE file
-          if [ -f LICENSE.tmp ]; then
-            mv LICENSE.tmp LICENSE
+          if [ -f .LICENSE.backup ]; then
+            mv .LICENSE.backup LICENSE
           fi
 
       - name: Upload sdist artifact
