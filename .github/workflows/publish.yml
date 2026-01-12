@@ -138,6 +138,10 @@ jobs:
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: ${{ (matrix.python == '3.13') && '1' || '' }}
         run: |
+          # Temporarily rename LICENSE to prevent maturin from adding License-File metadata
+          if [ -f LICENSE ]; then
+            mv LICENSE LICENSE.tmp
+          fi
           PYTHON_VER="${{ matrix.python }}"
           PYTHON_TAG="cp${PYTHON_VER//./}"
           if [ "${{ matrix.architecture }}" = "aarch64" ]; then
@@ -163,6 +167,10 @@ jobs:
               --manylinux 2_28 \
               --interpreter /opt/python/\${PYTHON_TAG}-\${PYTHON_TAG}/bin/python
             "
+          # Restore LICENSE file
+          if [ -f LICENSE.tmp ]; then
+            mv LICENSE.tmp LICENSE
+          fi
 
       - name: Set up Python ${{ matrix.python }} (macOS/Windows)
         if: matrix.os != 'ubuntu-latest'
@@ -184,7 +192,16 @@ jobs:
         if: matrix.os != 'ubuntu-latest'
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: ${{ (matrix.python == '3.13') && '1' || '' }}
-        run: maturin build --out dist --strip --release
+        run: |
+          # Temporarily rename LICENSE to prevent maturin from adding License-File metadata
+          if [ -f LICENSE ]; then
+            mv LICENSE LICENSE.tmp
+          fi
+          maturin build --out dist --strip --release
+          # Restore LICENSE file
+          if [ -f LICENSE.tmp ]; then
+            mv LICENSE.tmp LICENSE
+          fi
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
