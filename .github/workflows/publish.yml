@@ -134,7 +134,7 @@ jobs:
           platforms: arm64
 
       - name: Build wheel (Linux - manylinux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.python != '3.13'
         env:
           PYO3_USE_ABI3_FORWARD_COMPATIBILITY: ${{ (matrix.python == '3.13') && '1' || '' }}
         run: |
