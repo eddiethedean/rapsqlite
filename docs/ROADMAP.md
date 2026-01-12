@@ -255,8 +255,9 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
 
 - **Framework integration**
   - Integration examples with web frameworks
-  - ORM integration patterns (SQLAlchemy, etc.)
-  - Database migration tool integration
+  - ORM integration patterns (SQLAlchemy, Tortoise ORM, Peewee)
+  - Database migration tool integration (Alembic)
+  - Testing framework integration (pytest-asyncio patterns)
 
 ## Phase 3 — Ecosystem
 
@@ -294,15 +295,21 @@ Focus: Advanced features, ecosystem integration, and query optimization.
 
 - **ORM integration**
   - SQLAlchemy async driver support
+  - Tortoise ORM async SQLite backend
+  - Peewee async SQLite support
   - Custom ORM adapters
   - Query builder integrations
-  - Migration framework support
+  - Migration framework support (Alembic, etc.)
 
 - **Framework integrations**
   - FastAPI database dependencies
   - Django async database backend (if applicable)
   - aiohttp database patterns
-  - Background task queue integration
+  - Starlette async database integration
+  - Quart async database support
+  - Sanic async database patterns
+  - Background task queue integration (Celery, RQ, Dramatiq)
+  - Testing utilities (pytest-asyncio fixtures and patterns)
 
 ### Integration & Tooling
 
