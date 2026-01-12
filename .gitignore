@@ -113,3 +113,7 @@ dmypy.json
 *.sqlite3
 *.db-shm
 *.db-wal
+
+# Local testing artifacts
+test_artifacts/
+LICENSE.tmp
