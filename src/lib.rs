@@ -1,9 +1,9 @@
 #![allow(non_local_definitions)] // False positive from pyo3 macros
 
+use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyFloat, PyInt, PyList, PyString};
-use pyo3::create_exception;
 use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
@@ -263,9 +263,7 @@ impl Connection {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard == TransactionState::Active {
-                    return Err(OperationalError::new_err(
-                        "Transaction already in progress",
-                    ));
+                    return Err(OperationalError::new_err("Transaction already in progress"));
                 }
 
                 let pool_clone = {
@@ -306,18 +304,14 @@ impl Connection {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard != TransactionState::Active {
-                    return Err(OperationalError::new_err(
-                        "No transaction in progress",
-                    ));
+                    return Err(OperationalError::new_err("No transaction in progress"));
                 }
 
                 let pool_clone = {
                     let pool_guard = pool.lock().await;
                     pool_guard
                         .as_ref()
-                        .ok_or_else(|| {
-                            OperationalError::new_err("Connection pool not available")
-                        })?
+                        .ok_or_else(|| OperationalError::new_err("Connection pool not available"))?
                         .clone()
                 };
 
@@ -342,18 +336,14 @@ impl Connection {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard != TransactionState::Active {
-                    return Err(OperationalError::new_err(
-                        "No transaction in progress",
-                    ));
+                    return Err(OperationalError::new_err("No transaction in progress"));
                 }
 
                 let pool_clone = {
                     let pool_guard = pool.lock().await;
                     pool_guard
                         .as_ref()
-                        .ok_or_else(|| {
-                            OperationalError::new_err("Connection pool not available")
-                        })?
+                        .ok_or_else(|| OperationalError::new_err("Connection pool not available"))?
                         .clone()
                 };
 
