@@ -137,11 +137,17 @@ fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
 
 /// Python bindings for rapsqlite - True async SQLite.
 #[pymodule]
-fn _rapsqlite(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _rapsqlite(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Connection>()?;
     m.add_class::<Cursor>()?;
 
-    // Exception classes are automatically registered by create_exception! macro
+    // Register exception classes (required for create_exception! to be accessible from Python)
+    m.add("Error", py.get_type::<Error>())?;
+    m.add("Warning", py.get_type::<Warning>())?;
+    m.add("DatabaseError", py.get_type::<DatabaseError>())?;
+    m.add("OperationalError", py.get_type::<OperationalError>())?;
+    m.add("ProgrammingError", py.get_type::<ProgrammingError>())?;
+    m.add("IntegrityError", py.get_type::<IntegrityError>())?;
 
     Ok(())
 }
