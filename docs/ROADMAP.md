@@ -4,7 +4,7 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 
 ## Current Status
 
-**Current Version (v0.1.0)** - Phase 1 in progress:
+**Current Version (v0.1.1)** - Phase 1 in progress:
 
 **Phase 1 Complete:**
 - ✅ Connection lifecycle management (async context managers)
@@ -250,8 +250,8 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
   - Row factory compatibility
   - Migration guides from other libraries (sqlite3, etc.)
   - Compatibility shims for common patterns and idioms
-  - Python 3.13 support (wheels and CI builds) - pending pyo3 compatibility
-  - Python 3.14 support (wheels and CI builds)
+  - ✅ Python 3.13 support (wheels and CI builds) - complete in v0.1.1
+  - ⏳ Python 3.14 support (wheels and CI builds) - planned for future release
 
 - **Framework integration**
   - Integration examples with web frameworks
@@ -389,4 +389,4 @@ Following semantic versioning:
 - `v1.0`: Stable API, Phase 1 complete, production-ready
 - `v1.x+`: Phase 2 and 3 features, backwards-compatible additions
 
-**Current Version: v0.1.0** - Phase 1 core features complete, advanced Phase 1 features in progress.
+**Current Version: v0.1.1** - Phase 1 core features complete, advanced Phase 1 features in progress. Python 3.13 support added. Exception handling fixed for ABI3 compatibility.

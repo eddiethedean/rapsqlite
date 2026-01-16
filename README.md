@@ -37,7 +37,7 @@ See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philo
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.8+ (including Python 3.13)
 - Rust 1.70+ (for building from source)
 
 ## Installation
@@ -465,7 +465,40 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 - [rapfiles](https://github.com/eddiethedean/rapfiles) - True async filesystem I/O
 - [rapcsv](https://github.com/eddiethedean/rapcsv) - Streaming async CSV
 
-## Limitations (v0.1.0)
+## Changelog
+
+### v0.1.1 (2026-01-16)
+
+**Python 3.13 Support:**
+- ✅ Added Python 3.13 support with ABI3 forward compatibility
+- ✅ Updated CI/CD workflows to test and build for Python 3.13
+- ✅ Fixed exception handling for ABI3 compatibility (using `create_exception!` macro)
+- ✅ Explicitly registered exception classes in Python module
+
+**Bug Fixes:**
+- Fixed exception registration issue where exceptions created with `create_exception!` were not accessible from Python
+
+**Compatibility:**
+- Python 3.8 through 3.13 supported
+- All platforms: Ubuntu (x86-64, aarch64), macOS (aarch64, x86-64), Windows (x86-64, aarch64)
+
+### v0.1.0 (2025-01-12)
+
+**Initial Release - Phase 1 Complete:**
+- Connection lifecycle management (async context managers)
+- Transaction support (begin, commit, rollback)
+- Type system improvements (proper Python types: int, float, str, bytes, None)
+- Enhanced error handling (custom exception classes matching aiosqlite)
+- API improvements (fetch_one, fetch_optional, execute_many, last_insert_rowid, changes)
+- Cursor API (execute, executemany, fetchone, fetchall, fetchmany)
+- aiosqlite compatibility (connect function, exception types)
+- Security fixes: Upgraded dependencies (pyo3 0.27, pyo3-async-runtimes 0.27, sqlx 0.8)
+- Connection pooling: Connection reuses connection pool across operations
+- Input validation: Added path validation (non-empty, no null bytes)
+- Improved error handling: Enhanced error messages with database path and query context
+- Type stubs: Added `.pyi` type stubs for better IDE support and type checking
+
+## Limitations (v0.1.1)
 
 **Current limitations:**
 - ⏳ Parameterized queries not yet supported (placeholder for Phase 2)
@@ -474,7 +507,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 - ⏳ Not yet a complete drop-in replacement for `aiosqlite` (work in progress)
 - ⏳ Not designed for synchronous use cases
 
-**Phase 1 improvements (v0.1.0):**
+**Phase 1 improvements (v0.1.0 - v0.1.1):**
 - ✅ Connection lifecycle management (async context managers)
 - ✅ Transaction support (begin, commit, rollback)
 - ✅ Type system improvements (proper Python types: int, float, str, bytes, None)
@@ -498,6 +531,3 @@ Contributions are welcome! Please see our [contributing guidelines](https://gith
 
 MIT
 
-## Changelog
-
-See [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/main/CHANGELOG.md) (coming soon) for version history.
