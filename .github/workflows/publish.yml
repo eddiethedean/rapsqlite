@@ -34,6 +34,9 @@ jobs:
           - os: ubuntu-latest
             python: "3.12"
             architecture: x86-64
+          - os: ubuntu-latest
+            python: "3.13"
+            architecture: x86-64
           # Ubuntu ARM64 (aarch64)
           - os: ubuntu-latest
             python: "3.8"
@@ -49,6 +52,9 @@ jobs:
             architecture: aarch64
           - os: ubuntu-latest
             python: "3.12"
+            architecture: aarch64
+          - os: ubuntu-latest
+            python: "3.13"
             architecture: aarch64
           # macOS latest (typically arm64/Apple Silicon)
           - os: macos-latest
@@ -66,6 +72,9 @@ jobs:
           - os: macos-latest
             python: "3.12"
             architecture: aarch64
+          - os: macos-latest
+            python: "3.13"
+            architecture: aarch64
           # Windows x86-64
           - os: windows-latest
             python: "3.8"
@@ -81,6 +90,9 @@ jobs:
             architecture: x86-64
           - os: windows-latest
             python: "3.12"
+            architecture: x86-64
+          - os: windows-latest
+            python: "3.13"
             architecture: x86-64
           # macOS 15 Intel (x86-64)
           - os: macos-15-intel
@@ -98,12 +110,18 @@ jobs:
           - os: macos-15-intel
             python: "3.12"
             architecture: x86-64
+          - os: macos-15-intel
+            python: "3.13"
+            architecture: x86-64
           # Windows 11 ARM (aarch64)
           - os: windows-11-arm
             python: "3.11"
             architecture: aarch64
           - os: windows-11-arm
             python: "3.12"
+            architecture: aarch64
+          - os: windows-11-arm
+            python: "3.13"
             architecture: aarch64
     steps:
       - name: Checkout repository
@@ -117,6 +135,8 @@ jobs:
 
       - name: Build wheel (Linux - manylinux)
         if: matrix.os == 'ubuntu-latest'
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: ${{ (matrix.python == '3.13') && '1' || '' }}
         run: |
           # Temporarily hide LICENSE to prevent maturin from adding License-File metadata
           if [ -f LICENSE ]; then
@@ -132,6 +152,7 @@ jobs:
           docker run --rm \
             --platform linux/${{ matrix.architecture }} \
             -v "$PWD:/io" \
+            -e PYO3_USE_ABI3_FORWARD_COMPATIBILITY="${{ (matrix.python == '3.13') && '1' || '' }}" \
             -e PYTHON_TAG="${PYTHON_TAG}" \
             -w /io \
             ${DOCKER_IMAGE} \
@@ -170,6 +191,8 @@ jobs:
       - name: Build wheel (macOS/Windows)
         if: matrix.os != 'ubuntu-latest'
         shell: bash
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: ${{ (matrix.python == '3.13') && '1' || '' }}
         run: |
           # Temporarily hide LICENSE to prevent maturin from adding License-File metadata
           if [ -f LICENSE ]; then

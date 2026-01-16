@@ -3,10 +3,19 @@
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyFloat, PyInt, PyList, PyString};
+use pyo3::create_exception;
 use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+// Exception classes matching aiosqlite API (ABI3 compatible)
+create_exception!(_rapsqlite, Error, PyException);
+create_exception!(_rapsqlite, Warning, PyException);
+create_exception!(_rapsqlite, DatabaseError, PyException);
+create_exception!(_rapsqlite, OperationalError, PyException);
+create_exception!(_rapsqlite, ProgrammingError, PyException);
+create_exception!(_rapsqlite, IntegrityError, PyException);
 
 /// Validate a file path for security and correctness.
 fn validate_path(path: &str) -> PyResult<()> {
@@ -110,19 +119,19 @@ fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
                 || msg.contains("NOT NULL constraint")
                 || msg.contains("FOREIGN KEY constraint")
             {
-                PyErr::new::<IntegrityError, _>(error_msg)
+                IntegrityError::new_err(error_msg)
             } else if msg.contains("SQLITE_BUSY") || msg.contains("database is locked") {
-                PyErr::new::<OperationalError, _>(error_msg)
+                OperationalError::new_err(error_msg)
             } else {
-                PyErr::new::<DatabaseError, _>(error_msg)
+                DatabaseError::new_err(error_msg)
             }
         }
-        SqlxError::Protocol(_) | SqlxError::Io(_) => PyErr::new::<OperationalError, _>(error_msg),
+        SqlxError::Protocol(_) | SqlxError::Io(_) => OperationalError::new_err(error_msg),
         SqlxError::ColumnNotFound(_) | SqlxError::ColumnIndexOutOfBounds { .. } => {
-            PyErr::new::<ProgrammingError, _>(error_msg)
+            ProgrammingError::new_err(error_msg)
         }
-        SqlxError::Decode(_) => PyErr::new::<ProgrammingError, _>(error_msg),
-        _ => PyErr::new::<DatabaseError, _>(error_msg),
+        SqlxError::Decode(_) => ProgrammingError::new_err(error_msg),
+        _ => DatabaseError::new_err(error_msg),
     }
 }
 
@@ -132,118 +141,9 @@ fn _rapsqlite(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Connection>()?;
     m.add_class::<Cursor>()?;
 
-    // Register exception classes
-    m.add_class::<Error>()?;
-    m.add_class::<Warning>()?;
-    m.add_class::<DatabaseError>()?;
-    m.add_class::<OperationalError>()?;
-    m.add_class::<ProgrammingError>()?;
-    m.add_class::<IntegrityError>()?;
+    // Exception classes are automatically registered by create_exception! macro
 
     Ok(())
-}
-
-// Exception classes matching aiosqlite API
-#[pyclass(extends=PyException)]
-struct Error {
-    message: String,
-}
-
-#[pymethods]
-impl Error {
-    #[new]
-    fn new(message: String) -> Self {
-        Error { message }
-    }
-
-    fn __str__(&self) -> String {
-        self.message.clone()
-    }
-}
-
-#[pyclass(extends=PyException)]
-struct Warning {
-    message: String,
-}
-
-#[pymethods]
-impl Warning {
-    #[new]
-    fn new(message: String) -> Self {
-        Warning { message }
-    }
-
-    fn __str__(&self) -> String {
-        self.message.clone()
-    }
-}
-
-#[pyclass(extends=PyException)]
-struct DatabaseError {
-    message: String,
-}
-
-#[pymethods]
-impl DatabaseError {
-    #[new]
-    fn new(message: String) -> Self {
-        DatabaseError { message }
-    }
-
-    fn __str__(&self) -> String {
-        self.message.clone()
-    }
-}
-
-#[pyclass(extends=PyException)]
-struct OperationalError {
-    message: String,
-}
-
-#[pymethods]
-impl OperationalError {
-    #[new]
-    fn new(message: String) -> Self {
-        OperationalError { message }
-    }
-
-    fn __str__(&self) -> String {
-        self.message.clone()
-    }
-}
-
-#[pyclass(extends=PyException)]
-struct ProgrammingError {
-    message: String,
-}
-
-#[pymethods]
-impl ProgrammingError {
-    #[new]
-    fn new(message: String) -> Self {
-        ProgrammingError { message }
-    }
-
-    fn __str__(&self) -> String {
-        self.message.clone()
-    }
-}
-
-#[pyclass(extends=PyException)]
-struct IntegrityError {
-    message: String,
-}
-
-#[pymethods]
-impl IntegrityError {
-    #[new]
-    fn new(message: String) -> Self {
-        IntegrityError { message }
-    }
-
-    fn __str__(&self) -> String {
-        self.message.clone()
-    }
 }
 
 /// Transaction state tracking.
@@ -363,7 +263,7 @@ impl Connection {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard == TransactionState::Active {
-                    return Err(PyErr::new::<OperationalError, _>(
+                    return Err(OperationalError::new_err(
                         "Transaction already in progress",
                     ));
                 }
@@ -375,7 +275,7 @@ impl Connection {
                             SqlitePool::connect(&format!("sqlite:{}", path))
                                 .await
                                 .map_err(|e| {
-                                    PyErr::new::<OperationalError, _>(format!(
+                                    OperationalError::new_err(format!(
                                         "Failed to connect to database at {}: {e}",
                                         path
                                     ))
@@ -406,7 +306,7 @@ impl Connection {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard != TransactionState::Active {
-                    return Err(PyErr::new::<OperationalError, _>(
+                    return Err(OperationalError::new_err(
                         "No transaction in progress",
                     ));
                 }
@@ -416,7 +316,7 @@ impl Connection {
                     pool_guard
                         .as_ref()
                         .ok_or_else(|| {
-                            PyErr::new::<OperationalError, _>("Connection pool not available")
+                            OperationalError::new_err("Connection pool not available")
                         })?
                         .clone()
                 };
@@ -442,7 +342,7 @@ impl Connection {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard != TransactionState::Active {
-                    return Err(PyErr::new::<OperationalError, _>(
+                    return Err(OperationalError::new_err(
                         "No transaction in progress",
                     ));
                 }
@@ -452,7 +352,7 @@ impl Connection {
                     pool_guard
                         .as_ref()
                         .ok_or_else(|| {
-                            PyErr::new::<OperationalError, _>("Connection pool not available")
+                            OperationalError::new_err("Connection pool not available")
                         })?
                         .clone()
                 };
@@ -484,7 +384,7 @@ impl Connection {
                             SqlitePool::connect(&format!("sqlite:{}", path))
                                 .await
                                 .map_err(|e| {
-                                    PyErr::new::<OperationalError, _>(format!(
+                                    OperationalError::new_err(format!(
                                         "Failed to connect to database at {}: {e}",
                                         path
                                     ))
@@ -541,7 +441,7 @@ impl Connection {
                             SqlitePool::connect(&format!("sqlite:{}", path))
                                 .await
                                 .map_err(|e| {
-                                    PyErr::new::<OperationalError, _>(format!(
+                                    OperationalError::new_err(format!(
                                         "Failed to connect to database at {}: {e}",
                                         path
                                     ))
@@ -583,7 +483,7 @@ impl Connection {
                             SqlitePool::connect(&format!("sqlite:{}", path))
                                 .await
                                 .map_err(|e| {
-                                    PyErr::new::<OperationalError, _>(format!(
+                                    OperationalError::new_err(format!(
                                         "Failed to connect to database at {}: {e}",
                                         path
                                     ))
@@ -617,7 +517,7 @@ impl Connection {
                             SqlitePool::connect(&format!("sqlite:{}", path))
                                 .await
                                 .map_err(|e| {
-                                    PyErr::new::<OperationalError, _>(format!(
+                                    OperationalError::new_err(format!(
                                         "Failed to connect to database at {}: {e}",
                                         path
                                     ))
@@ -702,7 +602,7 @@ impl Cursor {
     /// Fetch one row.
     fn fetchone(&self) -> PyResult<Py<PyAny>> {
         if self.query.is_empty() {
-            return Err(PyErr::new::<ProgrammingError, _>("No query executed"));
+            return Err(ProgrammingError::new_err("No query executed"));
         }
         Python::attach(|py| {
             let conn = self.connection.bind(py);
@@ -714,7 +614,7 @@ impl Cursor {
     /// Fetch all rows.
     fn fetchall(&self) -> PyResult<Py<PyAny>> {
         if self.query.is_empty() {
-            return Err(PyErr::new::<ProgrammingError, _>("No query executed"));
+            return Err(ProgrammingError::new_err("No query executed"));
         }
         Python::attach(|py| {
             let conn = self.connection.bind(py);
@@ -729,7 +629,7 @@ impl Cursor {
     /// Proper size-based slicing will be implemented in Phase 2.
     fn fetchmany(&self, _size: Option<usize>) -> PyResult<Py<PyAny>> {
         if self.query.is_empty() {
-            return Err(PyErr::new::<ProgrammingError, _>("No query executed"));
+            return Err(ProgrammingError::new_err("No query executed"));
         }
         // For Phase 1, fetchmany just calls fetch_all
         // Proper implementation with slicing will be in Phase 2
