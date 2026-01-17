@@ -37,7 +37,7 @@ See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philo
 
 ## Requirements
 
-- Python 3.8+ (including Python 3.13)
+- Python 3.8+ (including Python 3.13 and 3.14)
 - Rust 1.70+ (for building from source)
 
 ## Installation
@@ -469,6 +469,10 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 
 ### v0.1.1 (2026-01-16)
 
+**Python 3.14 Support:**
+- ✅ Added Python 3.14 support with ABI3 forward compatibility
+- ✅ Updated CI/CD workflows to test and build for Python 3.14
+
 **Python 3.13 Support:**
 - ✅ Added Python 3.13 support with ABI3 forward compatibility
 - ✅ Updated CI/CD workflows to test and build for Python 3.13
@@ -479,7 +483,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 - Fixed exception registration issue where exceptions created with `create_exception!` were not accessible from Python
 
 **Compatibility:**
-- Python 3.8 through 3.13 supported
+- Python 3.8 through 3.14 supported
 - All platforms: Ubuntu (x86-64, aarch64), macOS (aarch64, x86-64), Windows (x86-64, aarch64)
 
 ### v0.1.0 (2025-01-12)
