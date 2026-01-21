@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyFloat, PyInt, PyList, PyString};
 use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::{Row, SqlitePool};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
 // Exception classes matching aiosqlite API (ABI3 compatible)
@@ -30,6 +30,54 @@ fn validate_path(path: &str) -> PyResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Parse SQLite connection string (URI format: file:path?param=value&param2=value2).
+/// Returns (database_path, vec of (param_name, param_value)).
+fn parse_connection_string(uri: &str) -> PyResult<(String, Vec<(String, String)>)> {
+    // Handle :memory: special case
+    if uri == ":memory:" {
+        return Ok((":memory:".to_string(), Vec::new()));
+    }
+    
+    // Check if it's a URI (starts with file:)
+    if uri.starts_with("file:") {
+        // Parse URI: file:path?param=value&param2=value2
+        let uri_part = &uri[5..]; // Skip "file:"
+        let (path_part, query_part) = if let Some(pos) = uri_part.find('?') {
+            (uri_part[..pos].to_string(), Some(&uri_part[pos + 1..]))
+        } else {
+            (uri_part.to_string(), None)
+        };
+        
+        let mut params = Vec::new();
+        if let Some(query) = query_part {
+            for param_pair in query.split('&') {
+                if let Some(equal_pos) = param_pair.find('=') {
+                    let key = param_pair[..equal_pos].to_string();
+                    let value = param_pair[equal_pos + 1..].to_string();
+                    params.push((key, value));
+                }
+            }
+        }
+        
+        // Decode URI-encoded path (basic support)
+        let decoded_path = if path_part.starts_with("///") {
+            // Absolute path: file:///path/to/db
+            path_part[2..].to_string()
+        } else if path_part.starts_with("//") {
+            // Network path: file://host/path (not commonly used for SQLite)
+            path_part.to_string()
+        } else {
+            // Relative path: file:db.sqlite
+            path_part
+        };
+        
+        Ok((decoded_path, params))
+    } else {
+        // Regular file path
+        Ok((uri.to_string(), Vec::new()))
+    }
 }
 
 /// Convert a SQLite value from sqlx Row to Python object.
@@ -101,6 +149,470 @@ fn row_to_py_list<'py>(
     Ok(list)
 }
 
+/// Convert a Python value to a SQLite-compatible value for binding.
+/// Returns a boxed value that can be used with sqlx query binding.
+enum SqliteParam {
+    Null,
+    Int(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+impl SqliteParam {
+    fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        // Check for None first
+        if value.is_none() {
+            return Ok(SqliteParam::Null);
+        }
+
+        // Try to extract as i64 (integer)
+        if let Ok(int_val) = value.extract::<i64>() {
+            return Ok(SqliteParam::Int(int_val));
+        }
+
+        // Try to extract as f64 (float)
+        if let Ok(float_val) = value.extract::<f64>() {
+            return Ok(SqliteParam::Real(float_val));
+        }
+
+        // Try to extract as String
+        if let Ok(str_val) = value.extract::<String>() {
+            return Ok(SqliteParam::Text(str_val));
+        }
+
+        // Try to extract as &str
+        if let Ok(str_val) = value.extract::<&str>() {
+            return Ok(SqliteParam::Text(str_val.to_string()));
+        }
+
+        // Try to extract as bytes (Vec<u8>)
+        if let Ok(bytes_val) = value.extract::<Vec<u8>>() {
+            return Ok(SqliteParam::Blob(bytes_val));
+        }
+
+        // Try to extract as PyBytes
+        if let Ok(py_bytes) = value.downcast::<PyBytes>() {
+            return Ok(SqliteParam::Blob(py_bytes.as_bytes().to_vec()));
+        }
+
+        // Try to extract as int (Python int)
+        if let Ok(py_int) = value.downcast::<PyInt>() {
+            if let Ok(int_val) = py_int.extract::<i64>() {
+                return Ok(SqliteParam::Int(int_val));
+            }
+            // For very large Python ints, convert to string
+            // SQLite can handle large integers as text, but we'll keep as int if possible
+            return Ok(SqliteParam::Text(py_int.to_string()));
+        }
+
+        // Try to extract as float
+        if let Ok(py_float) = value.downcast::<PyFloat>() {
+            if let Ok(float_val) = py_float.extract::<f64>() {
+                return Ok(SqliteParam::Real(float_val));
+            }
+        }
+
+        // Try to extract as string (PyString)
+        if let Ok(py_str) = value.downcast::<PyString>() {
+            return Ok(SqliteParam::Text(py_str.to_str()?.to_string()));
+        }
+
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            format!("Unsupported parameter type: {}. Use int, float, str, bytes, or None.", value.get_type().name()?),
+        ))
+    }
+}
+
+/// Parse named parameters from SQL query and convert to positional.
+/// Returns the processed query with ? placeholders and ordered parameter values.
+fn process_named_parameters(
+    query: &str,
+    dict: &Bound<'_, pyo3::types::PyDict>,
+) -> PyResult<(String, Vec<SqliteParam>)> {
+    let mut processed_query = query.to_string();
+    let mut param_values = Vec::new();
+    
+    // Find all named parameter placeholders in order of appearance
+    let mut param_placeholders: Vec<(usize, usize, String)> = Vec::new();
+    let query_chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+    
+    while i < query_chars.len() {
+        let ch = query_chars[i];
+        
+        // Check for :name, @name, or $name patterns
+        if (ch == ':' || ch == '@') && i + 1 < query_chars.len() && 
+           (query_chars[i + 1].is_alphabetic() || query_chars[i + 1] == '_') {
+            let start = i;
+            i += 1; // Skip the prefix
+            let mut name = String::new();
+            
+            while i < query_chars.len() {
+                let c = query_chars[i];
+                if c.is_alphanumeric() || c == '_' {
+                    name.push(c);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            
+            if !name.is_empty() {
+                param_placeholders.push((start, i, name));
+            }
+        } else if ch == '$' && i + 1 < query_chars.len() && 
+                  (query_chars[i + 1].is_alphabetic() || query_chars[i + 1] == '_') {
+            let start = i;
+            i += 1; // Skip the $
+            let mut name = String::new();
+            
+            while i < query_chars.len() {
+                let c = query_chars[i];
+                if c.is_alphanumeric() || c == '_' {
+                    name.push(c);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            
+            if !name.is_empty() {
+                param_placeholders.push((start, i, name));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    
+    // Replace named parameters with ? and collect values in order
+    // Process from end to start to avoid index shifting issues
+    for (start, end, name) in param_placeholders.into_iter().rev() {
+        if let Ok(Some(value)) = dict.get_item(name.as_str()) {
+            let sqlx_param = SqliteParam::from_py(&value)?;
+            param_values.push(sqlx_param);
+            
+            // Replace the named parameter with ?
+            processed_query.replace_range(start..end, "?");
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                format!("Missing parameter: {}", name),
+            ));
+        }
+    }
+    
+    // Reverse to get correct order (we processed backwards)
+    param_values.reverse();
+    
+    Ok((processed_query, param_values))
+}
+
+/// Process positional parameters from a list/tuple.
+fn process_positional_parameters(list: &Bound<'_, PyList>) -> PyResult<Vec<SqliteParam>> {
+    let mut param_values = Vec::new();
+    for item in list.iter() {
+        let param = SqliteParam::from_py(&item)?;
+        param_values.push(param);
+    }
+    Ok(param_values)
+}
+
+/// Bind parameters to a query and execute it.
+/// This helper binds parameters dynamically to a sqlx query builder.
+async fn bind_and_execute(
+    query: &str,
+    params: &[SqliteParam],
+    pool: &SqlitePool,
+    path: &str,
+) -> Result<sqlx::sqlite::SqliteQueryResult, PyErr> {
+    // Build query with bound parameters
+    // sqlx uses method chaining, so we need to handle this carefully
+    // For now, we'll use a match statement for common parameter counts
+    // and fall back to building the query string with embedded values for larger counts
+    
+    let result = match params.len() {
+        0 => sqlx::query(query).execute(pool).await,
+        1 => {
+            match &params[0] {
+                SqliteParam::Null => sqlx::query(query).bind(Option::<i64>::None).execute(pool).await,
+                SqliteParam::Int(v) => sqlx::query(query).bind(*v).execute(pool).await,
+                SqliteParam::Real(v) => sqlx::query(query).bind(*v).execute(pool).await,
+                SqliteParam::Text(v) => sqlx::query(query).bind(v.as_str()).execute(pool).await,
+                SqliteParam::Blob(v) => sqlx::query(query).bind(v.as_slice()).execute(pool).await,
+            }
+        }
+        _ => {
+            // For multiple parameters, we need to chain binds
+            // This is complex with sqlx's API, so we'll use a workaround:
+            // Build the query with parameters bound sequentially
+            // Since sqlx's bind chains are compile-time, we'll handle common cases
+            // and use a helper that builds the query properly
+            
+            // Actually, let's use sqlx's query builder more directly
+            // We can build a query by chaining binds - but we need to do this at compile time
+            // For dynamic binding, we'll need a different approach
+            
+            // Workaround: Use sqlx::query and bind parameters one by one in a helper macro
+            // or use a prepared statement approach
+            
+            // For now, let's handle up to 16 parameters (which should cover most cases)
+            // using a helper that chains binds
+            bind_query_multiple(query, params, pool).await
+        }
+    };
+    
+    result.map_err(|e| map_sqlx_error(e, path, query))
+}
+
+/// Macro to bind a chain of parameters to a query builder
+macro_rules! bind_chain {
+    ($query:expr, $params:expr, $($idx:expr),*) => {
+        {
+            let q = sqlx::query($query);
+            $(
+                let q = match &$params[$idx] {
+                    SqliteParam::Null => q.bind(Option::<i64>::None),
+                    SqliteParam::Int(v) => q.bind(*v),
+                    SqliteParam::Real(v) => q.bind(*v),
+                    SqliteParam::Text(v) => q.bind(v.as_str()),
+                    SqliteParam::Blob(v) => q.bind(v.as_slice()),
+                };
+            )*
+            q
+        }
+    };
+}
+
+/// Helper to bind multiple parameters to a query and execute it.
+/// Handles up to 16 parameters using explicit bind chains.
+async fn bind_query_multiple(
+    query: &str,
+    params: &[SqliteParam],
+    pool: &SqlitePool,
+) -> Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error> {
+    if params.is_empty() {
+        return sqlx::query(query).execute(pool).await;
+    }
+    
+    if params.len() > 16 {
+        return Err(sqlx::Error::Protocol(
+            format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+        ));
+    }
+    
+    // Match on parameter count and use the macro to generate the bind chain
+    let query_builder = match params.len() {
+        1 => bind_chain!(query, params, 0),
+        2 => bind_chain!(query, params, 0, 1),
+        3 => bind_chain!(query, params, 0, 1, 2),
+        4 => bind_chain!(query, params, 0, 1, 2, 3),
+        5 => bind_chain!(query, params, 0, 1, 2, 3, 4),
+        6 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5),
+        7 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6),
+        8 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7),
+        9 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8),
+        10 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        11 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        12 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        13 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        14 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+        15 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+        16 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+        _ => unreachable!(), // Already checked above
+    };
+    
+    query_builder.execute(pool).await
+}
+
+/// Helper to bind parameters and fetch all rows.
+async fn bind_and_fetch_all(
+    query: &str,
+    params: &[SqliteParam],
+    pool: &SqlitePool,
+    path: &str,
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, PyErr> {
+    if params.is_empty() {
+        return sqlx::query(query)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| map_sqlx_error(e, path, query));
+    }
+    
+    if params.len() > 16 {
+        return Err(map_sqlx_error(
+            sqlx::Error::Protocol(
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+            ),
+            path,
+            query,
+        ));
+    }
+    
+    let query_builder = match params.len() {
+        1 => bind_chain!(query, params, 0),
+        2 => bind_chain!(query, params, 0, 1),
+        3 => bind_chain!(query, params, 0, 1, 2),
+        4 => bind_chain!(query, params, 0, 1, 2, 3),
+        5 => bind_chain!(query, params, 0, 1, 2, 3, 4),
+        6 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5),
+        7 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6),
+        8 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7),
+        9 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8),
+        10 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        11 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        12 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        13 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        14 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+        15 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+        16 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+        _ => unreachable!(),
+    };
+    
+    query_builder
+        .fetch_all(pool)
+        .await
+        .map_err(|e| map_sqlx_error(e, path, query))
+}
+
+/// Helper to bind parameters and fetch one row.
+async fn bind_and_fetch_one(
+    query: &str,
+    params: &[SqliteParam],
+    pool: &SqlitePool,
+    path: &str,
+) -> Result<sqlx::sqlite::SqliteRow, PyErr> {
+    if params.is_empty() {
+        return sqlx::query(query)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| map_sqlx_error(e, path, query));
+    }
+    
+    if params.len() > 16 {
+        return Err(map_sqlx_error(
+            sqlx::Error::Protocol(
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+            ),
+            path,
+            query,
+        ));
+    }
+    
+    let query_builder = match params.len() {
+        1 => bind_chain!(query, params, 0),
+        2 => bind_chain!(query, params, 0, 1),
+        3 => bind_chain!(query, params, 0, 1, 2),
+        4 => bind_chain!(query, params, 0, 1, 2, 3),
+        5 => bind_chain!(query, params, 0, 1, 2, 3, 4),
+        6 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5),
+        7 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6),
+        8 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7),
+        9 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8),
+        10 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        11 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        12 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        13 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        14 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+        15 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+        16 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+        _ => unreachable!(),
+    };
+    
+    query_builder
+        .fetch_one(pool)
+        .await
+        .map_err(|e| map_sqlx_error(e, path, query))
+}
+
+/// Helper to bind parameters and fetch optional row.
+async fn bind_and_fetch_optional(
+    query: &str,
+    params: &[SqliteParam],
+    pool: &SqlitePool,
+    path: &str,
+) -> Result<Option<sqlx::sqlite::SqliteRow>, PyErr> {
+    if params.is_empty() {
+        return sqlx::query(query)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| map_sqlx_error(e, path, query));
+    }
+    
+    if params.len() > 16 {
+        return Err(map_sqlx_error(
+            sqlx::Error::Protocol(
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+            ),
+            path,
+            query,
+        ));
+    }
+    
+    let query_builder = match params.len() {
+        1 => bind_chain!(query, params, 0),
+        2 => bind_chain!(query, params, 0, 1),
+        3 => bind_chain!(query, params, 0, 1, 2),
+        4 => bind_chain!(query, params, 0, 1, 2, 3),
+        5 => bind_chain!(query, params, 0, 1, 2, 3, 4),
+        6 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5),
+        7 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6),
+        8 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7),
+        9 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8),
+        10 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        11 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        12 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        13 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        14 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+        15 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+        16 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+        _ => unreachable!(),
+    };
+    
+    query_builder
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| map_sqlx_error(e, path, query))
+}
+
+/// Helper to get or create pool and apply PRAGMAs.
+async fn get_or_create_pool(
+    path: &str,
+    pool: &Arc<Mutex<Option<SqlitePool>>>,
+    pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
+) -> Result<SqlitePool, PyErr> {
+    let mut pool_guard = pool.lock().await;
+    if pool_guard.is_none() {
+        let new_pool = SqlitePool::connect(&format!("sqlite:{}", path))
+            .await
+            .map_err(|e| {
+                OperationalError::new_err(format!(
+                    "Failed to connect to database at {}: {e}",
+                    path
+                ))
+            })?;
+        
+        // Apply PRAGMAs
+        let pragmas_list = {
+            let pragmas_guard = pragmas.lock().unwrap();
+            pragmas_guard.clone()
+        };
+        
+        for (name, value) in pragmas_list {
+            let pragma_query = format!("PRAGMA {} = {}", name, value);
+            sqlx::query(&pragma_query)
+                .execute(&new_pool)
+                .await
+                .map_err(|e| map_sqlx_error(e, path, &pragma_query))?;
+        }
+        
+        // TODO: Call init_hook if provided (requires proper async coroutine handling)
+        // This will be implemented in a follow-up optimization
+        
+        *pool_guard = Some(new_pool);
+    }
+    Ok(pool_guard.as_ref().unwrap().clone())
+}
+
 /// Map sqlx error to appropriate Python exception.
 fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
     use sqlx::Error as SqlxError;
@@ -167,20 +679,52 @@ struct Connection {
     transaction_state: Arc<Mutex<TransactionState>>,
     last_rowid: Arc<Mutex<i64>>,
     last_changes: Arc<Mutex<u64>>,
+    pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Store PRAGMA settings
+    init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
+    pool_size: Arc<StdMutex<Option<usize>>>, // Configurable pool size
+    connection_timeout_secs: Arc<StdMutex<Option<u64>>>, // Connection timeout in seconds
 }
 
 #[pymethods]
 impl Connection {
     /// Create a new async SQLite connection.
     #[new]
-    fn new(path: String) -> PyResult<Self> {
-        validate_path(&path)?;
+    #[pyo3(signature = (path, *, pragmas = None, init_hook = None))]
+    fn new(
+        path: String,
+        pragmas: Option<&Bound<'_, pyo3::types::PyDict>>,
+        init_hook: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        // Parse connection string if it's a URI
+        let (db_path, uri_params) = parse_connection_string(&path)?;
+        validate_path(&db_path)?;
+        
+        // Merge URI params with pragmas dict
+        let mut all_pragmas = Vec::new();
+        
+        // Add URI parameters
+        for (key, value) in uri_params {
+            all_pragmas.push((key, value));
+        }
+        
+        // Add pragmas from dict if provided
+        if let Some(pragmas_dict) = pragmas {
+            for item in pragmas_dict.iter() {
+                let (key, value) = item; // iter() returns tuples directly in pyo3 0.27
+                let key_str = key.extract::<String>()?;
+                let value_str = value.to_string();
+                all_pragmas.push((key_str, value_str));
+            }
+        }
+        
         Ok(Connection {
-            path,
+            path: db_path,
             pool: Arc::new(Mutex::new(None)),
             transaction_state: Arc::new(Mutex::new(TransactionState::None)),
             last_rowid: Arc::new(Mutex::new(0)),
             last_changes: Arc::new(Mutex::new(0)),
+            pragmas: Arc::new(StdMutex::new(all_pragmas)),
+            init_hook: Arc::new(StdMutex::new(init_hook)),
         })
     }
 
@@ -264,6 +808,7 @@ impl Connection {
     fn begin(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
+        let pragmas = Arc::clone(&self.pragmas);
         let transaction_state = Arc::clone(&self.transaction_state);
         Python::attach(|py| {
             let future = async move {
@@ -272,22 +817,7 @@ impl Connection {
                     return Err(OperationalError::new_err("Transaction already in progress"));
                 }
 
-                let pool_clone = {
-                    let mut pool_guard = pool.lock().await;
-                    if pool_guard.is_none() {
-                        *pool_guard = Some(
-                            SqlitePool::connect(&format!("sqlite:{}", path))
-                                .await
-                                .map_err(|e| {
-                                    OperationalError::new_err(format!(
-                                        "Failed to connect to database at {}: {e}",
-                                        path
-                                    ))
-                                })?,
-                        );
-                    }
-                    pool_guard.as_ref().unwrap().clone()
-                };
+                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
 
                 sqlx::query("BEGIN")
                     .execute(&pool_clone)
@@ -366,34 +896,48 @@ impl Connection {
     }
 
     /// Execute a SQL query (does not return results).
-    fn execute(self_: PyRef<Self>, query: String) -> PyResult<Py<PyAny>> {
+    fn execute(
+        self_: PyRef<Self>,
+        query: String,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
         let last_rowid = Arc::clone(&self_.last_rowid);
         let last_changes = Arc::clone(&self_.last_changes);
+        
+        // Process parameters
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
+            let Some(params) = parameters else {
+                return Ok((query, Vec::new()));
+            };
+            
+            let params = params.as_borrowed();
+            
+            // Check if it's a dict (named parameters)
+            if let Ok(dict) = params.downcast::<pyo3::types::PyDict>() {
+                return process_named_parameters(&query, dict);
+            }
+            
+            // Check if it's a list or tuple (positional parameters)
+            if let Ok(list) = params.downcast::<PyList>() {
+                let params_vec = process_positional_parameters(list)?;
+                return Ok((query, params_vec));
+            }
+            
+            // Single value (treat as single positional parameter)
+            let param = SqliteParam::from_py(&params)?;
+            Ok((query, vec![param]))
+        })?;
+        
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = {
-                    let mut pool_guard = pool.lock().await;
-                    if pool_guard.is_none() {
-                        *pool_guard = Some(
-                            SqlitePool::connect(&format!("sqlite:{}", path))
-                                .await
-                                .map_err(|e| {
-                                    OperationalError::new_err(format!(
-                                        "Failed to connect to database at {}: {e}",
-                                        path
-                                    ))
-                                })?,
-                        );
-                    }
-                    pool_guard.as_ref().unwrap().clone()
-                };
+                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
 
-                let result = sqlx::query(&query)
-                    .execute(&pool_clone)
-                    .await
-                    .map_err(|e| map_sqlx_error(e, &path, &query))?;
+                // Build query with bound parameters
+                let result = bind_and_execute(&processed_query, &param_values, &pool_clone, &path)
+                    .await?;
 
                 let rowid = result.last_insert_rowid();
                 let changes = result.rows_affected();
@@ -409,15 +953,52 @@ impl Connection {
 
     /// Execute a query multiple times with different parameters.
     fn execute_many(
-        _self_: PyRef<Self>,
-        _query: String,
-        _parameters: Vec<Vec<Py<PyAny>>>,
+        self_: PyRef<Self>,
+        query: String,
+        parameters: Vec<Vec<Py<PyAny>>>,
     ) -> PyResult<Py<PyAny>> {
-        // For Phase 1, execute_many is a placeholder
-        // Proper parameter binding will be added in Phase 2
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let last_rowid = Arc::clone(&self_.last_rowid);
+        let last_changes = Arc::clone(&self_.last_changes);
+        
+        // Process all parameter sets
+        // Each element in parameters is a list/tuple of parameters for one execution
+        let processed_params = Python::with_gil(|py| -> PyResult<Vec<Vec<SqliteParam>>> {
+            let mut result = Vec::new();
+            for param_set in parameters.iter() {
+                // Convert Vec<Py<PyAny>> to Vec<SqliteParam>
+                let mut params_vec = Vec::new();
+                for param in param_set {
+                    let bound_param = param.bind(py);
+                    let sqlx_param = SqliteParam::from_py(&bound_param)?;
+                    params_vec.push(sqlx_param);
+                }
+                result.push(params_vec);
+            }
+            Ok(result)
+        })?;
+        
         Python::attach(|py| {
             let future = async move {
-                // Placeholder implementation
+                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+
+                let mut total_changes = 0u64;
+                let mut last_row_id = 0i64;
+
+                // Execute query multiple times with different parameters
+                for param_values in processed_params {
+                    let result = bind_and_execute(&query, &param_values, &pool_clone, &path)
+                        .await?;
+                    
+                    total_changes += result.rows_affected();
+                    last_row_id = result.last_insert_rowid();
+                }
+
+                *last_rowid.lock().await = last_row_id;
+                *last_changes.lock().await = total_changes;
+
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -425,32 +1006,46 @@ impl Connection {
     }
 
     /// Fetch all rows from a SELECT query.
-    fn fetch_all(self_: PyRef<Self>, query: String) -> PyResult<Py<PyAny>> {
+    fn fetch_all(
+        self_: PyRef<Self>,
+        query: String,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        
+        // Process parameters
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
+            let Some(params) = parameters else {
+                return Ok((query, Vec::new()));
+            };
+            
+            let params = params.as_borrowed();
+            
+            // Check if it's a dict (named parameters)
+            if let Ok(dict) = params.downcast::<pyo3::types::PyDict>() {
+                return process_named_parameters(&query, dict);
+            }
+            
+            // Check if it's a list or tuple (positional parameters)
+            if let Ok(list) = params.downcast::<PyList>() {
+                let params_vec = process_positional_parameters(list)?;
+                return Ok((query, params_vec));
+            }
+            
+            // Single value (treat as single positional parameter)
+            let param = SqliteParam::from_py(&params)?;
+            Ok((query, vec![param]))
+        })?;
+        
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = {
-                    let mut pool_guard = pool.lock().await;
-                    if pool_guard.is_none() {
-                        *pool_guard = Some(
-                            SqlitePool::connect(&format!("sqlite:{}", path))
-                                .await
-                                .map_err(|e| {
-                                    OperationalError::new_err(format!(
-                                        "Failed to connect to database at {}: {e}",
-                                        path
-                                    ))
-                                })?,
-                        );
-                    }
-                    pool_guard.as_ref().unwrap().clone()
-                };
+                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
 
-                let rows = sqlx::query(&query)
-                    .fetch_all(&pool_clone)
-                    .await
-                    .map_err(|e| map_sqlx_error(e, &path, &query))?;
+                // Build query with bound parameters
+                let rows = bind_and_fetch_all(&processed_query, &param_values, &pool_clone, &path)
+                    .await?;
 
                 // Convert rows to Python lists - need Python GIL for this
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
@@ -467,32 +1062,45 @@ impl Connection {
     }
 
     /// Fetch a single row from a SELECT query.
-    fn fetch_one(self_: PyRef<Self>, query: String) -> PyResult<Py<PyAny>> {
+    fn fetch_one(
+        self_: PyRef<Self>,
+        query: String,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        
+        // Process parameters
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
+            let Some(params) = parameters else {
+                return Ok((query, Vec::new()));
+            };
+            
+            let params = params.as_borrowed();
+            
+            // Check if it's a dict (named parameters)
+            if let Ok(dict) = params.downcast::<pyo3::types::PyDict>() {
+                return process_named_parameters(&query, dict);
+            }
+            
+            // Check if it's a list or tuple (positional parameters)
+            if let Ok(list) = params.downcast::<PyList>() {
+                let params_vec = process_positional_parameters(list)?;
+                return Ok((query, params_vec));
+            }
+            
+            // Single value (treat as single positional parameter)
+            let param = SqliteParam::from_py(&params)?;
+            Ok((query, vec![param]))
+        })?;
+        
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = {
-                    let mut pool_guard = pool.lock().await;
-                    if pool_guard.is_none() {
-                        *pool_guard = Some(
-                            SqlitePool::connect(&format!("sqlite:{}", path))
-                                .await
-                                .map_err(|e| {
-                                    OperationalError::new_err(format!(
-                                        "Failed to connect to database at {}: {e}",
-                                        path
-                                    ))
-                                })?,
-                        );
-                    }
-                    pool_guard.as_ref().unwrap().clone()
-                };
+                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
 
-                let row = sqlx::query(&query)
-                    .fetch_one(&pool_clone)
-                    .await
-                    .map_err(|e| map_sqlx_error(e, &path, &query))?;
+                let row = bind_and_fetch_one(&processed_query, &param_values, &pool_clone, &path)
+                    .await?;
 
                 Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(row_to_py_list(py, &row)?.into()) })
             };
@@ -501,34 +1109,49 @@ impl Connection {
     }
 
     /// Fetch a single row from a SELECT query, returning None if no rows.
-    fn fetch_optional(self_: PyRef<Self>, query: String) -> PyResult<Py<PyAny>> {
+    fn fetch_optional(
+        self_: PyRef<Self>,
+        query: String,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        
+        // Process parameters
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
+            let Some(params) = parameters else {
+                return Ok((query, Vec::new()));
+            };
+            
+            let params = params.as_borrowed();
+            
+            // Check if it's a dict (named parameters)
+            if let Ok(dict) = params.downcast::<pyo3::types::PyDict>() {
+                return process_named_parameters(&query, dict);
+            }
+            
+            // Check if it's a list or tuple (positional parameters)
+            if let Ok(list) = params.downcast::<PyList>() {
+                let params_vec = process_positional_parameters(list)?;
+                return Ok((query, params_vec));
+            }
+            
+            // Single value (treat as single positional parameter)
+            let param = SqliteParam::from_py(&params)?;
+            Ok((query, vec![param]))
+        })?;
+        
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = {
-                    let mut pool_guard = pool.lock().await;
-                    if pool_guard.is_none() {
-                        *pool_guard = Some(
-                            SqlitePool::connect(&format!("sqlite:{}", path))
-                                .await
-                                .map_err(|e| {
-                                    OperationalError::new_err(format!(
-                                        "Failed to connect to database at {}: {e}",
-                                        path
-                                    ))
-                                })?,
-                        );
-                    }
-                    pool_guard.as_ref().unwrap().clone()
-                };
+                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
 
-                match sqlx::query(&query).fetch_optional(&pool_clone).await {
+                match bind_and_fetch_optional(&processed_query, &param_values, &pool_clone, &path).await {
                     Ok(Some(row)) => Python::attach(|py| -> PyResult<Py<PyAny>> {
                         Ok(row_to_py_list(py, &row)?.into())
                     }),
                     Ok(None) => Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) }),
-                    Err(e) => Err(map_sqlx_error(e, &path, &query)),
+                    Err(e) => Err(e),
                 }
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -555,9 +1178,71 @@ impl Connection {
 
     /// Create a cursor for this connection.
     fn cursor(slf: PyRef<Self>) -> PyResult<Cursor> {
+        let path = slf.path.clone();
+        let pool = Arc::clone(&slf.pool);
+        let pragmas = Arc::clone(&slf.pragmas);
         Ok(Cursor {
             connection: slf.into(),
             query: String::new(),
+            results: Arc::new(StdMutex::new(None)),
+            current_index: Arc::new(StdMutex::new(0)),
+            parameters: Arc::new(StdMutex::new(None)),
+            connection_path: path,
+            connection_pool: pool,
+            connection_pragmas: pragmas,
+        })
+    }
+
+    /// Set a PRAGMA value on the database connection.
+    fn set_pragma(&self, name: String, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let path = self.path.clone();
+        let pool = Arc::clone(&self.pool);
+        let pragmas = Arc::clone(&self.pragmas);
+        
+        // Convert value to string for PRAGMA
+        let pragma_value = Python::with_gil(|py| -> PyResult<String> {
+            if value.is_none() {
+                Ok("NULL".to_string())
+            } else if let Ok(int_val) = value.extract::<i64>() {
+                Ok(int_val.to_string())
+            } else if let Ok(str_val) = value.extract::<String>() {
+                Ok(format!("'{}'", str_val.replace("'", "''"))) // Escape single quotes
+            } else {
+                Ok(format!("'{}'", value.to_string().replace("'", "''")))
+            }
+        })?;
+        
+        // Store PRAGMA for future connections
+        {
+            let mut pragmas_guard = pragmas.lock().unwrap();
+            // Update or add PRAGMA
+            let mut found = false;
+            for (key, val) in pragmas_guard.iter_mut() {
+                if *key == name {
+                    *val = pragma_value.clone();
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                pragmas_guard.push((name.clone(), pragma_value.clone()));
+            }
+        }
+        
+        let pragma_query = format!("PRAGMA {} = {}", name, pragma_value);
+        
+        Python::attach(|py| {
+            let future = async move {
+                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+
+                sqlx::query(&pragma_query)
+                    .execute(&pool_clone)
+                    .await
+                    .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
+
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
         })
     }
 }
@@ -567,17 +1252,52 @@ impl Connection {
 struct Cursor {
     connection: Py<Connection>,
     query: String,
+    results: Arc<StdMutex<Option<Vec<Py<PyAny>>>>>,
+    current_index: Arc<StdMutex<usize>>,
+    parameters: Arc<StdMutex<Option<Py<PyAny>>>>,
+    connection_path: String, // Store path for direct pool access
+    connection_pool: Arc<Mutex<Option<SqlitePool>>>, // Reference to connection's pool
+    connection_pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Reference to connection's pragmas
 }
 
 #[pymethods]
 impl Cursor {
     /// Execute a SQL query.
-    fn execute(&mut self, query: String) -> PyResult<Py<PyAny>> {
+    fn execute(
+        &mut self,
+        query: String,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         self.query = query.clone();
+        
+        // Store parameters
+        let params_for_storage = if let Some(params) = parameters {
+            Some(params.clone().unbind())
+        } else {
+            None
+        };
+        
+        {
+            let mut params_guard = self.parameters.lock().unwrap();
+            *params_guard = params_for_storage;
+        }
+        
+        // Reset cursor state for new query
+        {
+            *self.current_index.lock().unwrap() = 0;
+            *self.results.lock().unwrap() = None;
+        }
+        
+        // Execute via Connection (no results cached yet - will fetch on first fetch call)
         Python::attach(|py| {
             let conn = self.connection.bind(py);
-            conn.call_method1("execute", (query,))
-                .map(|bound| bound.unbind())
+            if let Some(params) = parameters {
+                conn.call_method1("execute", (query, params))
+                    .map(|bound| bound.unbind())
+            } else {
+                conn.call_method1("execute", (query, py.None()))
+                    .map(|bound| bound.unbind())
+            }
         })
     }
 
@@ -600,10 +1320,82 @@ impl Cursor {
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
+        
+        // Use same logic as fetchmany but return single element or None
+        let query = self.query.clone();
+        let results = Arc::clone(&self.results);
+        let current_index = Arc::clone(&self.current_index);
+        let parameters = Arc::clone(&self.parameters);
+        let path = self.connection_path.clone();
+        let pool = Arc::clone(&self.connection_pool);
+        let pragmas = Arc::clone(&self.connection_pragmas);
+        
         Python::attach(|py| {
-            let conn = self.connection.bind(py);
-            conn.call_method1("fetch_one", (self.query.clone(),))
-                .map(|bound| bound.unbind())
+            let future = async move {
+                // Ensure results are cached (same logic as fetchmany)
+                let needs_fetch = {
+                    let results_guard = results.lock().unwrap();
+                    results_guard.is_none()
+                };
+                
+                if needs_fetch {
+                    let processed_params = Python::with_gil(|py| -> PyResult<Vec<SqliteParam>> {
+                        let params_guard = parameters.lock().unwrap();
+                        if let Some(ref params_py) = *params_guard {
+                            let params_bound = params_py.bind(py);
+                            if let Ok(dict) = params_bound.downcast::<pyo3::types::PyDict>() {
+                                let (_, param_values) = process_named_parameters(&query, dict)?;
+                                return Ok(param_values);
+                            }
+                            if let Ok(list) = params_bound.downcast::<PyList>() {
+                                return process_positional_parameters(list);
+                            }
+                            let param = SqliteParam::from_py(&params_bound)?;
+                            return Ok(vec![param]);
+                        }
+                        Ok(Vec::new())
+                    })?;
+                    
+                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    
+                    let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
+                    
+                    let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
+                        let mut vec = Vec::new();
+                        for row in rows.iter() {
+                            let row_list = row_to_py_list(py, row)?;
+                            vec.push(row_list.into());
+                        }
+                        Ok(vec)
+                    })?;
+                    
+                    {
+                        let mut results_guard = results.lock().unwrap();
+                        *results_guard = Some(cached_results);
+                    }
+                    *current_index.lock().unwrap() = 0;
+                }
+                
+                // Get first element or None
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let mut index_guard = current_index.lock().unwrap();
+                    let results_guard = results.lock().unwrap();
+                    
+                    let Some(ref results_vec) = *results_guard else {
+                        return Ok(py.None());
+                    };
+                    
+                    if *index_guard >= results_vec.len() {
+                        return Ok(py.None());
+                    }
+                    
+                    let row = results_vec[*index_guard].clone_ref(py);
+                    *index_guard += 1;
+                    
+                    Ok(row)
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
         })
     }
 
@@ -612,27 +1404,185 @@ impl Cursor {
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
+        
+        let query = self.query.clone();
+        let results = Arc::clone(&self.results);
+        let current_index = Arc::clone(&self.current_index);
+        let parameters = Arc::clone(&self.parameters);
+        let path = self.connection_path.clone();
+        let pool = Arc::clone(&self.connection_pool);
+        let pragmas = Arc::clone(&self.connection_pragmas);
+        
         Python::attach(|py| {
-            let conn = self.connection.bind(py);
-            conn.call_method1("fetch_all", (self.query.clone(),))
-                .map(|bound| bound.unbind())
+            let future = async move {
+                // Ensure results are cached
+                let needs_fetch = {
+                    let results_guard = results.lock().unwrap();
+                    results_guard.is_none()
+                };
+                
+                if needs_fetch {
+                    let processed_params = Python::with_gil(|py| -> PyResult<Vec<SqliteParam>> {
+                        let params_guard = parameters.lock().unwrap();
+                        if let Some(ref params_py) = *params_guard {
+                            let params_bound = params_py.bind(py);
+                            if let Ok(dict) = params_bound.downcast::<pyo3::types::PyDict>() {
+                                let (_, param_values) = process_named_parameters(&query, dict)?;
+                                return Ok(param_values);
+                            }
+                            if let Ok(list) = params_bound.downcast::<PyList>() {
+                                return process_positional_parameters(list);
+                            }
+                            let param = SqliteParam::from_py(&params_bound)?;
+                            return Ok(vec![param]);
+                        }
+                        Ok(Vec::new())
+                    })?;
+                    
+                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    
+                    let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
+                    
+                    let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
+                        let mut vec = Vec::new();
+                        for row in rows.iter() {
+                            let row_list = row_to_py_list(py, row)?;
+                            vec.push(row_list.into());
+                        }
+                        Ok(vec)
+                    })?;
+                    
+                    {
+                        let mut results_guard = results.lock().unwrap();
+                        *results_guard = Some(cached_results);
+                    }
+                }
+                
+                // Return all remaining results
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let mut index_guard = current_index.lock().unwrap();
+                    let results_guard = results.lock().unwrap();
+                    
+                    let Some(ref results_vec) = *results_guard else {
+                        return Err(ProgrammingError::new_err("No results available"));
+                    };
+                    
+                    let start = *index_guard;
+                    let result_list = PyList::empty(py);
+                    for row in &results_vec[start..] {
+                        result_list.append(row.clone_ref(py))?;
+                    }
+                    
+                    // Update index to end
+                    *index_guard = results_vec.len();
+                    
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
         })
     }
 
-    /// Fetch many rows.
-    ///
-    /// Note: For Phase 1, this returns all rows from fetch_all.
-    /// Proper size-based slicing will be implemented in Phase 2.
-    fn fetchmany(&self, _size: Option<usize>) -> PyResult<Py<PyAny>> {
+    /// Fetch many rows with size-based slicing.
+    /// Phase 2.2: Properly implements size parameter by fetching all results,
+    /// caching them, and returning appropriate slices.
+    fn fetchmany(&self, size: Option<usize>) -> PyResult<Py<PyAny>> {
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
-        // For Phase 1, fetchmany just calls fetch_all
-        // Proper implementation with slicing will be in Phase 2
+        
+        let query = self.query.clone();
+        let results = Arc::clone(&self.results);
+        let current_index = Arc::clone(&self.current_index);
+        let parameters = Arc::clone(&self.parameters);
+        let path = self.connection_path.clone();
+        let pool = Arc::clone(&self.connection_pool);
+        let pragmas = Arc::clone(&self.connection_pragmas);
+        
         Python::attach(|py| {
-            let conn = self.connection.bind(py);
-            conn.call_method1("fetch_all", (self.query.clone(),))
-                .map(|bound| bound.unbind())
+            let future = async move {
+                // Check if results need to be fetched
+                let needs_fetch = {
+                    let results_guard = results.lock().unwrap();
+                    results_guard.is_none()
+                };
+                
+                if needs_fetch {
+                    // Fetch all results using direct pool access
+                    let processed_params = Python::with_gil(|py| -> PyResult<Vec<SqliteParam>> {
+                        let params_guard = parameters.lock().unwrap();
+                        if let Some(ref params_py) = *params_guard {
+                            let params_bound = params_py.bind(py);
+                            
+                            // Check if it's a dict (named parameters)
+                            if let Ok(dict) = params_bound.downcast::<pyo3::types::PyDict>() {
+                                let (_, param_values) = process_named_parameters(&query, dict)?;
+                                return Ok(param_values);
+                            }
+                            
+                            // Check if it's a list (positional parameters)
+                            if let Ok(list) = params_bound.downcast::<PyList>() {
+                                return process_positional_parameters(list);
+                            }
+                            
+                            // Single value
+                            let param = SqliteParam::from_py(&params_bound)?;
+                            return Ok(vec![param]);
+                        }
+                        Ok(Vec::new())
+                    })?;
+                    
+                    // Fetch all results
+                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    
+                    let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
+                    
+                    // Cache results as Python objects
+                    let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
+                        let mut vec = Vec::new();
+                        for row in rows.iter() {
+                            let row_list = row_to_py_list(py, row)?;
+                            vec.push(row_list.into());
+                        }
+                        Ok(vec)
+                    })?;
+                    
+                    // Store cached results
+                    {
+                        let mut results_guard = results.lock().unwrap();
+                        *results_guard = Some(cached_results);
+                    }
+                    
+                    // Reset index
+                    *current_index.lock().unwrap() = 0;
+                }
+                
+                // Get slice based on size
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let mut index_guard = current_index.lock().unwrap();
+                    let results_guard = results.lock().unwrap();
+                    
+                    let Some(ref results_vec) = *results_guard else {
+                        return Err(ProgrammingError::new_err("No results available"));
+                    };
+                    
+                    let start = *index_guard;
+                    let fetch_size = size.unwrap_or(1);
+                    let end = std::cmp::min(start + fetch_size, results_vec.len());
+                    
+                    // Create result slice
+                    let result_list = PyList::empty(py);
+                    for row in &results_vec[start..end] {
+                        result_list.append(row.clone_ref(py))?;
+                    }
+                    
+                    // Update index for next call
+                    *index_guard = end;
+                    
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
         })
     }
 
