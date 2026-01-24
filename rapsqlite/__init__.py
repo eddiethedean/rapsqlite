@@ -88,7 +88,7 @@ __all__: List[str] = [
 ]
 
 
-def connect(path: str, **kwargs: Any) -> Connection:
+def connect(path: str, *, pragmas: Any = None, **kwargs: Any) -> Connection:
     """Connect to a SQLite database.
 
     This function matches the aiosqlite.connect() API for compatibility,
@@ -96,7 +96,10 @@ def connect(path: str, **kwargs: Any) -> Connection:
 
     Args:
         path: Path to the SQLite database file. Can be ":memory:" for an
-            in-memory database, or a file path.
+            in-memory database, or a file path. Can also be a URI format:
+            "file:path?param=value".
+        pragmas: Optional dictionary of PRAGMA settings to apply on connection.
+            Example: {"journal_mode": "WAL", "synchronous": "NORMAL"}
         **kwargs: Additional arguments (currently ignored, reserved for future use)
 
     Returns:
@@ -121,8 +124,13 @@ def connect(path: str, **kwargs: Any) -> Connection:
                 await conn.execute("CREATE TABLE test (id INTEGER)")
                 # Database exists only for the duration of the connection
 
+        With PRAGMA settings::
+
+            async with connect("example.db", pragmas={"journal_mode": "WAL"}) as conn:
+                await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
+
     Note:
         The connection object supports async context manager protocol. It's
         recommended to use `async with` to ensure proper resource cleanup.
     """
-    return Connection(path)
+    return Connection(path, pragmas=pragmas)

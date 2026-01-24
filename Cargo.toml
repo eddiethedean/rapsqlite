@@ -15,6 +15,7 @@ pyo3 = { version = "0.27", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 tokio = { version = "1.35", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"], default-features = false }
+libsqlite3-sys = "0.30"
 
 [features]
 extension-module = ["pyo3/extension-module"]

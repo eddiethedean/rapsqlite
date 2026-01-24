@@ -23,9 +23,10 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 - ✅ **Phase 2.2 Complete**: Cursor improvements (fetchmany size-based slicing, result caching, state management)
 - ✅ **Phase 2.3 Complete**: Connection configuration (PRAGMA settings, connection string parsing, constructor parameters)
 - ⏳ **Phase 2.4 In Progress**: Pool configuration (infrastructure added, methods pending)
-- ⏳ **Phase 2.5**: Row factory compatibility (planned)
+- ⏳ **Phase 2.5**: Row factory compatibility (infrastructure complete, testing/validation pending)
 - ⏳ **Phase 2.6**: Transaction context managers (planned)
-- ⏳ **Phase 2.7-2.11**: Remaining Phase 2 features (planned)
+- ✅ **Phase 2.7 Complete**: Advanced SQLite callbacks (enable_load_extension, set_progress_handler, create_function, set_trace_callback, set_authorizer)
+- ⏳ **Phase 2.8-2.11**: Remaining Phase 2 features (prepared statements, schema operations, etc.)
 
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
 

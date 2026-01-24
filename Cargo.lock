@@ -737,6 +737,7 @@ dependencies = [
 name = "rapsqlite"
 version = "0.1.2"
 dependencies = [
+ "libsqlite3-sys",
  "pyo3",
  "pyo3-async-runtimes",
  "sqlx",

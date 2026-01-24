@@ -413,31 +413,36 @@ async def test_cursor_fetchall():
         cleanup_db(test_db)
 
 
-@pytest.mark.asyncio
-async def test_cursor_fetchmany():
-    """Test cursor fetchmany method."""
-    # Note: For Phase 1, fetchmany returns all rows (fetch_all behavior)
-    # Proper size-based slicing will be implemented in Phase 2
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
+    @pytest.mark.asyncio
+    async def test_cursor_fetchmany():
+        """Test cursor fetchmany method."""
+        # Phase 2: fetchmany now supports size-based slicing
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            test_db = f.name
 
-    try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
-        await conn.execute("INSERT INTO test (value) VALUES (1)")
-        await conn.execute("INSERT INTO test (value) VALUES (2)")
-        await conn.execute("INSERT INTO test (value) VALUES (3)")
+        try:
+            conn = Connection(test_db)
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute("INSERT INTO test (value) VALUES (1)")
+            await conn.execute("INSERT INTO test (value) VALUES (2)")
+            await conn.execute("INSERT INTO test (value) VALUES (3)")
 
-        cursor = conn.cursor()
-        await cursor.execute("SELECT * FROM test")
-        rows = await cursor.fetchmany(2)
-        # Phase 1: fetchmany returns all rows (same as fetch_all)
-        assert len(rows) == 3
-        assert rows[0] == [1, 1]
-        assert rows[1] == [2, 2]
-        assert rows[2] == [3, 3]
-    finally:
-        cleanup_db(test_db)
+            cursor = conn.cursor()
+            await cursor.execute("SELECT * FROM test")
+            # First call should return 2 rows
+            rows = await cursor.fetchmany(2)
+            assert len(rows) == 2
+            assert rows[0] == [1, 1]
+            assert rows[1] == [2, 2]
+            # Second call should return the remaining 1 row
+            rows = await cursor.fetchmany(2)
+            assert len(rows) == 1
+            assert rows[0] == [3, 3]
+            # Third call should return empty list
+            rows = await cursor.fetchmany(2)
+            assert len(rows) == 0
+        finally:
+            cleanup_db(test_db)
 
 
 # Context manager tests
