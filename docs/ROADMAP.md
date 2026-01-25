@@ -171,7 +171,8 @@ Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
 - **2.7 — `set_authorizer()`** (⏳ Pending): `test_set_authorizer*`, `test_authorizer_action_codes`, etc.
 - **2.7 — `set_progress_handler()`** (⏳ Pending): `test_set_progress_handler*`, `test_all_callbacks_together`
 - **2.8+ — `iterdump()`** (⏳ Planned): `test_iterdump`
-- **2.8+ — `set_pragma` behavior** (⏳ Investigate): `test_set_pragma` (assertion `1 == 2`); PRAGMA application or return-value mismatch
+- **2.8+ — `set_pragma` behavior** (⏳ Investigate): `test_set_pragma` (assertion `1 == 2`); PRAGMA application or return-value mismatch. **Plan:** [docs/PLAN_OPTION_B_SET_PRAGMA_FIX.md](PLAN_OPTION_B_SET_PRAGMA_FIX.md)
+- **Phase 2.7 callbacks** (enable_load_extension, create_function, set_trace_callback, set_authorizer, set_progress_handler): **Plan:** [docs/PLAN_OPTION_A_PHASE_2_7_CALLBACKS.md](PLAN_OPTION_A_PHASE_2_7_CALLBACKS.md)
 
 ### Prepared Statements & Parameterized Queries
 

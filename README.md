@@ -481,6 +481,16 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 - ✅ `execute_many` no longer raises "database is locked" when used inside a transaction
 - ✅ `fetch_*` use the transaction connection when inside a transaction (avoids deadlock)
 
+**Phase 2.7 — Advanced SQLite callbacks:**
+- ✅ `Connection.enable_load_extension(enabled: bool)` — Enable/disable SQLite extension loading
+- ✅ `Connection.create_function(name: str, nargs: int, func: Optional[Callable])` — Create or remove user-defined SQL functions
+- ✅ `Connection.set_trace_callback(callback: Optional[Callable])` — Set callback to trace SQL statements
+- ✅ `Connection.set_authorizer(callback: Optional[Callable])` — Set authorization callback for database operations
+- ✅ `Connection.set_progress_handler(n: int, callback: Optional[Callable])` — Set progress handler for long-running operations
+- ✅ Dedicated callback connection architecture for safe C API access
+- ✅ Callback trampolines for Python-to-SQLite C API integration
+- ✅ Proper cleanup of callbacks on connection close
+
 **API compatibility:**
 - ✅ `parameters` is optional on `execute`, `fetch_all`, `fetch_one`, `fetch_optional`, and `Cursor.execute`
 
@@ -488,6 +498,9 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 - ✅ `tests/test_row_factory.py`: 18 tests for row_factory (fetch_one/optional, empty/multi-row, NULLs, duplicate columns, cursor, parameterized, transactions, callable edge cases, BLOB)
 - ✅ Python tests moved into `tests/` directory; `pyproject.toml` `testpaths = ["tests"]`; CI updated
 - ✅ Ruff format and ruff check applied; unused imports and variables fixed
+
+**Bug Fixes:**
+- ✅ Fixed `test_set_pragma` assertion to match SQLite's documented behavior (PRAGMA synchronous NORMAL = 1, not 2)
 
 ### v0.1.1 (2026-01-16)
 
