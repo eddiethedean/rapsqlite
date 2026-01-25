@@ -467,6 +467,28 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 
 ## Changelog
 
+### v0.2.0 (2026-01-25) — Phase 2
+
+**Phase 2.5 — Row factory:**
+- ✅ `Connection.row_factory` getter/setter
+- ✅ Supported values: `None` (list rows), `"dict"` (column names as keys), `"tuple"`, or a callable `(row) -> any`
+- ✅ `fetch_all`, `fetch_one`, and `fetch_optional` respect `row_factory`
+- ✅ Cursor `fetchone`, `fetchall`, and `fetchmany` use the connection’s `row_factory`
+- ✅ Row factory works with parameterized queries and inside `transaction()`
+
+**Phase 2.6 — Transaction context manager & execute_many fixes:**
+- ✅ `Connection.transaction()` async context manager (`async with db.transaction():`)
+- ✅ `execute_many` no longer raises "database is locked" when used inside a transaction
+- ✅ `fetch_*` use the transaction connection when inside a transaction (avoids deadlock)
+
+**API compatibility:**
+- ✅ `parameters` is optional on `execute`, `fetch_all`, `fetch_one`, `fetch_optional`, and `Cursor.execute`
+
+**Testing and tooling:**
+- ✅ `tests/test_row_factory.py`: 18 tests for row_factory (fetch_one/optional, empty/multi-row, NULLs, duplicate columns, cursor, parameterized, transactions, callable edge cases, BLOB)
+- ✅ Python tests moved into `tests/` directory; `pyproject.toml` `testpaths = ["tests"]`; CI updated
+- ✅ Ruff format and ruff check applied; unused imports and variables fixed
+
 ### v0.1.1 (2026-01-16)
 
 **Python 3.14 Support:**
@@ -502,7 +524,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 - Improved error handling: Enhanced error messages with database path and query context
 - Type stubs: Added `.pyi` type stubs for better IDE support and type checking
 
-## Limitations (v0.1.1)
+## Limitations (v0.2.0)
 
 **Current limitations:**
 - ⏳ Parameterized queries not yet supported (placeholder for Phase 2)
@@ -511,7 +533,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 - ⏳ Not yet a complete drop-in replacement for `aiosqlite` (work in progress)
 - ⏳ Not designed for synchronous use cases
 
-**Phase 1 improvements (v0.1.0 - v0.1.1):**
+**Phase 1 improvements (v0.1.0 – v0.1.1):**
 - ✅ Connection lifecycle management (async context managers)
 - ✅ Transaction support (begin, commit, rollback)
 - ✅ Type system improvements (proper Python types: int, float, str, bytes, None)

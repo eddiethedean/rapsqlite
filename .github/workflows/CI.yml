@@ -55,10 +55,7 @@ jobs:
 
     - name: Run tests
       shell: bash
-      run: |
-        cp test_rapsqlite.py /tmp/
-        cd /tmp
-        python -m pytest test_rapsqlite.py -v
+      run: python -m pytest tests/test_rapsqlite.py -v
 
   lint:
     name: Lint

@@ -74,7 +74,7 @@ except ImportError:
             "Could not import _rapsqlite. Make sure rapsqlite is built with maturin."
         )
 
-__version__: str = "0.1.2"
+__version__: str = "0.2.0"
 __all__: List[str] = [
     "Connection",
     "Cursor",

@@ -4,7 +4,7 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 
 ## Current Status
 
-**Current Version (v0.1.2)** - Phase 1 Complete, Phase 2 In Progress:
+**Current Version (v0.2.0)** — Phase 1 Complete, Phase 2 In Progress:
 
 **Phase 1 Complete:**
 - ✅ Connection lifecycle management (async context managers)
@@ -23,14 +23,14 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 - ✅ **Phase 2.2 Complete**: Cursor improvements (fetchmany size-based slicing, result caching, state management)
 - ✅ **Phase 2.3 Complete**: Connection configuration (PRAGMA settings, connection string parsing, constructor parameters)
 - ⏳ **Phase 2.4 In Progress**: Pool configuration (infrastructure added; `pool_size` and `connection_timeout` getters/setters pending)
-- ⏳ **Phase 2.5**: Row factory compatibility (`Connection.row_factory` getter/setter; blocks `test_connection_properties`, `test_row_factory_comprehensive`)
+- ✅ **Phase 2.5 Complete**: Row factory compatibility (`Connection.row_factory` getter/setter; dict/tuple/callable; fetch_* and Cursor)
 - ✅ **Phase 2.6 Complete**: Transaction context managers (`Connection.transaction()` async CM, execute_many in transactions, fetch_* use transaction connection)
 - ⏳ **Phase 2.7 In Progress**: Advanced SQLite callbacks (enable_load_extension, set_progress_handler, create_function, set_trace_callback, set_authorizer — implementation pending; tests fail)
 - ⏳ **Phase 2.8-2.11**: Remaining Phase 2 features (prepared statements, schema operations, iterdump, set_pragma behavior fix, etc.)
 
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
 
-**Recent progress (execute_many / transaction fix):** `Connection.transaction()` async context manager implemented; `execute_many` and `fetch_*` work correctly inside transactions (lock released per iteration, fetch uses transaction connection). Optional `parameters` on execute/fetch/cursor for aiosqlite compat. Regression tests added. See plan `fix_execute_many_transaction_lock` and [EXECUTE_MANY_TRANSACTION_ISSUE.md](EXECUTE_MANY_TRANSACTION_ISSUE.md).
+**Recent progress (execute_many / transaction fix):** `Connection.transaction()` async context manager implemented; `execute_many` and `fetch_*` work correctly inside transactions (lock released per iteration, fetch uses transaction connection). Optional `parameters` on execute/fetch/cursor for aiosqlite compat. Regression tests added. See plan `fix_execute_many_transaction_lock`.
 
 ## Phase 1 — Credibility
 
@@ -422,4 +422,4 @@ Following semantic versioning:
 - `v1.0`: Stable API, Phase 1 complete, production-ready (ready for release)
 - `v1.x+`: Phase 2 and 3 features, backwards-compatible additions
 
-**Current Version: v0.1.2** - Phase 1 complete and production-ready. Core aiosqlite API compatibility achieved. Python 3.8-3.14 supported. Ready for v1.0 release when appropriate. Advanced features (parameterized queries, row factory, etc.) planned for Phase 2.
+**Current Version: v0.2.0** — Phase 1 complete; Phase 2 in progress (row factory, transaction context manager, execute_many-in-transaction fix, optional parameters). Core aiosqlite API compatibility improved. Python 3.8–3.14 supported. Ready for v1.0 when Phase 2 goals are met.

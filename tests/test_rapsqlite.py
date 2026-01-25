@@ -459,7 +459,6 @@ async def test_cursor_fetchall():
     finally:
         cleanup_db(test_db)
 
-
     @pytest.mark.asyncio
     async def test_cursor_fetchmany():
         """Test cursor fetchmany method."""
@@ -469,7 +468,9 @@ async def test_cursor_fetchall():
 
         try:
             conn = Connection(test_db)
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
             await conn.execute("INSERT INTO test (value) VALUES (1)")
             await conn.execute("INSERT INTO test (value) VALUES (2)")
             await conn.execute("INSERT INTO test (value) VALUES (3)")

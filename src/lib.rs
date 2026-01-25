@@ -3,9 +3,9 @@
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Column, Row, SqlitePool};
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -149,6 +149,49 @@ fn row_to_py_list<'py>(
         list.append(val)?;
     }
     Ok(list)
+}
+
+/// Convert a SQLite row to Python using row_factory. factory None => list;
+/// "dict" => dict (column names as keys); "tuple" => tuple; else callable(row) => result.
+fn row_to_py_with_factory<'py>(
+    py: Python<'py>,
+    row: &sqlx::sqlite::SqliteRow,
+    factory: Option<&Py<PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let default = || row_to_py_list(py, row).map(|l| l.into_any());
+    let Some(f) = factory else {
+        return default();
+    };
+    let f = f.bind(py);
+    if f.is_none() {
+        return default();
+    }
+    if let Ok(s) = f.downcast::<PyString>() {
+        let name = s.to_str()?;
+        return match name {
+            "dict" => {
+                let dict = PyDict::new(py);
+                for i in 0..row.len() {
+                    let col_name = row.columns()[i].name();
+                    let val = sqlite_value_to_py(py, row, i)?;
+                    dict.set_item(col_name, val)?;
+                }
+                Ok(dict.into_any())
+            }
+            "tuple" => {
+                let mut vals = Vec::new();
+                for i in 0..row.len() {
+                    vals.push(sqlite_value_to_py(py, row, i)?);
+                }
+                let tuple = PyTuple::new(py, vals)?;
+                Ok(tuple.into_any())
+            }
+            _ => default(),
+        };
+    }
+    let list = row_to_py_list(py, row)?;
+    let result = f.call1((list,))?;
+    Ok(result)
 }
 
 /// Convert a Python value to a SQLite-compatible value for binding.
@@ -903,6 +946,7 @@ struct Connection {
     init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
     pool_size: Arc<StdMutex<Option<usize>>>, // Configurable pool size
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>, // Connection timeout in seconds
+    row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // None | "dict" | "tuple" | callable
 }
 
 #[pymethods]
@@ -948,7 +992,30 @@ impl Connection {
             init_hook: Arc::new(StdMutex::new(init_hook)),
             pool_size: Arc::new(StdMutex::new(None)),
             connection_timeout_secs: Arc::new(StdMutex::new(None)),
+            row_factory: Arc::new(StdMutex::new(None)),
         })
+    }
+
+    #[getter(row_factory)]
+    fn row_factory(&self) -> PyResult<Py<PyAny>> {
+        Python::with_gil(|py| {
+            let guard = self.row_factory.lock().unwrap();
+            Ok(match guard.as_ref() {
+                Some(f) => f.clone_ref(py),
+                None => py.None(),
+            })
+        })
+    }
+
+    #[setter(row_factory)]
+    fn set_row_factory(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut guard = self.row_factory.lock().unwrap();
+        *guard = if value.is_none() {
+            None
+        } else {
+            Some(value.clone().unbind())
+        };
+        Ok(())
     }
 
     /// Async context manager entry.
@@ -1300,6 +1367,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let row_factory = Arc::clone(&self_.row_factory);
 
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1343,12 +1411,14 @@ impl Connection {
                     bind_and_fetch_all(&processed_query, &param_values, &pool_clone, &path).await?
                 };
 
-                // Convert rows to Python lists - need Python GIL for this
+                // Convert rows using row_factory
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
+                    let guard = row_factory.lock().unwrap();
+                    let factory_opt = guard.as_ref();
                     let result_list = PyList::empty(py);
                     for row in rows.iter() {
-                        let row_list = row_to_py_list(py, row)?;
-                        result_list.append(row_list)?;
+                        let out = row_to_py_with_factory(py, row, factory_opt)?;
+                        result_list.append(out)?;
                     }
                     Ok(result_list.into())
                 })
@@ -1369,6 +1439,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let row_factory = Arc::clone(&self_.row_factory);
 
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1407,7 +1478,12 @@ impl Connection {
                     bind_and_fetch_one(&processed_query, &param_values, &pool_clone, &path).await?
                 };
 
-                Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(row_to_py_list(py, &row)?.into()) })
+                Python::attach(|py| -> PyResult<Py<PyAny>> {
+                    let guard = row_factory.lock().unwrap();
+                    let factory_opt = guard.as_ref();
+                    let out = row_to_py_with_factory(py, &row, factory_opt)?;
+                    Ok(out.unbind())
+                })
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })
@@ -1425,6 +1501,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let row_factory = Arc::clone(&self_.row_factory);
 
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1465,7 +1542,10 @@ impl Connection {
 
                 match opt {
                     Some(row) => Python::attach(|py| -> PyResult<Py<PyAny>> {
-                        Ok(row_to_py_list(py, &row)?.into())
+                        let guard = row_factory.lock().unwrap();
+                        let factory_opt = guard.as_ref();
+                        let out = row_to_py_with_factory(py, &row, factory_opt)?;
+                        Ok(out.unbind())
                     }),
                     None => Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) }),
                 }
@@ -1497,6 +1577,7 @@ impl Connection {
         let path = slf.path.clone();
         let pool = Arc::clone(&slf.pool);
         let pragmas = Arc::clone(&slf.pragmas);
+        let row_factory = Arc::clone(&slf.row_factory);
         Ok(Cursor {
             connection: slf.into(),
             query: String::new(),
@@ -1506,6 +1587,7 @@ impl Connection {
             connection_path: path,
             connection_pool: pool,
             connection_pragmas: pragmas,
+            row_factory,
         })
     }
 
@@ -1675,6 +1757,7 @@ struct Cursor {
     connection_path: String, // Store path for direct pool access
     connection_pool: Arc<Mutex<Option<SqlitePool>>>, // Reference to connection's pool
     connection_pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Reference to connection's pragmas
+    row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's row_factory at cursor creation
 }
 
 #[pymethods]
@@ -1747,6 +1830,7 @@ impl Cursor {
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
+        let row_factory = Arc::clone(&self.row_factory);
         
         Python::attach(|py| {
             let future = async move {
@@ -1779,10 +1863,12 @@ impl Cursor {
                     let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
                     
                     let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
+                        let guard = row_factory.lock().unwrap();
+                        let factory_opt = guard.as_ref();
                         let mut vec = Vec::new();
                         for row in rows.iter() {
-                            let row_list = row_to_py_list(py, row)?;
-                            vec.push(row_list.into());
+                            let out = row_to_py_with_factory(py, row, factory_opt)?;
+                            vec.push(out.unbind());
                         }
                         Ok(vec)
                     })?;
@@ -1830,6 +1916,7 @@ impl Cursor {
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
+        let row_factory = Arc::clone(&self.row_factory);
         
         Python::attach(|py| {
             let future = async move {
@@ -1862,10 +1949,12 @@ impl Cursor {
                     let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
                     
                     let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
+                        let guard = row_factory.lock().unwrap();
+                        let factory_opt = guard.as_ref();
                         let mut vec = Vec::new();
                         for row in rows.iter() {
-                            let row_list = row_to_py_list(py, row)?;
-                            vec.push(row_list.into());
+                            let out = row_to_py_with_factory(py, row, factory_opt)?;
+                            vec.push(out.unbind());
                         }
                         Ok(vec)
                     })?;
@@ -1916,6 +2005,7 @@ impl Cursor {
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
+        let row_factory = Arc::clone(&self.row_factory);
         
         Python::attach(|py| {
             let future = async move {
@@ -1957,10 +2047,12 @@ impl Cursor {
                     
                     // Cache results as Python objects
                     let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
+                        let guard = row_factory.lock().unwrap();
+                        let factory_opt = guard.as_ref();
                         let mut vec = Vec::new();
                         for row in rows.iter() {
-                            let row_list = row_to_py_list(py, row)?;
-                            vec.push(row_list.into());
+                            let out = row_to_py_with_factory(py, row, factory_opt)?;
+                            vec.push(out.unbind());
                         }
                         Ok(vec)
                     })?;
