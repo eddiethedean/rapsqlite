@@ -22,15 +22,15 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 - ✅ **Phase 2.1 Complete**: Parameterized queries (named and positional parameters, execute_many with binding)
 - ✅ **Phase 2.2 Complete**: Cursor improvements (fetchmany size-based slicing, result caching, state management)
 - ✅ **Phase 2.3 Complete**: Connection configuration (PRAGMA settings, connection string parsing, constructor parameters)
-- ⏳ **Phase 2.4 In Progress**: Pool configuration (infrastructure added; `pool_size` and `connection_timeout` getters/setters pending)
-- ✅ **Phase 2.5 Complete**: Row factory compatibility (`Connection.row_factory` getter/setter; dict/tuple/callable; fetch_* and Cursor)
+- ✅ **Phase 2.4 Complete**: Pool configuration (`pool_size` and `connection_timeout` getters/setters; used when creating pool; `tests/test_pool_config.py`)
+- ✅ **Phase 2.5 Complete**: Row factory compatibility (`Connection.row_factory` getter/setter; dict/tuple/callable; fetch_* and Cursor; `tests/test_row_factory.py`)
 - ✅ **Phase 2.6 Complete**: Transaction context managers (`Connection.transaction()` async CM, execute_many in transactions, fetch_* use transaction connection)
 - ⏳ **Phase 2.7 In Progress**: Advanced SQLite callbacks (enable_load_extension, set_progress_handler, create_function, set_trace_callback, set_authorizer — implementation pending; tests fail)
 - ⏳ **Phase 2.8-2.11**: Remaining Phase 2 features (prepared statements, schema operations, iterdump, set_pragma behavior fix, etc.)
 
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
 
-**Recent progress (execute_many / transaction fix):** `Connection.transaction()` async context manager implemented; `execute_many` and `fetch_*` work correctly inside transactions (lock released per iteration, fetch uses transaction connection). Optional `parameters` on execute/fetch/cursor for aiosqlite compat. Regression tests added. See plan `fix_execute_many_transaction_lock`.
+**Recent progress:** Phase 2.4 pool configuration complete with robust tests (`tests/test_pool_config.py` — 18 tests: validation, config-before-use, transaction/cursor/set_pragma/execute_many/begin, zero edge cases, multiple connections, large values). Earlier: `Connection.transaction()` async CM; `execute_many` and `fetch_*` in transactions; row_factory (2.5); pool_size/connection_timeout getters/setters.
 
 ## Phase 1 — Credibility
 
@@ -156,15 +156,15 @@ Focus: Fix critical performance issues, add essential features for production us
 
 Focus: Feature additions, performance optimizations, and broader SQLite feature support.
 
-**Current Phase 2 Status**: Core features complete (2.1-2.3, 2.6). Transaction context managers and execute_many-in-transactions fixed. Pool configuration (2.4), row factory (2.5), and advanced callbacks (2.7) in progress.
+**Current Phase 2 Status**: Core features complete (2.1-2.6). Pool configuration (2.4) and row factory (2.5) complete, each with dedicated robust test suites (`test_pool_config.py`, `test_row_factory.py`). Advanced callbacks (2.7) in progress.
 
 ### Phase 2 features to implement (from compat gaps)
 
 Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
 
-- **2.4 — `pool_size` getter/setter** (⏳ Pending): `test_pool_size_getter_setter`, `test_pool_size_edge_cases`, `test_pool_configuration_*`
-- **2.4 — `connection_timeout` getter/setter** (⏳ Pending): `test_connection_timeout_*`, `test_pool_configuration_*`
-- **2.5 — `row_factory` getter/setter** (⏳ Pending): `test_connection_properties`, `test_row_factory_comprehensive`
+- **2.4 — `pool_size` getter/setter** (✅ Complete): `test_pool_size_getter_setter`, `test_pool_size_edge_cases`, `test_pool_configuration_*`; robust suite `tests/test_pool_config.py` (18 tests)
+- **2.4 — `connection_timeout` getter/setter** (✅ Complete): `test_connection_timeout_*`, `test_pool_configuration_*`; covered in `test_pool_config.py`
+- **2.5 — `row_factory` getter/setter** (✅ Complete): `test_connection_properties`, `test_row_factory_comprehensive`, `tests/test_row_factory.py`
 - **2.7 — `enable_load_extension()`** (⏳ Pending): `test_enable_load_extension*`, callback-combo tests
 - **2.7 — `create_function()` / `remove_function()`** (⏳ Pending): `test_create_function*`, `test_custom_function_*`
 - **2.7 — `set_trace_callback()`** (⏳ Pending): `test_set_trace_callback*`, `test_trace_callback_with_errors`, etc.
@@ -238,11 +238,12 @@ Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
   - ⏳ Database initialization hooks (infrastructure added, async execution pending)
   - ⏳ Custom SQLite extensions (if applicable) (planned)
 
-- **Pool configuration** ⏳ (Phase 2.4 in progress)
-  - ✅ Configurable pool size (infrastructure added)
-  - ✅ Connection timeout settings (infrastructure added)
-  - ⏳ `pool_size` getter/setter (blocking compat tests)
-  - ⏳ `connection_timeout` getter/setter (blocking compat tests)
+- **Pool configuration** ✅ (Phase 2.4 complete)
+  - ✅ Configurable pool size (infrastructure and getter/setter)
+  - ✅ Connection timeout settings (infrastructure and getter/setter; acquire_timeout when creating pool)
+  - ✅ `pool_size` getter/setter
+  - ✅ `connection_timeout` getter/setter
+  - ✅ Robust test suite `tests/test_pool_config.py` (validation, config-before-use, transaction/cursor/set_pragma/execute_many/begin, zero edge cases, multiple connections, large values)
   - ⏳ Idle connection management (planned)
   - ⏳ Pool monitoring and metrics (planned)
   - ⏳ Pool lifecycle management (advanced features from Phase 1) (planned)
@@ -280,7 +281,7 @@ Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
 - **Additional API compatibility**
   - Maintain and refine aiosqlite drop-in replacement (core API achieved in Phase 1)
   - Enhanced compatibility features beyond core aiosqlite API
-  - Row factory compatibility (from Phase 1 remaining items)
+  - ✅ Row factory compatibility (Phase 2.5 complete: `row_factory` getter/setter, dict/tuple/callable, `tests/test_row_factory.py`)
   - Migration guides from other libraries (sqlite3, etc.)
   - Compatibility shims for common patterns and idioms
   - ✅ Python 3.13 support (wheels and CI builds) - complete in v0.1.1

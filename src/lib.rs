@@ -9,6 +9,7 @@ use sqlx::{Column, Row, SqlitePool};
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 // Exception classes matching aiosqlite API (ABI3 compatible)
@@ -834,13 +835,24 @@ async fn get_or_create_pool(
     path: &str,
     pool: &Arc<Mutex<Option<SqlitePool>>>,
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
+    pool_size: &Arc<StdMutex<Option<usize>>>,
+    connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
 ) -> Result<SqlitePool, PyErr> {
     let mut pool_guard = pool.lock().await;
     if pool_guard.is_none() {
-        // Use SqlitePoolOptions to limit to 1 connection
-        // SQLite's single-writer model requires this to prevent "database is locked" errors
-        let new_pool = SqlitePoolOptions::new()
-            .max_connections(1)
+        let max_conn = {
+            let g = pool_size.lock().unwrap();
+            (g.unwrap_or(1).max(1)) as u32
+        };
+        let timeout_secs = {
+            let g = connection_timeout_secs.lock().unwrap();
+            *g
+        };
+        let mut opts = SqlitePoolOptions::new().max_connections(max_conn);
+        if let Some(secs) = timeout_secs {
+            opts = opts.acquire_timeout(Duration::from_secs(secs));
+        }
+        let new_pool = opts
             .connect(&format!("sqlite:{}", path))
             .await
             .map_err(|e| {
@@ -1018,6 +1030,62 @@ impl Connection {
         Ok(())
     }
 
+    #[getter(pool_size)]
+    fn pool_size(&self) -> PyResult<Py<PyAny>> {
+        Python::with_gil(|py| {
+            let guard = self.pool_size.lock().unwrap();
+            Ok(match guard.as_ref() {
+                Some(&n) => PyInt::new(py, n as i64).into_any().unbind(),
+                None => py.None(),
+            })
+        })
+    }
+
+    #[setter(pool_size)]
+    fn set_pool_size(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut guard = self.pool_size.lock().unwrap();
+        *guard = if value.is_none() {
+            None
+        } else {
+            let n = value.extract::<i64>()?;
+            if n < 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "pool_size must be >= 0",
+                ));
+            }
+            Some(n as usize)
+        };
+        Ok(())
+    }
+
+    #[getter(connection_timeout)]
+    fn connection_timeout(&self) -> PyResult<Py<PyAny>> {
+        Python::with_gil(|py| {
+            let guard = self.connection_timeout_secs.lock().unwrap();
+            Ok(match guard.as_ref() {
+                Some(&n) => PyInt::new(py, n as i64).into_any().unbind(),
+                None => py.None(),
+            })
+        })
+    }
+
+    #[setter(connection_timeout)]
+    fn set_connection_timeout(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut guard = self.connection_timeout_secs.lock().unwrap();
+        *guard = if value.is_none() {
+            None
+        } else {
+            let n = value.extract::<i64>()?;
+            if n < 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "connection_timeout must be >= 0",
+                ));
+            }
+            Some(n as u64)
+        };
+        Ok(())
+    }
+
     /// Async context manager entry.
     fn __aenter__(slf: PyRef<Self>) -> PyResult<Py<PyAny>> {
         let slf: Py<Self> = slf.into();
@@ -1103,6 +1171,8 @@ impl Connection {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
         let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         Python::attach(|py| {
@@ -1112,7 +1182,14 @@ impl Connection {
                     return Err(OperationalError::new_err("Transaction already in progress"));
                 }
 
-                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                let pool_clone = get_or_create_pool(
+                    &path,
+                    &pool,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                )
+                .await?;
 
                 // Acquire a connection from the pool and store it for the transaction
                 // All operations within the transaction must use this same connection
@@ -1221,6 +1298,8 @@ impl Connection {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
         let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let last_rowid = Arc::clone(&self_.last_rowid);
         let last_changes = Arc::clone(&self_.last_changes);
         let transaction_state = Arc::clone(&self_.transaction_state);
@@ -1252,7 +1331,14 @@ impl Connection {
         
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                let pool_clone = get_or_create_pool(
+                    &path,
+                    &pool,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                )
+                .await?;
 
                 // Check if we're in a transaction - use stored connection if active
                 let mut conn_guard = transaction_connection.lock().await;
@@ -1288,6 +1374,8 @@ impl Connection {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
         let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let last_rowid = Arc::clone(&self_.last_rowid);
         let last_changes = Arc::clone(&self_.last_changes);
         let transaction_state = Arc::clone(&self_.transaction_state);
@@ -1312,7 +1400,14 @@ impl Connection {
         
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                let pool_clone = get_or_create_pool(
+                    &path,
+                    &pool,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                )
+                .await?;
 
                 let mut total_changes = 0u64;
                 let mut last_row_id = 0i64;
@@ -1365,6 +1460,8 @@ impl Connection {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
         let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
@@ -1407,7 +1504,14 @@ impl Connection {
                         .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
                     bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path).await?
                 } else {
-                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
                     bind_and_fetch_all(&processed_query, &param_values, &pool_clone, &path).await?
                 };
 
@@ -1437,6 +1541,8 @@ impl Connection {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
         let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
@@ -1474,7 +1580,14 @@ impl Connection {
                         .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
                     bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path).await?
                 } else {
-                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
                     bind_and_fetch_one(&processed_query, &param_values, &pool_clone, &path).await?
                 };
 
@@ -1499,6 +1612,8 @@ impl Connection {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
         let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
@@ -1536,7 +1651,14 @@ impl Connection {
                         .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
                     bind_and_fetch_optional_on_connection(&processed_query, &param_values, conn, &path).await?
                 } else {
-                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
                     bind_and_fetch_optional(&processed_query, &param_values, &pool_clone, &path).await?
                 };
 
@@ -1577,6 +1699,8 @@ impl Connection {
         let path = slf.path.clone();
         let pool = Arc::clone(&slf.pool);
         let pragmas = Arc::clone(&slf.pragmas);
+        let pool_size = Arc::clone(&slf.pool_size);
+        let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
         let row_factory = Arc::clone(&slf.row_factory);
         Ok(Cursor {
             connection: slf.into(),
@@ -1587,6 +1711,8 @@ impl Connection {
             connection_path: path,
             connection_pool: pool,
             connection_pragmas: pragmas,
+            pool_size,
+            connection_timeout_secs,
             row_factory,
         })
     }
@@ -1598,6 +1724,8 @@ impl Connection {
             path: slf.path.clone(),
             pool: Arc::clone(&slf.pool),
             pragmas: Arc::clone(&slf.pragmas),
+            pool_size: Arc::clone(&slf.pool_size),
+            connection_timeout_secs: Arc::clone(&slf.connection_timeout_secs),
             transaction_state: Arc::clone(&slf.transaction_state),
             transaction_connection: Arc::clone(&slf.transaction_connection),
             connection: slf.into(),
@@ -1609,6 +1737,8 @@ impl Connection {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
         let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         
         // Convert value to string for PRAGMA
         let pragma_value = Python::with_gil(|py| -> PyResult<String> {
@@ -1644,7 +1774,14 @@ impl Connection {
         
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                let pool_clone = get_or_create_pool(
+                    &path,
+                    &pool,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                )
+                .await?;
 
                 sqlx::query(&pragma_query)
                     .execute(&pool_clone)
@@ -1666,6 +1803,8 @@ struct TransactionContextManager {
     path: String,
     pool: Arc<Mutex<Option<SqlitePool>>>,
     pragmas: Arc<StdMutex<Vec<(String, String)>>>,
+    pool_size: Arc<StdMutex<Option<usize>>>,
+    connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     transaction_state: Arc<Mutex<TransactionState>>,
     transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     connection: Py<Connection>,
@@ -1679,6 +1818,8 @@ impl TransactionContextManager {
             let path = slf.borrow(py).path.clone();
             let pool = Arc::clone(&slf.borrow(py).pool);
             let pragmas = Arc::clone(&slf.borrow(py).pragmas);
+            let pool_size = Arc::clone(&slf.borrow(py).pool_size);
+            let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);
             let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
             let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
             let connection = slf.borrow(py).connection.clone_ref(py);
@@ -1687,7 +1828,14 @@ impl TransactionContextManager {
                 if *trans_guard == TransactionState::Active {
                     return Err(OperationalError::new_err("Transaction already in progress"));
                 }
-                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                let pool_clone = get_or_create_pool(
+                    &path,
+                    &pool,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                )
+                .await?;
                 let mut conn = pool_clone
                     .acquire()
                     .await
@@ -1757,6 +1905,8 @@ struct Cursor {
     connection_path: String, // Store path for direct pool access
     connection_pool: Arc<Mutex<Option<SqlitePool>>>, // Reference to connection's pool
     connection_pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Reference to connection's pragmas
+    pool_size: Arc<StdMutex<Option<usize>>>,
+    connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's row_factory at cursor creation
 }
 
@@ -1830,6 +1980,8 @@ impl Cursor {
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
         
         Python::attach(|py| {
@@ -1858,7 +2010,14 @@ impl Cursor {
                         Ok(Vec::new())
                     })?;
                     
-                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
                     
                     let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
                     
@@ -1916,6 +2075,8 @@ impl Cursor {
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
         
         Python::attach(|py| {
@@ -1944,7 +2105,14 @@ impl Cursor {
                         Ok(Vec::new())
                     })?;
                     
-                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
                     
                     let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
                     
@@ -2005,6 +2173,8 @@ impl Cursor {
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
         
         Python::attach(|py| {
@@ -2041,7 +2211,14 @@ impl Cursor {
                     })?;
                     
                     // Fetch all results
-                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
                     
                     let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
                     
