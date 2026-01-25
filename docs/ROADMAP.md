@@ -22,13 +22,15 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 - ✅ **Phase 2.1 Complete**: Parameterized queries (named and positional parameters, execute_many with binding)
 - ✅ **Phase 2.2 Complete**: Cursor improvements (fetchmany size-based slicing, result caching, state management)
 - ✅ **Phase 2.3 Complete**: Connection configuration (PRAGMA settings, connection string parsing, constructor parameters)
-- ⏳ **Phase 2.4 In Progress**: Pool configuration (infrastructure added, methods pending)
-- ⏳ **Phase 2.5**: Row factory compatibility (infrastructure complete, testing/validation pending)
-- ⏳ **Phase 2.6**: Transaction context managers (planned)
-- ✅ **Phase 2.7 Complete**: Advanced SQLite callbacks (enable_load_extension, set_progress_handler, create_function, set_trace_callback, set_authorizer)
-- ⏳ **Phase 2.8-2.11**: Remaining Phase 2 features (prepared statements, schema operations, etc.)
+- ⏳ **Phase 2.4 In Progress**: Pool configuration (infrastructure added; `pool_size` and `connection_timeout` getters/setters pending)
+- ⏳ **Phase 2.5**: Row factory compatibility (`Connection.row_factory` getter/setter; blocks `test_connection_properties`, `test_row_factory_comprehensive`)
+- ✅ **Phase 2.6 Complete**: Transaction context managers (`Connection.transaction()` async CM, execute_many in transactions, fetch_* use transaction connection)
+- ⏳ **Phase 2.7 In Progress**: Advanced SQLite callbacks (enable_load_extension, set_progress_handler, create_function, set_trace_callback, set_authorizer — implementation pending; tests fail)
+- ⏳ **Phase 2.8-2.11**: Remaining Phase 2 features (prepared statements, schema operations, iterdump, set_pragma behavior fix, etc.)
 
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
+
+**Recent progress (execute_many / transaction fix):** `Connection.transaction()` async context manager implemented; `execute_many` and `fetch_*` work correctly inside transactions (lock released per iteration, fetch uses transaction connection). Optional `parameters` on execute/fetch/cursor for aiosqlite compat. Regression tests added. See plan `fix_execute_many_transaction_lock` and [EXECUTE_MANY_TRANSACTION_ISSUE.md](EXECUTE_MANY_TRANSACTION_ISSUE.md).
 
 ## Phase 1 — Credibility
 
@@ -60,7 +62,7 @@ Focus: Fix critical performance issues, add essential features for production us
 - **Basic transactions** ✅ (complete - basic implementation)
   - ✅ `begin()`, `commit()`, `rollback()` methods
   - ✅ Transaction state tracking
-  - ⏳ Transaction context managers (Phase 2)
+  - ✅ Transaction context managers (`Connection.transaction()`, execute_many and fetch_* in transactions)
   - ⏳ Nested transaction handling (savepoints) (Phase 2)
   - ⏳ Transaction isolation level configuration (Phase 2)
 
@@ -104,7 +106,7 @@ Focus: Fix critical performance issues, add essential features for production us
 - **Query methods** ✅ (complete)
   - ✅ `fetch_one()` - fetch single row
   - ✅ `fetch_optional()` - fetch one row or None
-  - ✅ `execute_many()` - execute multiple statements (placeholder, parameter binding in Phase 2)
+  - ✅ `execute_many()` - execute multiple parameterized statements (works in transactions; list-of-tuples/list-of-lists)
   - ✅ `last_insert_rowid()` - get last insert ID
   - ✅ `changes()` - get number of affected rows
 
@@ -124,7 +126,8 @@ Focus: Fix critical performance issues, add essential features for production us
   - ✅ Compatible transaction methods (`commit()`, `rollback()`, `begin()`)
   - ✅ Matching exception types (`Error`, `Warning`, `DatabaseError`, `OperationalError`, `ProgrammingError`, `IntegrityError`)
   - ✅ Compatible context manager behavior for connections and cursors
-  - ⏳ Row factory compatibility (`row_factory` parameter) (Phase 2)
+  - ✅ Optional `parameters` on `execute` / `fetch_*` / `Cursor.execute` (PyO3 `signature`; aiosqlite compat)
+  - ⏳ Row factory compatibility (`row_factory` parameter) (Phase 2.5)
   - ⏳ Drop-in replacement validation: `import rapsqlite as aiosqlite` compatibility tests (Phase 2)
 
 - **Migration support** ⏳ (Phase 2)
@@ -153,7 +156,22 @@ Focus: Fix critical performance issues, add essential features for production us
 
 Focus: Feature additions, performance optimizations, and broader SQLite feature support.
 
-**Current Phase 2 Status**: Core features complete (2.1-2.3), pool configuration infrastructure added (2.4), remaining features in progress.
+**Current Phase 2 Status**: Core features complete (2.1-2.3, 2.6). Transaction context managers and execute_many-in-transactions fixed. Pool configuration (2.4), row factory (2.5), and advanced callbacks (2.7) in progress.
+
+### Phase 2 features to implement (from compat gaps)
+
+Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
+
+- **2.4 — `pool_size` getter/setter** (⏳ Pending): `test_pool_size_getter_setter`, `test_pool_size_edge_cases`, `test_pool_configuration_*`
+- **2.4 — `connection_timeout` getter/setter** (⏳ Pending): `test_connection_timeout_*`, `test_pool_configuration_*`
+- **2.5 — `row_factory` getter/setter** (⏳ Pending): `test_connection_properties`, `test_row_factory_comprehensive`
+- **2.7 — `enable_load_extension()`** (⏳ Pending): `test_enable_load_extension*`, callback-combo tests
+- **2.7 — `create_function()` / `remove_function()`** (⏳ Pending): `test_create_function*`, `test_custom_function_*`
+- **2.7 — `set_trace_callback()`** (⏳ Pending): `test_set_trace_callback*`, `test_trace_callback_with_errors`, etc.
+- **2.7 — `set_authorizer()`** (⏳ Pending): `test_set_authorizer*`, `test_authorizer_action_codes`, etc.
+- **2.7 — `set_progress_handler()`** (⏳ Pending): `test_set_progress_handler*`, `test_all_callbacks_together`
+- **2.8+ — `iterdump()`** (⏳ Planned): `test_iterdump`
+- **2.8+ — `set_pragma` behavior** (⏳ Investigate): `test_set_pragma` (assertion `1 == 2`); PRAGMA application or return-value mismatch
 
 ### Prepared Statements & Parameterized Queries
 
@@ -167,6 +185,7 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
   - ✅ Named parameters (`:name`, `@name`, `$name`) - complete
   - ✅ Positional parameters (`?`, `?1`, `?2`) - complete
   - ✅ Type-safe parameter binding - complete
+  - ✅ `execute_many()` in transactions (list-of-tuples/list-of-lists) - complete
   - ⏳ Array parameter binding for IN clauses (basic support via lists, enhanced planned)
   - ✅ Complete `execute_many()` implementation with parameter binding - complete
 
@@ -182,6 +201,13 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
 
 ### Advanced SQLite Features
 
+- **Phase 2.7 callbacks** ⏳ (in progress — implementation pending)
+  - ⏳ `enable_load_extension()` — `test_enable_load_extension*`
+  - ⏳ `create_function()` / `remove_function()` — `test_create_function*`, `test_custom_function_*`
+  - ⏳ `set_trace_callback()` — `test_set_trace_callback*`, etc.
+  - ⏳ `set_authorizer()` — `test_set_authorizer*`, etc.
+  - ⏳ `set_progress_handler()` — `test_set_progress_handler*`, etc.
+- **iterdump** ⏳ (Phase 2.8+): `Connection.iterdump()` — `test_iterdump`
 - **SQLite-specific features**
   - Full-text search (FTS) support
   - JSON functions support
@@ -208,12 +234,15 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
   - ✅ PRAGMA settings support (`set_pragma()` method) - complete
   - ✅ Connection string support (URI format: `file:path?param=value`) - complete
   - ✅ PRAGMA settings via constructor parameter - complete
+  - ⏳ `set_pragma` behavior investigation — `test_set_pragma` fails (assertion `1 == 2`); possible PRAGMA application or return-value mismatch
   - ⏳ Database initialization hooks (infrastructure added, async execution pending)
   - ⏳ Custom SQLite extensions (if applicable) (planned)
 
 - **Pool configuration** ⏳ (Phase 2.4 in progress)
-  - ✅ Configurable pool size (infrastructure added, implementation pending)
-  - ✅ Connection timeout settings (infrastructure added, implementation pending)
+  - ✅ Configurable pool size (infrastructure added)
+  - ✅ Connection timeout settings (infrastructure added)
+  - ⏳ `pool_size` getter/setter (blocking compat tests)
+  - ⏳ `connection_timeout` getter/setter (blocking compat tests)
   - ⏳ Idle connection management (planned)
   - ⏳ Pool monitoring and metrics (planned)
   - ⏳ Pool lifecycle management (advanced features from Phase 1) (planned)

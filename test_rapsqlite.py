@@ -275,6 +275,53 @@ async def test_transaction_rollback():
         cleanup_db(test_db)
 
 
+@pytest.mark.asyncio
+async def test_execute_many_in_transaction_explicit():
+    """Regression: execute_many works with explicit begin/commit."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        test_db = f.name
+
+    try:
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
+            await conn.begin()
+            await conn.execute_many(
+                "INSERT INTO test (value) VALUES (?)",
+                [["a"], ["b"], ["c"]],
+            )
+            await conn.commit()
+            rows = await conn.fetch_all("SELECT * FROM test ORDER BY id")
+            assert len(rows) == 3
+            assert rows[0][1] == "a"
+            assert rows[1][1] == "b"
+            assert rows[2][1] == "c"
+    finally:
+        cleanup_db(test_db)
+
+
+@pytest.mark.asyncio
+async def test_execute_many_in_transaction_context_manager():
+    """Regression: execute_many works inside async with db.transaction()."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        test_db = f.name
+
+    try:
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
+            async with conn.transaction():
+                await conn.execute_many(
+                    "INSERT INTO test (value) VALUES (?)",
+                    [["x"], ["y"], ["z"]],
+                )
+            rows = await conn.fetch_all("SELECT * FROM test ORDER BY id")
+            assert len(rows) == 3
+            assert rows[0][1] == "x"
+            assert rows[1][1] == "y"
+            assert rows[2][1] == "z"
+    finally:
+        cleanup_db(test_db)
+
+
 # API method tests
 @pytest.mark.asyncio
 async def test_fetch_one():

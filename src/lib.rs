@@ -645,6 +645,147 @@ async fn bind_and_fetch_optional(
         .map_err(|e| map_sqlx_error(e, path, query))
 }
 
+/// Helper to bind parameters and fetch all rows on a specific connection.
+async fn bind_and_fetch_all_on_connection(
+    query: &str,
+    params: &[SqliteParam],
+    conn: &mut PoolConnection<sqlx::Sqlite>,
+    path: &str,
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, PyErr> {
+    if params.is_empty() {
+        return sqlx::query(query)
+            .fetch_all(&mut **conn)
+            .await
+            .map_err(|e| map_sqlx_error(e, path, query));
+    }
+    if params.len() > 16 {
+        return Err(map_sqlx_error(
+            sqlx::Error::Protocol(
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+            ),
+            path,
+            query,
+        ));
+    }
+    let query_builder = match params.len() {
+        1 => bind_chain!(query, params, 0),
+        2 => bind_chain!(query, params, 0, 1),
+        3 => bind_chain!(query, params, 0, 1, 2),
+        4 => bind_chain!(query, params, 0, 1, 2, 3),
+        5 => bind_chain!(query, params, 0, 1, 2, 3, 4),
+        6 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5),
+        7 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6),
+        8 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7),
+        9 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8),
+        10 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        11 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        12 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        13 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        14 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+        15 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+        16 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+        _ => unreachable!(),
+    };
+    query_builder
+        .fetch_all(&mut **conn)
+        .await
+        .map_err(|e| map_sqlx_error(e, path, query))
+}
+
+/// Helper to bind parameters and fetch one row on a specific connection.
+async fn bind_and_fetch_one_on_connection(
+    query: &str,
+    params: &[SqliteParam],
+    conn: &mut PoolConnection<sqlx::Sqlite>,
+    path: &str,
+) -> Result<sqlx::sqlite::SqliteRow, PyErr> {
+    if params.is_empty() {
+        return sqlx::query(query)
+            .fetch_one(&mut **conn)
+            .await
+            .map_err(|e| map_sqlx_error(e, path, query));
+    }
+    if params.len() > 16 {
+        return Err(map_sqlx_error(
+            sqlx::Error::Protocol(
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+            ),
+            path,
+            query,
+        ));
+    }
+    let query_builder = match params.len() {
+        1 => bind_chain!(query, params, 0),
+        2 => bind_chain!(query, params, 0, 1),
+        3 => bind_chain!(query, params, 0, 1, 2),
+        4 => bind_chain!(query, params, 0, 1, 2, 3),
+        5 => bind_chain!(query, params, 0, 1, 2, 3, 4),
+        6 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5),
+        7 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6),
+        8 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7),
+        9 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8),
+        10 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        11 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        12 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        13 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        14 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+        15 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+        16 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+        _ => unreachable!(),
+    };
+    query_builder
+        .fetch_one(&mut **conn)
+        .await
+        .map_err(|e| map_sqlx_error(e, path, query))
+}
+
+/// Helper to bind parameters and fetch optional row on a specific connection.
+async fn bind_and_fetch_optional_on_connection(
+    query: &str,
+    params: &[SqliteParam],
+    conn: &mut PoolConnection<sqlx::Sqlite>,
+    path: &str,
+) -> Result<Option<sqlx::sqlite::SqliteRow>, PyErr> {
+    if params.is_empty() {
+        return sqlx::query(query)
+            .fetch_optional(&mut **conn)
+            .await
+            .map_err(|e| map_sqlx_error(e, path, query));
+    }
+    if params.len() > 16 {
+        return Err(map_sqlx_error(
+            sqlx::Error::Protocol(
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+            ),
+            path,
+            query,
+        ));
+    }
+    let query_builder = match params.len() {
+        1 => bind_chain!(query, params, 0),
+        2 => bind_chain!(query, params, 0, 1),
+        3 => bind_chain!(query, params, 0, 1, 2),
+        4 => bind_chain!(query, params, 0, 1, 2, 3),
+        5 => bind_chain!(query, params, 0, 1, 2, 3, 4),
+        6 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5),
+        7 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6),
+        8 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7),
+        9 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8),
+        10 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        11 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        12 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        13 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        14 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+        15 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+        16 => bind_chain!(query, params, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+        _ => unreachable!(),
+    };
+    query_builder
+        .fetch_optional(&mut **conn)
+        .await
+        .map_err(|e| map_sqlx_error(e, path, query))
+}
+
 /// Helper to get or create pool and apply PRAGMAs.
 async fn get_or_create_pool(
     path: &str,
@@ -727,6 +868,7 @@ fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
 fn _rapsqlite(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Connection>()?;
     m.add_class::<Cursor>()?;
+    m.add_class::<TransactionContextManager>()?;
 
     // Register exception classes (required for create_exception! to be accessible from Python)
     m.add("Error", py.get_type::<Error>())?;
@@ -926,12 +1068,10 @@ impl Connection {
                 // Store the connection for reuse in all transaction operations
                 {
                     let mut conn_guard = transaction_connection.lock().await;
-                    eprintln!("[DEBUG begin] Storing transaction connection, pointer: {:p}", &*conn);
                     *conn_guard = Some(conn);
                 }
 
                 *trans_guard = TransactionState::Active;
-                eprintln!("[DEBUG begin] Transaction state set to Active");
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -1005,6 +1145,7 @@ impl Connection {
     }
 
     /// Execute a SQL query (does not return results).
+    #[pyo3(signature = (query, parameters = None))]
     fn execute(
         self_: PyRef<Self>,
         query: String,
@@ -1109,40 +1250,30 @@ impl Connection {
                 let mut total_changes = 0u64;
                 let mut last_row_id = 0i64;
 
-                // Check transaction state first
+                // Check if we're in a transaction - use stored connection if active
                 let in_transaction = {
                     let trans_guard = transaction_state.lock().await;
                     *trans_guard == TransactionState::Active
                 };
-                eprintln!("[DEBUG execute_many] Transaction state: {:?}, checking connection...", in_transaction);
-                
-                // Check if we're in a transaction - use stored connection if active
-                let mut conn_guard = transaction_connection.lock().await;
-                eprintln!("[DEBUG execute_many] Connection guard acquired, has connection: {}", conn_guard.is_some());
-                
-                if let Some(conn) = conn_guard.as_mut() {
-                    // In a transaction: use the stored connection for all executions
-                    // Hold the lock across the loop to ensure connection consistency
-                    // This matches the pattern used in execute() method
-                    eprintln!("[DEBUG execute_many] Using transaction connection, {} param sets", processed_params.len());
-                    for (idx, param_values) in processed_params.iter().enumerate() {
-                        eprintln!("[DEBUG execute_many] Executing param set {} of {}", idx + 1, processed_params.len());
-                        let result = bind_and_execute_on_connection(&query, &param_values, conn, &path)
-                            .await?;
-                        
+
+                if in_transaction {
+                    // Use stored transaction connection. Release lock each iteration
+                    // to match the execute-in-loop pattern (lock -> use -> release).
+                    for param_values in processed_params.iter() {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        let result =
+                            bind_and_execute_on_connection(&query, param_values, conn, &path).await?;
                         total_changes += result.rows_affected();
                         last_row_id = result.last_insert_rowid();
-                        eprintln!("[DEBUG execute_many] Param set {} completed successfully", idx + 1);
+                        drop(conn_guard);
                     }
-                    // conn_guard is dropped here automatically
                 } else {
-                    // Not in a transaction: can use pool (each execution may use different connection)
-                    eprintln!("[DEBUG execute_many] No transaction connection, using pool");
-                    drop(conn_guard);
                     for param_values in processed_params {
                         let result = bind_and_execute(&query, &param_values, &pool_clone, &path)
                             .await?;
-                        
                         total_changes += result.rows_affected();
                         last_row_id = result.last_insert_rowid();
                     }
@@ -1158,6 +1289,7 @@ impl Connection {
     }
 
     /// Fetch all rows from a SELECT query.
+    #[pyo3(signature = (query, parameters = None))]
     fn fetch_all(
         self_: PyRef<Self>,
         query: String,
@@ -1166,38 +1298,50 @@ impl Connection {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
         let pragmas = Arc::clone(&self_.pragmas);
-        
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
-            
+
             let params = params.as_borrowed();
-            
+
             // Check if it's a dict (named parameters)
             if let Ok(dict) = params.downcast::<pyo3::types::PyDict>() {
                 return process_named_parameters(&query, dict);
             }
-            
+
             // Check if it's a list or tuple (positional parameters)
             if let Ok(list) = params.downcast::<PyList>() {
                 let params_vec = process_positional_parameters(list)?;
                 return Ok((query, params_vec));
             }
-            
+
             // Single value (treat as single positional parameter)
             let param = SqliteParam::from_py(&params)?;
             Ok((query, vec![param]))
         })?;
-        
+
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
 
-                // Build query with bound parameters
-                let rows = bind_and_fetch_all(&processed_query, &param_values, &pool_clone, &path)
-                    .await?;
+                let rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    bind_and_fetch_all(&processed_query, &param_values, &pool_clone, &path).await?
+                };
 
                 // Convert rows to Python lists - need Python GIL for this
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
@@ -1214,6 +1358,7 @@ impl Connection {
     }
 
     /// Fetch a single row from a SELECT query.
+    #[pyo3(signature = (query, parameters = None))]
     fn fetch_one(
         self_: PyRef<Self>,
         query: String,
@@ -1222,37 +1367,45 @@ impl Connection {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
         let pragmas = Arc::clone(&self_.pragmas);
-        
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
-            
+
             let params = params.as_borrowed();
-            
-            // Check if it's a dict (named parameters)
+
             if let Ok(dict) = params.downcast::<pyo3::types::PyDict>() {
                 return process_named_parameters(&query, dict);
             }
-            
-            // Check if it's a list or tuple (positional parameters)
             if let Ok(list) = params.downcast::<PyList>() {
                 let params_vec = process_positional_parameters(list)?;
                 return Ok((query, params_vec));
             }
-            
-            // Single value (treat as single positional parameter)
             let param = SqliteParam::from_py(&params)?;
             Ok((query, vec![param]))
         })?;
-        
+
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
 
-                let row = bind_and_fetch_one(&processed_query, &param_values, &pool_clone, &path)
-                    .await?;
+                let row = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    bind_and_fetch_one(&processed_query, &param_values, &pool_clone, &path).await?
+                };
 
                 Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(row_to_py_list(py, &row)?.into()) })
             };
@@ -1261,6 +1414,7 @@ impl Connection {
     }
 
     /// Fetch a single row from a SELECT query, returning None if no rows.
+    #[pyo3(signature = (query, parameters = None))]
     fn fetch_optional(
         self_: PyRef<Self>,
         query: String,
@@ -1269,41 +1423,51 @@ impl Connection {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
         let pragmas = Arc::clone(&self_.pragmas);
-        
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
-            
+
             let params = params.as_borrowed();
-            
-            // Check if it's a dict (named parameters)
+
             if let Ok(dict) = params.downcast::<pyo3::types::PyDict>() {
                 return process_named_parameters(&query, dict);
             }
-            
-            // Check if it's a list or tuple (positional parameters)
             if let Ok(list) = params.downcast::<PyList>() {
                 let params_vec = process_positional_parameters(list)?;
                 return Ok((query, params_vec));
             }
-            
-            // Single value (treat as single positional parameter)
             let param = SqliteParam::from_py(&params)?;
             Ok((query, vec![param]))
         })?;
-        
+
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
 
-                match bind_and_fetch_optional(&processed_query, &param_values, &pool_clone, &path).await {
-                    Ok(Some(row)) => Python::attach(|py| -> PyResult<Py<PyAny>> {
+                let opt = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_optional_on_connection(&processed_query, &param_values, conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                    bind_and_fetch_optional(&processed_query, &param_values, &pool_clone, &path).await?
+                };
+
+                match opt {
+                    Some(row) => Python::attach(|py| -> PyResult<Py<PyAny>> {
                         Ok(row_to_py_list(py, &row)?.into())
                     }),
-                    Ok(None) => Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) }),
-                    Err(e) => Err(e),
+                    None => Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) }),
                 }
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -1342,6 +1506,19 @@ impl Connection {
             connection_path: path,
             connection_pool: pool,
             connection_pragmas: pragmas,
+        })
+    }
+
+    /// Return an async context manager for a transaction.
+    /// On __aenter__ calls begin(); on __aexit__ calls commit() or rollback().
+    fn transaction(slf: PyRef<Self>) -> PyResult<TransactionContextManager> {
+        Ok(TransactionContextManager {
+            path: slf.path.clone(),
+            pool: Arc::clone(&slf.pool),
+            pragmas: Arc::clone(&slf.pragmas),
+            transaction_state: Arc::clone(&slf.transaction_state),
+            transaction_connection: Arc::clone(&slf.transaction_connection),
+            connection: slf.into(),
         })
     }
 
@@ -1399,6 +1576,94 @@ impl Connection {
     }
 }
 
+/// Transaction context manager returned by `Connection::transaction()`.
+/// Runs begin on __aenter__ and commit/rollback on __aexit__ using the same
+/// connection state as the Connection.
+#[pyclass]
+struct TransactionContextManager {
+    path: String,
+    pool: Arc<Mutex<Option<SqlitePool>>>,
+    pragmas: Arc<StdMutex<Vec<(String, String)>>>,
+    transaction_state: Arc<Mutex<TransactionState>>,
+    transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    connection: Py<Connection>,
+}
+
+#[pymethods]
+impl TransactionContextManager {
+    fn __aenter__(slf: PyRef<Self>) -> PyResult<Py<PyAny>> {
+        let slf: Py<Self> = slf.into();
+        Python::attach(|py| {
+            let path = slf.borrow(py).path.clone();
+            let pool = Arc::clone(&slf.borrow(py).pool);
+            let pragmas = Arc::clone(&slf.borrow(py).pragmas);
+            let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
+            let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
+            let connection = slf.borrow(py).connection.clone_ref(py);
+            let future = async move {
+                let mut trans_guard = transaction_state.lock().await;
+                if *trans_guard == TransactionState::Active {
+                    return Err(OperationalError::new_err("Transaction already in progress"));
+                }
+                let pool_clone = get_or_create_pool(&path, &pool, &pragmas).await?;
+                let mut conn = pool_clone
+                    .acquire()
+                    .await
+                    .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {}", e)))?;
+                sqlx::query("PRAGMA busy_timeout = 5000")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| map_sqlx_error(e, &path, "PRAGMA busy_timeout = 5000"))?;
+                sqlx::query("BEGIN IMMEDIATE")
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| map_sqlx_error(e, &path, "BEGIN IMMEDIATE"))?;
+                {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    *conn_guard = Some(conn);
+                }
+                *trans_guard = TransactionState::Active;
+                Ok(connection)
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    fn __aexit__(
+        slf: PyRef<Self>,
+        exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_val: Option<&Bound<'_, PyAny>>,
+        _exc_tb: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let slf: Py<Self> = slf.into();
+        let rollback = exc_type.is_some();
+        Python::attach(|py| {
+            let path = slf.borrow(py).path.clone();
+            let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
+            let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
+            let future = async move {
+                let mut trans_guard = transaction_state.lock().await;
+                if *trans_guard != TransactionState::Active {
+                    return Err(OperationalError::new_err("No transaction in progress"));
+                }
+                let mut conn_guard = transaction_connection.lock().await;
+                let mut conn = conn_guard
+                    .take()
+                    .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                let query = if rollback { "ROLLBACK" } else { "COMMIT" };
+                sqlx::query(query)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| map_sqlx_error(e, &path, query))?;
+                drop(conn);
+                *trans_guard = TransactionState::None;
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+}
+
 /// Cursor for executing queries.
 #[pyclass]
 struct Cursor {
@@ -1415,6 +1680,7 @@ struct Cursor {
 #[pymethods]
 impl Cursor {
     /// Execute a SQL query.
+    #[pyo3(signature = (query, parameters = None))]
     fn execute(
         &mut self,
         query: String,
