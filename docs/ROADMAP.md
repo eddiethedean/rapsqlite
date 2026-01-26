@@ -30,7 +30,10 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 - ✅ **Phase 2.9 Complete**: Database backup (`Connection.backup()`)
 - ✅ **Phase 2.10 Complete**: Schema operations and introspection (`get_tables`, `get_table_info`, `get_indexes`, `get_foreign_keys`, `get_schema`, `get_views`, `get_index_list`, `get_index_info`, `get_table_xinfo`)
 - ✅ **Phase 2.11 Complete**: Database initialization hooks (`init_hook` parameter for automatic schema setup and data seeding)
-- ⏳ **Phase 2.12+**: Remaining Phase 2 features (prepared statements, set_pragma behavior fix, etc.)
+- ⏳ **Phase 2.12**: Bug fixes & compatibility (set_pragma fix, README updates) — *See "Path to Phase 2 Completion" below*
+- ⏳ **Phase 2.13**: Prepared statements & performance optimization — *See "Path to Phase 2 Completion" below*
+- ⏳ **Phase 2.14**: Drop-in replacement validation (aiosqlite test suite, migration guide) — *See "Path to Phase 2 Completion" below*
+- ⏳ **Phase 2.15**: Documentation & benchmarking — *See "Path to Phase 2 Completion" below*
 
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
 
@@ -161,6 +164,128 @@ Focus: Fix critical performance issues, add essential features for production us
 Focus: Feature additions, performance optimizations, and broader SQLite feature support.
 
 **Current Phase 2 Status**: Phases 2.1-2.11 complete. All core features implemented including parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection, and database initialization hooks. Each phase has dedicated robust test suites. Code quality: full mypy type checking and Ruff formatting/linting.
+
+### Path to Phase 2 Completion
+
+**Progress: 11/14 core phases complete (79%)**
+
+To complete Phase 2 and achieve full drop-in replacement compatibility with `aiosqlite`, the following work remains:
+
+#### Phase 2.12: Bug Fixes & Compatibility (High Priority - Quick Wins)
+
+**Estimated effort: 1-2 days**
+
+1. **Fix `set_pragma` test expectation** ⏳
+   - **Issue**: `test_set_pragma` expects incorrect value (2 instead of 1 for NORMAL)
+   - **Fix**: Update test assertion to match SQLite semantics (NORMAL = 1)
+   - **Plan**: [docs/PLAN_OPTION_B_SET_PRAGMA_FIX.md](PLAN_OPTION_B_SET_PRAGMA_FIX.md)
+   - **Impact**: Resolves compatibility test failure, improves PRAGMA behavior documentation
+
+2. **Update README limitations** ⏳
+   - Remove outdated limitations (parameterized queries, fetchmany already complete)
+   - Update status to reflect Phase 2.1-2.11 completion
+   - Clarify remaining gaps vs. completed features
+
+**Success criteria**: All compatibility tests pass, documentation accurately reflects current state
+
+#### Phase 2.13: Prepared Statements & Performance (Medium Priority)
+
+**Estimated effort: 3-5 days**
+
+1. **Statement preparation and caching** ⏳
+   - Implement prepared statement cache per connection
+   - Reuse prepared statements for repeated queries
+   - Cache management (LRU eviction, size limits)
+   - **Benefit**: Significant performance improvement for repeated queries
+
+2. **Statement pool management** ⏳
+   - Efficient statement reuse across operations
+   - Connection-level statement lifecycle
+   - **Benefit**: Reduced query preparation overhead
+
+**Success criteria**: 
+- Prepared statements cached and reused for identical queries
+- Performance benchmarks show improvement for repeated queries
+- Memory usage remains reasonable with statement cache limits
+
+#### Phase 2.14: Drop-In Replacement Validation (High Priority - Critical for v1.0)
+
+**Estimated effort: 5-7 days**
+
+1. **aiosqlite test suite compatibility** ⏳
+   - Run aiosqlite's test suite against rapsqlite
+   - Fix any compatibility issues discovered
+   - Document any intentional differences
+   - **Goal**: Pass 100% of aiosqlite test suite (or document acceptable differences)
+
+2. **Comprehensive compatibility tests** ⏳
+   - `import rapsqlite as aiosqlite` compatibility validation
+   - Test all aiosqlite patterns and idioms
+   - Edge case coverage for compatibility
+   - **Goal**: Verify seamless migration path
+
+3. **Migration guide** ⏳
+   - Document migration steps from aiosqlite to rapsqlite
+   - List any API differences or limitations
+   - Provide code examples for common patterns
+   - **Goal**: Enable easy migration for existing projects
+
+**Success criteria**:
+- aiosqlite test suite passes (or differences documented)
+- Migration guide published
+- Compatibility tests demonstrate drop-in replacement capability
+
+#### Phase 2.15: Documentation & Benchmarking (Medium Priority)
+
+**Estimated effort: 3-4 days**
+
+1. **Performance benchmarking** ⏳
+   - Compare with `aiosqlite`, `sqlite3`, other async SQLite libraries
+   - Throughput and latency metrics
+   - Concurrent operation benchmarks
+   - Transaction performance analysis
+   - **Goal**: Demonstrate performance advantages
+
+2. **Documentation improvements** ⏳
+   - Complete API documentation
+   - Advanced usage patterns and examples
+   - Best practices and anti-patterns
+   - Performance tuning guides
+   - **Goal**: Production-ready documentation
+
+**Success criteria**: 
+- Benchmarks published showing competitive/improved performance
+- Comprehensive documentation available
+- Examples cover common use cases
+
+### Phase 2 Completion Checklist
+
+- [x] Phase 2.1: Parameterized queries
+- [x] Phase 2.2: Cursor improvements
+- [x] Phase 2.3: Connection configuration
+- [x] Phase 2.4: Pool configuration
+- [x] Phase 2.5: Row factory compatibility
+- [x] Phase 2.6: Transaction context managers
+- [x] Phase 2.7: Advanced SQLite callbacks
+- [x] Phase 2.8: Database dump
+- [x] Phase 2.9: Database backup
+- [x] Phase 2.10: Schema operations and introspection
+- [x] Phase 2.11: Database initialization hooks
+- [ ] Phase 2.12: Bug fixes & compatibility (set_pragma fix, README updates)
+- [ ] Phase 2.13: Prepared statements & performance
+- [ ] Phase 2.14: Drop-in replacement validation (aiosqlite test suite, migration guide)
+- [ ] Phase 2.15: Documentation & benchmarking
+
+### Recommended Implementation Order
+
+1. **Phase 2.12** (Quick wins) → Fixes compatibility issues, updates documentation
+2. **Phase 2.14** (Critical for v1.0) → Validates drop-in replacement, enables migration
+3. **Phase 2.13** (Performance) → Optimizes for production use
+4. **Phase 2.15** (Documentation) → Completes user-facing materials
+
+**Estimated total remaining effort: 12-18 days**
+
+Once Phase 2 is complete, `rapsqlite` will be ready for v1.0 release as a production-ready, drop-in replacement for `aiosqlite` with true async performance.
 
 ### Phase 2 features to implement (from compat gaps)
 
@@ -434,4 +559,4 @@ Following semantic versioning:
 - `v1.0`: Stable API, Phase 1 complete, production-ready (ready for release)
 - `v1.x+`: Phase 2 and 3 features, backwards-compatible additions
 
-**Current Version: v0.2.0** — Phase 1 complete; Phase 2.1-2.11 complete (parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection, database initialization hooks). Core aiosqlite API compatibility significantly improved. Python 3.8–3.14 supported. 312 tests passing (7 skipped). Full mypy type checking and Ruff formatting/linting. Ready for v1.0 when remaining Phase 2 goals are met.
+**Current Version: v0.2.0** — Phase 1 complete; Phase 2.1-2.11 complete (79% of Phase 2). Core features: parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection, database initialization hooks. Core aiosqlite API compatibility significantly improved. Python 3.8–3.14 supported. 312 tests passing (7 skipped). Full mypy type checking and Ruff formatting/linting. **Remaining Phase 2 work**: Bug fixes (2.12), prepared statements (2.13), drop-in replacement validation (2.14), documentation & benchmarking (2.15). See "Path to Phase 2 Completion" section for detailed roadmap. Ready for v1.0 when Phase 2 is complete.
