@@ -1,6 +1,6 @@
 """Type stubs for _rapsqlite Rust extension module."""
 
-from typing import Any, Callable, Coroutine, List, Optional, Type
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Type
 
 class Error(Exception):
     """Base exception class for rapsqlite errors."""
@@ -113,6 +113,164 @@ class Connection:
             The target parameter must be a rapsqlite.Connection. Backing up to
             sqlite3.Connection is not supported due to SQLite library instance
             incompatibility. See README.md for details and workarounds.
+        """
+        ...
+    
+    def get_tables(
+        self, name: Optional[str] = None
+    ) -> Coroutine[Any, Any, List[str]]:
+        """Get list of table names in the database.
+        
+        Args:
+            name: Optional table name filter. If provided, returns only that table if it exists.
+        
+        Returns:
+            List of table names (strings), excluding system tables (sqlite_*).
+        """
+        ...
+    
+    def get_table_info(
+        self, table_name: str
+    ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
+        """Get table information (columns) for a specific table.
+        
+        Args:
+            table_name: Name of the table to get information for.
+        
+        Returns:
+            List of dictionaries with column metadata:
+            - cid: Column ID
+            - name: Column name
+            - type: Column type
+            - notnull: Not null constraint (0 or 1)
+            - dflt_value: Default value (can be None)
+            - pk: Primary key (0 or 1)
+        
+        Raises:
+            OperationalError: If table does not exist.
+        """
+        ...
+    
+    def get_indexes(
+        self, table_name: Optional[str] = None
+    ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
+        """Get list of indexes in the database.
+        
+        Args:
+            table_name: Optional table name filter. If provided, returns only indexes for that table.
+        
+        Returns:
+            List of dictionaries with index information:
+            - name: Index name
+            - table: Table name
+            - unique: Whether index is unique (0 or 1)
+            - sql: CREATE INDEX SQL statement (can be None)
+        """
+        ...
+    
+    def get_foreign_keys(
+        self, table_name: str
+    ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
+        """Get foreign key constraints for a specific table.
+        
+        Args:
+            table_name: Name of the table to get foreign keys for.
+        
+        Returns:
+            List of dictionaries with foreign key information:
+            - id: Foreign key ID
+            - seq: Sequence number
+            - table: Referenced table name
+            - from: Column in current table
+            - to: Column in referenced table
+            - on_update: ON UPDATE action
+            - on_delete: ON DELETE action
+            - match: MATCH clause
+        """
+        ...
+    
+    def get_schema(
+        self, table_name: Optional[str] = None
+    ) -> Coroutine[Any, Any, Dict[str, Any]]:
+        """Get comprehensive schema information for a table or all tables.
+        
+        Args:
+            table_name: Optional table name. If provided, returns detailed info for that table.
+                If None, returns list of all tables.
+        
+        Returns:
+            Dictionary with schema information:
+            - If table_name provided: columns, indexes, foreign_keys, table_name
+            - If table_name is None: tables (list of table names)
+        """
+        ...
+    
+    def get_views(
+        self, name: Optional[str] = None
+    ) -> Coroutine[Any, Any, List[str]]:
+        """Get list of view names in the database.
+        
+        Args:
+            name: Optional view name filter. If provided, returns only that view if it exists.
+        
+        Returns:
+            List of view names (strings).
+        """
+        ...
+    
+    def get_index_list(
+        self, table_name: str
+    ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
+        """Get list of indexes for a specific table using PRAGMA index_list.
+        
+        Args:
+            table_name: Name of the table to get indexes for.
+        
+        Returns:
+            List of dictionaries with index list information:
+            - seq: Sequence number
+            - name: Index name
+            - unique: Whether index is unique (0 or 1)
+            - origin: Origin of index (c=CREATE, u=UNIQUE, pk=PRIMARY KEY, or None)
+            - partial: Whether index is partial (0 or 1)
+        """
+        ...
+    
+    def get_index_info(
+        self, index_name: str
+    ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
+        """Get information about columns in an index using PRAGMA index_info.
+        
+        Args:
+            index_name: Name of the index to get information for.
+        
+        Returns:
+            List of dictionaries with index column information:
+            - seqno: Sequence number in index
+            - cid: Column ID in table
+            - name: Column name
+        """
+        ...
+    
+    def get_table_xinfo(
+        self, table_name: str
+    ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
+        """Get extended table information using PRAGMA table_xinfo (SQLite 3.26.0+).
+        
+        Returns additional information beyond table_info, including hidden columns.
+        
+        Args:
+            table_name: Name of the table to get extended information for.
+        
+        Returns:
+            List of dictionaries with extended column metadata:
+            - cid: Column ID
+            - name: Column name
+            - type: Column type
+            - notnull: Not null constraint (0 or 1)
+            - dflt_value: Default value (can be None)
+            - pk: Primary key (0 or 1)
+            - hidden: Hidden column flag (0=normal, 1=hidden, 2=virtual, 3=stored)
         """
         ...
 

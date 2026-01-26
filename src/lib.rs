@@ -3396,6 +3396,1164 @@ impl Connection {
         })
     }
 
+    /// Get list of table names in the database.
+    #[pyo3(signature = (name = None))]
+    fn get_tables(
+        self_: PyRef<Self>,
+        name: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                // Build query
+                let query = if let Some(ref table_name) = name {
+                    format!("SELECT name FROM sqlite_master WHERE type='table' AND name = '{}' AND name NOT LIKE 'sqlite_%'", table_name.replace("'", "''"))
+                } else {
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
+                };
+
+                let rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                };
+
+                // Convert to list of table names (strings)
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let result_list = PyList::empty(py);
+                    for row in rows.iter() {
+                        if let Ok(table_name) = row.try_get::<String, _>(0) {
+                            result_list.append(PyString::new(py, &table_name))?;
+                        }
+                    }
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Get table information (columns) for a specific table.
+    fn get_table_info(
+        self_: PyRef<Self>,
+        table_name: String,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        // Escape table name for SQL
+        let escaped_table_name = table_name.replace("'", "''");
+        let query = format!("PRAGMA table_info('{}')", escaped_table_name);
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                let rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                };
+
+                // Convert to list of dictionaries
+                // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let result_list = PyList::empty(py);
+                    for row in rows.iter() {
+                        let dict = PyDict::new(py);
+                        
+                        // cid (column id)
+                        if let Ok(cid) = row.try_get::<i64, _>(0) {
+                            dict.set_item("cid", PyInt::new(py, cid))?;
+                        }
+                        
+                        // name
+                        if let Ok(name) = row.try_get::<String, _>(1) {
+                            dict.set_item("name", PyString::new(py, &name))?;
+                        }
+                        
+                        // type
+                        if let Ok(col_type) = row.try_get::<String, _>(2) {
+                            dict.set_item("type", PyString::new(py, &col_type))?;
+                        }
+                        
+                        // notnull (0 or 1)
+                        if let Ok(notnull) = row.try_get::<i64, _>(3) {
+                            dict.set_item("notnull", PyInt::new(py, notnull))?;
+                        }
+                        
+                        // dflt_value (default value, can be NULL)
+                        let dflt_val: Py<PyAny> = if let Ok(Some(val)) = row.try_get::<Option<String>, _>(4) {
+                            PyString::new(py, &val).into()
+                        } else if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(4) {
+                            PyInt::new(py, val).into()
+                        } else if let Ok(Some(val)) = row.try_get::<Option<f64>, _>(4) {
+                            PyFloat::new(py, val).into()
+                        } else {
+                            py.None()
+                        };
+                        dict.set_item("dflt_value", dflt_val)?;
+                        
+                        // pk (primary key, 0 or 1)
+                        if let Ok(pk) = row.try_get::<i64, _>(5) {
+                            dict.set_item("pk", PyInt::new(py, pk))?;
+                        }
+                        
+                        result_list.append(dict)?;
+                    }
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Get list of indexes in the database.
+    #[pyo3(signature = (table_name = None))]
+    fn get_indexes(
+        self_: PyRef<Self>,
+        table_name: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        // Build query
+        let query = if let Some(ref tbl_name) = table_name {
+            let escaped = tbl_name.replace("'", "''");
+            format!("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name = '{}' AND name NOT LIKE 'sqlite_%' ORDER BY name", escaped)
+        } else {
+            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
+        };
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                let rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                };
+
+                // Convert to list of dictionaries
+                // Columns: name, tbl_name, sql
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let result_list = PyList::empty(py);
+                    for row in rows.iter() {
+                        let dict = PyDict::new(py);
+                        
+                        // name
+                        if let Ok(name) = row.try_get::<String, _>(0) {
+                            dict.set_item("name", PyString::new(py, &name))?;
+                        }
+                        
+                        // table
+                        if let Ok(tbl_name) = row.try_get::<String, _>(1) {
+                            dict.set_item("table", PyString::new(py, &tbl_name))?;
+                        }
+                        
+                        // unique (determined from SQL - check if UNIQUE keyword exists)
+                        let unique = if let Ok(Some(sql)) = row.try_get::<Option<String>, _>(2) {
+                            if sql.to_uppercase().contains("UNIQUE") {
+                                1
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        };
+                        dict.set_item("unique", PyInt::new(py, unique))?;
+                        
+                        // sql
+                        if let Ok(Some(sql)) = row.try_get::<Option<String>, _>(2) {
+                            dict.set_item("sql", PyString::new(py, &sql))?;
+                        } else {
+                            dict.set_item("sql", py.None())?;
+                        }
+                        
+                        result_list.append(dict)?;
+                    }
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Get foreign key constraints for a specific table.
+    fn get_foreign_keys(
+        self_: PyRef<Self>,
+        table_name: String,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        // Escape table name for SQL
+        let escaped_table_name = table_name.replace("'", "''");
+        let query = format!("PRAGMA foreign_key_list('{}')", escaped_table_name);
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                let rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                };
+
+                // Convert to list of dictionaries
+                // PRAGMA foreign_key_list returns: id, seq, table, from, to, on_update, on_delete, match
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let result_list = PyList::empty(py);
+                    for row in rows.iter() {
+                        let dict = PyDict::new(py);
+                        
+                        // id
+                        if let Ok(id) = row.try_get::<i64, _>(0) {
+                            dict.set_item("id", PyInt::new(py, id))?;
+                        }
+                        
+                        // seq
+                        if let Ok(seq) = row.try_get::<i64, _>(1) {
+                            dict.set_item("seq", PyInt::new(py, seq))?;
+                        }
+                        
+                        // table (referenced table)
+                        if let Ok(ref_table) = row.try_get::<String, _>(2) {
+                            dict.set_item("table", PyString::new(py, &ref_table))?;
+                        }
+                        
+                        // from (column in current table)
+                        if let Ok(from_col) = row.try_get::<String, _>(3) {
+                            dict.set_item("from", PyString::new(py, &from_col))?;
+                        }
+                        
+                        // to (column in referenced table)
+                        if let Ok(to_col) = row.try_get::<String, _>(4) {
+                            dict.set_item("to", PyString::new(py, &to_col))?;
+                        }
+                        
+                        // on_update
+                        if let Ok(on_update) = row.try_get::<String, _>(5) {
+                            dict.set_item("on_update", PyString::new(py, &on_update))?;
+                        }
+                        
+                        // on_delete
+                        if let Ok(on_delete) = row.try_get::<String, _>(6) {
+                            dict.set_item("on_delete", PyString::new(py, &on_delete))?;
+                        }
+                        
+                        // match
+                        if let Ok(match_val) = row.try_get::<String, _>(7) {
+                            dict.set_item("match", PyString::new(py, &match_val))?;
+                        }
+                        
+                        result_list.append(dict)?;
+                    }
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Get comprehensive schema information for a table or all tables.
+    #[pyo3(signature = (table_name = None))]
+    fn get_schema(
+        self_: PyRef<Self>,
+        table_name: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                // Get tables
+                let tables_query = if let Some(ref tbl_name) = table_name {
+                    format!("SELECT name FROM sqlite_master WHERE type='table' AND name = '{}' AND name NOT LIKE 'sqlite_%'", tbl_name.replace("'", "''"))
+                } else {
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
+                };
+
+                let tables_rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&tables_query, &[], conn, &path).await?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    bind_and_fetch_all_on_connection(&tables_query, &[], conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    bind_and_fetch_all(&tables_query, &[], &pool_clone, &path).await?
+                };
+
+                // Extract table names
+                let mut table_names = Vec::new();
+                for row in tables_rows.iter() {
+                    if let Ok(name) = row.try_get::<String, _>(0) {
+                        table_names.push(name);
+                    }
+                }
+
+                // For each table, fetch detailed information
+                let mut tables_info = Vec::new();
+                for tbl_name in &table_names {
+                    // Get table info
+                    let info_query = format!("PRAGMA table_info('{}')", tbl_name.replace("'", "''"));
+                    let info_rows = if in_transaction {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        bind_and_fetch_all_on_connection(&info_query, &[], conn, &path).await?
+                    } else if has_callbacks_flag {
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        bind_and_fetch_all_on_connection(&info_query, &[], conn, &path).await?
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        ).await?;
+                        bind_and_fetch_all(&info_query, &[], &pool_clone, &path).await?
+                    };
+
+                    // Get indexes
+                    let indexes_query = format!("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name = '{}' AND name NOT LIKE 'sqlite_%' ORDER BY name", tbl_name.replace("'", "''"));
+                    let indexes_rows = if in_transaction {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        bind_and_fetch_all_on_connection(&indexes_query, &[], conn, &path).await?
+                    } else if has_callbacks_flag {
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        bind_and_fetch_all_on_connection(&indexes_query, &[], conn, &path).await?
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        ).await?;
+                        bind_and_fetch_all(&indexes_query, &[], &pool_clone, &path).await?
+                    };
+
+                    // Get foreign keys
+                    let fk_query = format!("PRAGMA foreign_key_list('{}')", tbl_name.replace("'", "''"));
+                    let fk_rows = if in_transaction {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        bind_and_fetch_all_on_connection(&fk_query, &[], conn, &path).await?
+                    } else if has_callbacks_flag {
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        bind_and_fetch_all_on_connection(&fk_query, &[], conn, &path).await?
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        ).await?;
+                        bind_and_fetch_all(&fk_query, &[], &pool_clone, &path).await?
+                    };
+
+                    tables_info.push((tbl_name.clone(), info_rows, indexes_rows, fk_rows));
+                }
+
+                // Build schema dictionary
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let schema_dict = PyDict::new(py);
+                    
+                    if let Some(ref tbl_name) = table_name {
+                        // Single table - return detailed info
+                        if let Some((_, info_rows, indexes_rows, fk_rows)) = tables_info.first() {
+                            // Table info
+                            let columns_list = PyList::empty(py);
+                            for row in info_rows.iter() {
+                                let dict = PyDict::new(py);
+                                if let Ok(cid) = row.try_get::<i64, _>(0) {
+                                    dict.set_item("cid", PyInt::new(py, cid))?;
+                                }
+                                if let Ok(name) = row.try_get::<String, _>(1) {
+                                    dict.set_item("name", PyString::new(py, &name))?;
+                                }
+                                if let Ok(col_type) = row.try_get::<String, _>(2) {
+                                    dict.set_item("type", PyString::new(py, &col_type))?;
+                                }
+                                if let Ok(notnull) = row.try_get::<i64, _>(3) {
+                                    dict.set_item("notnull", PyInt::new(py, notnull))?;
+                                }
+                                let dflt_val: Py<PyAny> = if let Ok(Some(val)) = row.try_get::<Option<String>, _>(4) {
+                                    PyString::new(py, &val).into()
+                                } else if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(4) {
+                                    PyInt::new(py, val).into()
+                                } else if let Ok(Some(val)) = row.try_get::<Option<f64>, _>(4) {
+                                    PyFloat::new(py, val).into()
+                                } else {
+                                    py.None()
+                                };
+                                dict.set_item("dflt_value", dflt_val)?;
+                                if let Ok(pk) = row.try_get::<i64, _>(5) {
+                                    dict.set_item("pk", PyInt::new(py, pk))?;
+                                }
+                                columns_list.append(dict)?;
+                            }
+                            schema_dict.set_item("columns", columns_list)?;
+
+                            // Indexes
+                            let indexes_list = PyList::empty(py);
+                            for row in indexes_rows.iter() {
+                                let dict = PyDict::new(py);
+                                if let Ok(name) = row.try_get::<String, _>(0) {
+                                    dict.set_item("name", PyString::new(py, &name))?;
+                                }
+                                if let Ok(tbl_name) = row.try_get::<String, _>(1) {
+                                    dict.set_item("table", PyString::new(py, &tbl_name))?;
+                                }
+                                let unique = if let Ok(Some(sql)) = row.try_get::<Option<String>, _>(2) {
+                                    if sql.to_uppercase().contains("UNIQUE") { 1 } else { 0 }
+                                } else { 0 };
+                                dict.set_item("unique", PyInt::new(py, unique))?;
+                                if let Ok(Some(sql)) = row.try_get::<Option<String>, _>(2) {
+                                    dict.set_item("sql", PyString::new(py, &sql))?;
+                                } else {
+                                    dict.set_item("sql", py.None())?;
+                                }
+                                indexes_list.append(dict)?;
+                            }
+                            schema_dict.set_item("indexes", indexes_list)?;
+
+                            // Foreign keys
+                            let fk_list = PyList::empty(py);
+                            for row in fk_rows.iter() {
+                                let dict = PyDict::new(py);
+                                if let Ok(id) = row.try_get::<i64, _>(0) {
+                                    dict.set_item("id", PyInt::new(py, id))?;
+                                }
+                                if let Ok(seq) = row.try_get::<i64, _>(1) {
+                                    dict.set_item("seq", PyInt::new(py, seq))?;
+                                }
+                                if let Ok(ref_table) = row.try_get::<String, _>(2) {
+                                    dict.set_item("table", PyString::new(py, &ref_table))?;
+                                }
+                                if let Ok(from_col) = row.try_get::<String, _>(3) {
+                                    dict.set_item("from", PyString::new(py, &from_col))?;
+                                }
+                                if let Ok(to_col) = row.try_get::<String, _>(4) {
+                                    dict.set_item("to", PyString::new(py, &to_col))?;
+                                }
+                                if let Ok(on_update) = row.try_get::<String, _>(5) {
+                                    dict.set_item("on_update", PyString::new(py, &on_update))?;
+                                }
+                                if let Ok(on_delete) = row.try_get::<String, _>(6) {
+                                    dict.set_item("on_delete", PyString::new(py, &on_delete))?;
+                                }
+                                if let Ok(match_val) = row.try_get::<String, _>(7) {
+                                    dict.set_item("match", PyString::new(py, &match_val))?;
+                                }
+                                fk_list.append(dict)?;
+                            }
+                            schema_dict.set_item("foreign_keys", fk_list)?;
+                            schema_dict.set_item("table_name", PyString::new(py, tbl_name))?;
+                        }
+                    } else {
+                        // All tables - return list of table names with basic info
+                        let tables_list = PyList::empty(py);
+                        for (tbl_name, _, _, _) in &tables_info {
+                            let table_dict = PyDict::new(py);
+                            table_dict.set_item("name", PyString::new(py, tbl_name))?;
+                            tables_list.append(table_dict)?;
+                        }
+                        schema_dict.set_item("tables", tables_list)?;
+                    }
+                    
+                    Ok(schema_dict.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Get list of views in the database.
+    #[pyo3(signature = (name = None))]
+    fn get_views(
+        self_: PyRef<Self>,
+        name: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                // Build query for views
+                let query = if let Some(ref view_name) = name {
+                    format!("SELECT name FROM sqlite_master WHERE type='view' AND name = '{}'", view_name.replace("'", "''"))
+                } else {
+                    "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name".to_string()
+                };
+
+                let rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                };
+
+                // Convert to list of view names (strings)
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let result_list = PyList::empty(py);
+                    for row in rows.iter() {
+                        if let Ok(view_name) = row.try_get::<String, _>(0) {
+                            result_list.append(PyString::new(py, &view_name))?;
+                        }
+                    }
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Get list of indexes for a specific table using PRAGMA index_list.
+    fn get_index_list(
+        self_: PyRef<Self>,
+        table_name: String,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        // Escape table name for SQL
+        let escaped_table_name = table_name.replace("'", "''");
+        let query = format!("PRAGMA index_list('{}')", escaped_table_name);
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                let rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                };
+
+                // Convert to list of dictionaries
+                // PRAGMA index_list returns: seq, name, unique, origin, partial
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let result_list = PyList::empty(py);
+                    for row in rows.iter() {
+                        let dict = PyDict::new(py);
+                        
+                        // seq (sequence number)
+                        if let Ok(seq) = row.try_get::<i64, _>(0) {
+                            dict.set_item("seq", PyInt::new(py, seq))?;
+                        }
+                        
+                        // name
+                        if let Ok(name) = row.try_get::<String, _>(1) {
+                            dict.set_item("name", PyString::new(py, &name))?;
+                        }
+                        
+                        // unique (0 or 1)
+                        if let Ok(unique) = row.try_get::<i64, _>(2) {
+                            dict.set_item("unique", PyInt::new(py, unique))?;
+                        }
+                        
+                        // origin (c, u, pk, or null)
+                        if let Ok(Some(origin)) = row.try_get::<Option<String>, _>(3) {
+                            dict.set_item("origin", PyString::new(py, &origin))?;
+                        } else {
+                            dict.set_item("origin", py.None())?;
+                        }
+                        
+                        // partial (0 or 1)
+                        if let Ok(partial) = row.try_get::<i64, _>(4) {
+                            dict.set_item("partial", PyInt::new(py, partial))?;
+                        }
+                        
+                        result_list.append(dict)?;
+                    }
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Get information about columns in an index using PRAGMA index_info.
+    fn get_index_info(
+        self_: PyRef<Self>,
+        index_name: String,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        // Escape index name for SQL
+        let escaped_index_name = index_name.replace("'", "''");
+        let query = format!("PRAGMA index_info('{}')", escaped_index_name);
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                let rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                };
+
+                // Convert to list of dictionaries
+                // PRAGMA index_info returns: seqno, cid, name
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let result_list = PyList::empty(py);
+                    for row in rows.iter() {
+                        let dict = PyDict::new(py);
+                        
+                        // seqno (sequence number in index)
+                        if let Ok(seqno) = row.try_get::<i64, _>(0) {
+                            dict.set_item("seqno", PyInt::new(py, seqno))?;
+                        }
+                        
+                        // cid (column id in table)
+                        if let Ok(cid) = row.try_get::<i64, _>(1) {
+                            dict.set_item("cid", PyInt::new(py, cid))?;
+                        }
+                        
+                        // name (column name)
+                        if let Ok(name) = row.try_get::<String, _>(2) {
+                            dict.set_item("name", PyString::new(py, &name))?;
+                        }
+                        
+                        result_list.append(dict)?;
+                    }
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Get extended table information using PRAGMA table_xinfo (SQLite 3.26.0+).
+    /// Returns additional information beyond table_info, including hidden columns.
+    fn get_table_xinfo(
+        self_: PyRef<Self>,
+        table_name: String,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        // Escape table name for SQL
+        let escaped_table_name = table_name.replace("'", "''");
+        let query = format!("PRAGMA table_xinfo('{}')", escaped_table_name);
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                let rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                };
+
+                // Convert to list of dictionaries
+                // PRAGMA table_xinfo returns: cid, name, type, notnull, dflt_value, pk, hidden
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let result_list = PyList::empty(py);
+                    for row in rows.iter() {
+                        let dict = PyDict::new(py);
+                        
+                        // cid (column id)
+                        if let Ok(cid) = row.try_get::<i64, _>(0) {
+                            dict.set_item("cid", PyInt::new(py, cid))?;
+                        }
+                        
+                        // name
+                        if let Ok(name) = row.try_get::<String, _>(1) {
+                            dict.set_item("name", PyString::new(py, &name))?;
+                        }
+                        
+                        // type
+                        if let Ok(col_type) = row.try_get::<String, _>(2) {
+                            dict.set_item("type", PyString::new(py, &col_type))?;
+                        }
+                        
+                        // notnull (0 or 1)
+                        if let Ok(notnull) = row.try_get::<i64, _>(3) {
+                            dict.set_item("notnull", PyInt::new(py, notnull))?;
+                        }
+                        
+                        // dflt_value (default value, can be NULL)
+                        let dflt_val: Py<PyAny> = if let Ok(Some(val)) = row.try_get::<Option<String>, _>(4) {
+                            PyString::new(py, &val).into()
+                        } else if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(4) {
+                            PyInt::new(py, val).into()
+                        } else if let Ok(Some(val)) = row.try_get::<Option<f64>, _>(4) {
+                            PyFloat::new(py, val).into()
+                        } else {
+                            py.None()
+                        };
+                        dict.set_item("dflt_value", dflt_val)?;
+                        
+                        // pk (primary key, 0 or 1)
+                        if let Ok(pk) = row.try_get::<i64, _>(5) {
+                            dict.set_item("pk", PyInt::new(py, pk))?;
+                        }
+                        
+                        // hidden (0=normal, 1=hidden, 2=virtual, 3=stored)
+                        if let Ok(hidden) = row.try_get::<i64, _>(6) {
+                            dict.set_item("hidden", PyInt::new(py, hidden))?;
+                        }
+                        
+                        result_list.append(dict)?;
+                    }
+                    Ok(result_list.into())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
     /// Backup database to another connection.
     #[pyo3(signature = (target, *, pages = 0, progress = None, name = "main", sleep = 0.25))]
     fn backup(

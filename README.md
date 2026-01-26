@@ -247,6 +247,70 @@ asyncio.run(main())
 
 **⚠️ Important**: The `backup()` method only supports backing up to another `rapsqlite.Connection`. Backing up to Python's standard `sqlite3.Connection` is **not supported** and will cause a segmentation fault. See [Backup Limitations](#backup-limitations) for details.
 
+### Schema Operations
+
+```python
+import asyncio
+from rapsqlite import Connection
+
+async def main():
+    async with Connection("example.db") as conn:
+        # Create tables with indexes and foreign keys
+        await conn.execute("""
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER,
+                title TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        await conn.execute("CREATE INDEX idx_posts_user ON posts(user_id)")
+        
+        # List all tables
+        tables = await conn.get_tables()
+        print(tables)  # Output: ['posts', 'users']
+        
+        # Get table information
+        columns = await conn.get_table_info("users")
+        print(columns)
+        # Output: [
+        #   {'cid': 0, 'name': 'id', 'type': 'INTEGER', 'notnull': 0, 'dflt_value': None, 'pk': 1},
+        #   {'cid': 1, 'name': 'email', 'type': 'TEXT', 'notnull': 1, 'dflt_value': None, 'pk': 0}
+        # ]
+        
+        # Get indexes
+        indexes = await conn.get_indexes(table_name="posts")
+        print(indexes)
+        # Output: [
+        #   {'name': 'idx_posts_user', 'table': 'posts', 'unique': 0, 'sql': 'CREATE INDEX idx_posts_user ON posts(user_id)'}
+        # ]
+        
+        # Get foreign keys
+        foreign_keys = await conn.get_foreign_keys("posts")
+        print(foreign_keys)
+        # Output: [
+        #   {'id': 0, 'seq': 0, 'table': 'users', 'from': 'user_id', 'to': 'id', 'on_update': 'NO ACTION', 'on_delete': 'NO ACTION', 'match': 'NONE'}
+        # ]
+        
+        # Get comprehensive schema
+        schema = await conn.get_schema(table_name="posts")
+        print(schema)
+        # Output: {
+        #   'table_name': 'posts',
+        #   'columns': [...],
+        #   'indexes': [...],
+        #   'foreign_keys': [...]
+        # }
+
+asyncio.run(main())
+```
+
 ## API Reference
 
 ### `connect(path: str, **kwargs: Any) -> Connection`
@@ -381,6 +445,119 @@ Create a cursor for this connection.
 #### `Connection.close() -> None`
 
 Close the connection and release resources.
+
+#### `Connection.get_tables(name: Optional[str] = None) -> List[str]`
+
+Get list of table names in the database.
+
+**Parameters:**
+- `name` (Optional[str]): Optional table name filter. If provided, returns only that table if it exists.
+
+**Returns:**
+- `List[str]`: List of table names, excluding system tables (sqlite_*)
+
+**Example:**
+```python
+tables = await conn.get_tables()
+# Output: ['users', 'posts', 'comments']
+
+user_table = await conn.get_tables(name="users")
+# Output: ['users']
+```
+
+#### `Connection.get_table_info(table_name: str) -> List[Dict[str, Any]]`
+
+Get table information (columns) for a specific table.
+
+**Parameters:**
+- `table_name` (str): Name of the table to get information for
+
+**Returns:**
+- `List[Dict[str, Any]]`: List of dictionaries with column metadata:
+  - `cid`: Column ID
+  - `name`: Column name
+  - `type`: Column type
+  - `notnull`: Not null constraint (0 or 1)
+  - `dflt_value`: Default value (can be None)
+  - `pk`: Primary key (0 or 1)
+
+**Example:**
+```python
+info = await conn.get_table_info("users")
+# Output: [
+#   {'cid': 0, 'name': 'id', 'type': 'INTEGER', 'notnull': 0, 'dflt_value': None, 'pk': 1},
+#   {'cid': 1, 'name': 'email', 'type': 'TEXT', 'notnull': 1, 'dflt_value': None, 'pk': 0}
+# ]
+```
+
+#### `Connection.get_indexes(table_name: Optional[str] = None) -> List[Dict[str, Any]]`
+
+Get list of indexes in the database.
+
+**Parameters:**
+- `table_name` (Optional[str]): Optional table name filter. If provided, returns only indexes for that table.
+
+**Returns:**
+- `List[Dict[str, Any]]`: List of dictionaries with index information:
+  - `name`: Index name
+  - `table`: Table name
+  - `unique`: Whether index is unique (0 or 1)
+  - `sql`: CREATE INDEX SQL statement (can be None)
+
+**Example:**
+```python
+all_indexes = await conn.get_indexes()
+table_indexes = await conn.get_indexes(table_name="users")
+```
+
+#### `Connection.get_foreign_keys(table_name: str) -> List[Dict[str, Any]]`
+
+Get foreign key constraints for a specific table.
+
+**Parameters:**
+- `table_name` (str): Name of the table to get foreign keys for
+
+**Returns:**
+- `List[Dict[str, Any]]`: List of dictionaries with foreign key information:
+  - `id`: Foreign key ID
+  - `seq`: Sequence number
+  - `table`: Referenced table name
+  - `from`: Column in current table
+  - `to`: Column in referenced table
+  - `on_update`: ON UPDATE action
+  - `on_delete`: ON DELETE action
+  - `match`: MATCH clause
+
+**Example:**
+```python
+fks = await conn.get_foreign_keys("posts")
+# Output: [
+#   {'id': 0, 'seq': 0, 'table': 'users', 'from': 'user_id', 'to': 'id', ...}
+# ]
+```
+
+#### `Connection.get_schema(table_name: Optional[str] = None) -> Dict[str, Any]`
+
+Get comprehensive schema information for a table or all tables.
+
+**Parameters:**
+- `table_name` (Optional[str]): Optional table name. If provided, returns detailed info for that table. If None, returns list of all tables.
+
+**Returns:**
+- `Dict[str, Any]`: Dictionary with schema information:
+  - If `table_name` provided: `columns`, `indexes`, `foreign_keys`, `table_name`
+  - If `table_name` is None: `tables` (list of table names)
+
+**Example:**
+```python
+# Get schema for specific table
+schema = await conn.get_schema(table_name="users")
+# Output: {'table_name': 'users', 'columns': [...], 'indexes': [...], 'foreign_keys': [...]}
+
+# Get all tables
+all_schema = await conn.get_schema()
+# Output: {'tables': [{'name': 'users'}, {'name': 'posts'}]}
+```
 
 ### Cursor Methods
 

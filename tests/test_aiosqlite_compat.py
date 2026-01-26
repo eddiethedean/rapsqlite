@@ -2197,17 +2197,295 @@ async def test_row_factory_comprehensive(test_db):
         assert rows[0][1] == "Alice"
         assert rows[0][2] == 3.14
 
-        # Test custom factory
-        def custom_factory(row):
-            return {"custom_id": row[0], "custom_name": row[1].upper()}
 
-        db.row_factory = custom_factory
-        rows = await db.fetch_all("SELECT * FROM test")
-        assert isinstance(rows[0], dict)
-        assert rows[0]["custom_id"] == 1
-        assert rows[0]["custom_name"] == "ALICE"
+# Schema Operations Compatibility Tests
+# 
+# Note: aiosqlite does not have built-in schema introspection methods like
+# get_tables(), get_table_info(), get_indexes(), get_foreign_keys(), or get_schema().
+# These are rapsqlite enhancements. However, we verify that rapsqlite's schema
+# methods produce the same results as the equivalent manual SQL queries that
+# would be used with aiosqlite.
 
-        # Reset to default (list)
-        db.row_factory = None
-        rows = await db.fetch_all("SELECT * FROM test")
-        assert isinstance(rows[0], list)
+
+@pytest.mark.asyncio
+async def test_get_tables_equivalent_to_sqlite_master(test_db):
+    """Test that get_tables() returns same results as querying sqlite_master."""
+    async with connect(test_db) as conn:
+        await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+        await conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT)")
+        await conn.execute("CREATE VIEW user_view AS SELECT name FROM users")
+        
+        # Using rapsqlite's get_tables()
+        tables_method = await conn.get_tables()
+        
+        # Equivalent aiosqlite query
+        tables_query = await conn.fetch_all(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+        tables_manual = [row[0] for row in tables_query]
+        
+        assert set(tables_method) == set(tables_manual)
+        assert len(tables_method) == 2
+        assert "users" in tables_method
+        assert "posts" in tables_method
+        assert "user_view" not in tables_method  # Views excluded
+
+
+@pytest.mark.asyncio
+async def test_get_table_info_equivalent_to_pragma_table_info(test_db):
+    """Test that get_table_info() returns same results as PRAGMA table_info."""
+    async with connect(test_db) as conn:
+        await conn.execute("""
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT UNIQUE,
+                age INTEGER DEFAULT 0
+            )
+        """)
+        
+        # Using rapsqlite's get_table_info()
+        info_method = await conn.get_table_info("users")
+        
+        # Equivalent aiosqlite query
+        info_query = await conn.fetch_all("PRAGMA table_info(users)")
+        
+        # Convert query results to dict format for comparison
+        info_manual = []
+        for row in info_query:
+            info_manual.append({
+                "cid": row[0],
+                "name": row[1],
+                "type": row[2],
+                "notnull": row[3],
+                "dflt_value": row[4],
+                "pk": row[5],
+            })
+        
+        assert len(info_method) == len(info_manual)
+        assert len(info_method) == 4
+        
+        # Compare each column
+        for method_col, manual_col in zip(info_method, info_manual):
+            assert method_col["cid"] == manual_col["cid"]
+            assert method_col["name"] == manual_col["name"]
+            assert method_col["type"].upper() == manual_col["type"].upper()
+            assert method_col["notnull"] == manual_col["notnull"]
+            assert method_col["pk"] == manual_col["pk"]
+            # dflt_value might differ in representation (None vs "NULL" string)
+            method_dflt = method_col["dflt_value"]
+            manual_dflt = manual_col["dflt_value"]
+            if method_dflt is None:
+                assert manual_dflt is None
+            elif isinstance(method_dflt, str) and method_dflt.upper() == "NULL":
+                assert manual_dflt is None or str(manual_dflt).upper() == "NULL"
+            else:
+                assert str(method_dflt) == str(manual_dflt)
+
+
+@pytest.mark.asyncio
+async def test_get_indexes_equivalent_to_sqlite_master(test_db):
+    """Test that get_indexes() returns same results as querying sqlite_master."""
+    async with connect(test_db) as conn:
+        await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
+        await conn.execute("CREATE INDEX idx_email ON users(email)")
+        await conn.execute("CREATE UNIQUE INDEX idx_unique_email ON users(email)")
+        
+        # Using rapsqlite's get_indexes()
+        indexes_method = await conn.get_indexes(table_name="users")
+        
+        # Equivalent aiosqlite query
+        indexes_query = await conn.fetch_all(
+            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name='users' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+        
+        indexes_manual = []
+        for row in indexes_query:
+            # Determine unique from SQL
+            sql = row[2] or ""
+            is_unique = 1 if "UNIQUE" in sql.upper() else 0
+            indexes_manual.append({
+                "name": row[0],
+                "table": row[1],
+                "unique": is_unique,
+                "sql": row[2],
+            })
+        
+        # Compare (may have different ordering)
+        method_names = {idx["name"] for idx in indexes_method}
+        manual_names = {idx["name"] for idx in indexes_manual}
+        assert method_names == manual_names
+        
+        # Compare details for each index
+        for method_idx in indexes_method:
+            manual_idx = next(idx for idx in indexes_manual if idx["name"] == method_idx["name"])
+            assert method_idx["table"] == manual_idx["table"]
+            assert method_idx["unique"] == manual_idx["unique"]
+            assert method_idx["sql"] == manual_idx["sql"]
+
+
+@pytest.mark.asyncio
+async def test_get_foreign_keys_equivalent_to_pragma_foreign_key_list(test_db):
+    """Test that get_foreign_keys() returns same results as PRAGMA foreign_key_list."""
+    async with connect(test_db) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+        await conn.execute("""
+            CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE ON UPDATE RESTRICT
+            )
+        """)
+        
+        # Using rapsqlite's get_foreign_keys()
+        fks_method = await conn.get_foreign_keys("posts")
+        
+        # Equivalent aiosqlite query
+        fks_query = await conn.fetch_all("PRAGMA foreign_key_list(posts)")
+        
+        # Convert query results to dict format for comparison
+        fks_manual = []
+        for row in fks_query:
+            fks_manual.append({
+                "id": row[0],
+                "seq": row[1],
+                "table": row[2],
+                "from": row[3],
+                "to": row[4],
+                "on_update": row[5] or "NO ACTION",
+                "on_delete": row[6] or "NO ACTION",
+                "match": row[7] or "NONE",
+            })
+        
+        assert len(fks_method) == len(fks_manual)
+        assert len(fks_method) >= 1
+        
+        # Compare each foreign key
+        for method_fk, manual_fk in zip(fks_method, fks_manual):
+            assert method_fk["id"] == manual_fk["id"]
+            assert method_fk["seq"] == manual_fk["seq"]
+            assert method_fk["table"] == manual_fk["table"]
+            assert method_fk["from"] == manual_fk["from"]
+            assert method_fk["to"] == manual_fk["to"]
+            assert method_fk["on_update"] == manual_fk["on_update"]
+            assert method_fk["on_delete"] == manual_fk["on_delete"]
+            assert method_fk["match"] == manual_fk["match"]
+
+
+@pytest.mark.asyncio
+async def test_get_schema_equivalent_to_combined_queries(test_db):
+    """Test that get_schema() returns same results as combining all manual queries."""
+    async with connect(test_db) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.execute("""
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER,
+                title TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        await conn.execute("CREATE INDEX idx_posts_user ON posts(user_id)")
+        
+        # Using rapsqlite's get_schema()
+        schema_method = await conn.get_schema(table_name="posts")
+        
+        # Equivalent manual queries
+        table_info = await conn.fetch_all("PRAGMA table_info(posts)")
+        indexes_query = await conn.fetch_all(
+            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name='posts' AND name NOT LIKE 'sqlite_%'"
+        )
+        fks_query = await conn.fetch_all("PRAGMA foreign_key_list(posts)")
+        
+        # Build manual schema
+        columns_manual = []
+        for row in table_info:
+            columns_manual.append({
+                "cid": row[0],
+                "name": row[1],
+                "type": row[2],
+                "notnull": row[3],
+                "dflt_value": row[4],
+                "pk": row[5],
+            })
+        
+        indexes_manual = []
+        for row in indexes_query:
+            sql = row[2] or ""
+            is_unique = 1 if "UNIQUE" in sql.upper() else 0
+            indexes_manual.append({
+                "name": row[0],
+                "table": row[1],
+                "unique": is_unique,
+                "sql": row[2],
+            })
+        
+        fks_manual = []
+        for row in fks_query:
+            fks_manual.append({
+                "id": row[0],
+                "seq": row[1],
+                "table": row[2],
+                "from": row[3],
+                "to": row[4],
+                "on_update": row[5] or "NO ACTION",
+                "on_delete": row[6] or "NO ACTION",
+                "match": row[7] or "NONE",
+            })
+        
+        # Compare
+        assert schema_method["table_name"] == "posts"
+        assert len(schema_method["columns"]) == len(columns_manual)
+        assert len(schema_method["indexes"]) == len(indexes_manual)
+        assert len(schema_method["foreign_keys"]) == len(fks_manual)
+        
+        # Verify columns match
+        method_col_names = {col["name"] for col in schema_method["columns"]}
+        manual_col_names = {col["name"] for col in columns_manual}
+        assert method_col_names == manual_col_names
+        
+        # Verify indexes match
+        method_idx_names = {idx["name"] for idx in schema_method["indexes"]}
+        manual_idx_names = {idx["name"] for idx in indexes_manual}
+        assert method_idx_names == manual_idx_names
+        
+        # Verify foreign keys match
+        assert len(schema_method["foreign_keys"]) == len(fks_manual)
+        if fks_manual:
+            method_fk = schema_method["foreign_keys"][0]
+            manual_fk = fks_manual[0]
+            assert method_fk["table"] == manual_fk["table"]
+            assert method_fk["from"] == manual_fk["from"]
+
+
+@pytest.mark.asyncio
+async def test_schema_methods_work_like_manual_queries_in_transaction(test_db):
+    """Test that schema methods work correctly within transactions, like manual queries."""
+    async with connect(test_db) as conn:
+        await conn.begin()
+        try:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+            
+            # Schema method
+            tables_method = await conn.get_tables()
+            
+            # Manual query
+            tables_manual = await conn.fetch_all(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            tables_manual_names = [row[0] for row in tables_manual]
+            
+            assert set(tables_method) == set(tables_manual_names)
+            assert "test" in tables_method
+            
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise

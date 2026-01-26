@@ -25,12 +25,15 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 - ✅ **Phase 2.4 Complete**: Pool configuration (`pool_size` and `connection_timeout` getters/setters; used when creating pool; `tests/test_pool_config.py`)
 - ✅ **Phase 2.5 Complete**: Row factory compatibility (`Connection.row_factory` getter/setter; dict/tuple/callable; fetch_* and Cursor; `tests/test_row_factory.py`)
 - ✅ **Phase 2.6 Complete**: Transaction context managers (`Connection.transaction()` async CM, execute_many in transactions, fetch_* use transaction connection)
-- ⏳ **Phase 2.7 In Progress**: Advanced SQLite callbacks (enable_load_extension, set_progress_handler, create_function, set_trace_callback, set_authorizer — implementation pending; tests fail)
-- ⏳ **Phase 2.8-2.11**: Remaining Phase 2 features (prepared statements, schema operations, iterdump, set_pragma behavior fix, etc.)
+- ✅ **Phase 2.7 Complete**: Advanced SQLite callbacks (enable_load_extension, set_progress_handler, create_function, set_trace_callback, set_authorizer)
+- ✅ **Phase 2.8 Complete**: Database dump (`Connection.iterdump()`)
+- ✅ **Phase 2.9 Complete**: Database backup (`Connection.backup()`)
+- ✅ **Phase 2.10 Complete**: Schema operations and introspection (`get_tables`, `get_table_info`, `get_indexes`, `get_foreign_keys`, `get_schema`, `get_views`, `get_index_list`, `get_index_info`, `get_table_xinfo`)
+- ⏳ **Phase 2.11+**: Remaining Phase 2 features (prepared statements, set_pragma behavior fix, etc.)
 
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
 
-**Recent progress:** Phase 2.4 pool configuration complete with robust tests (`tests/test_pool_config.py` — 18 tests: validation, config-before-use, transaction/cursor/set_pragma/execute_many/begin, zero edge cases, multiple connections, large values). Earlier: `Connection.transaction()` async CM; `execute_many` and `fetch_*` in transactions; row_factory (2.5); pool_size/connection_timeout getters/setters.
+**Recent progress:** Phase 2.10 schema operations complete with 9 introspection methods (`get_tables`, `get_table_info`, `get_indexes`, `get_foreign_keys`, `get_schema`, `get_views`, `get_index_list`, `get_index_info`, `get_table_xinfo`) and comprehensive test suite (72 tests in `tests/test_schema_operations.py`). All phases 2.1-2.10 now complete with robust testing.
 
 ## Phase 1 — Credibility
 
@@ -156,7 +159,7 @@ Focus: Fix critical performance issues, add essential features for production us
 
 Focus: Feature additions, performance optimizations, and broader SQLite feature support.
 
-**Current Phase 2 Status**: Core features complete (2.1-2.6). Pool configuration (2.4) and row factory (2.5) complete, each with dedicated robust test suites (`test_pool_config.py`, `test_row_factory.py`). Advanced callbacks (2.7) in progress.
+**Current Phase 2 Status**: Phases 2.1-2.10 complete. All core features implemented including parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, and comprehensive schema introspection. Each phase has dedicated robust test suites.
 
 ### Phase 2 features to implement (from compat gaps)
 
@@ -165,14 +168,14 @@ Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
 - **2.4 — `pool_size` getter/setter** (✅ Complete): `test_pool_size_getter_setter`, `test_pool_size_edge_cases`, `test_pool_configuration_*`; robust suite `tests/test_pool_config.py` (18 tests)
 - **2.4 — `connection_timeout` getter/setter** (✅ Complete): `test_connection_timeout_*`, `test_pool_configuration_*`; covered in `test_pool_config.py`
 - **2.5 — `row_factory` getter/setter** (✅ Complete): `test_connection_properties`, `test_row_factory_comprehensive`, `tests/test_row_factory.py`
-- **2.7 — `enable_load_extension()`** (⏳ Pending): `test_enable_load_extension*`, callback-combo tests
-- **2.7 — `create_function()` / `remove_function()`** (⏳ Pending): `test_create_function*`, `test_custom_function_*`
-- **2.7 — `set_trace_callback()`** (⏳ Pending): `test_set_trace_callback*`, `test_trace_callback_with_errors`, etc.
-- **2.7 — `set_authorizer()`** (⏳ Pending): `test_set_authorizer*`, `test_authorizer_action_codes`, etc.
-- **2.7 — `set_progress_handler()`** (⏳ Pending): `test_set_progress_handler*`, `test_all_callbacks_together`
-- **2.8+ — `iterdump()`** (⏳ Planned): `test_iterdump`
+- **2.7 — `enable_load_extension()`** (✅ Complete): `test_enable_load_extension*`, callback-combo tests
+- **2.7 — `create_function()` / `remove_function()`** (✅ Complete): `test_create_function*`, `test_custom_function_*`
+- **2.7 — `set_trace_callback()`** (✅ Complete): `test_set_trace_callback*`, `test_trace_callback_with_errors`, etc.
+- **2.7 — `set_authorizer()`** (✅ Complete): `test_set_authorizer*`, `test_authorizer_action_codes`, etc.
+- **2.7 — `set_progress_handler()`** (✅ Complete): `test_set_progress_handler*`, `test_all_callbacks_together`
+- **2.8 — `iterdump()`** (✅ Complete): `test_iterdump`, comprehensive iterdump tests in `test_callback_robustness.py`
 - **2.8+ — `set_pragma` behavior** (⏳ Investigate): `test_set_pragma` (assertion `1 == 2`); PRAGMA application or return-value mismatch. **Plan:** [docs/PLAN_OPTION_B_SET_PRAGMA_FIX.md](PLAN_OPTION_B_SET_PRAGMA_FIX.md)
-- **Phase 2.7 callbacks** (enable_load_extension, create_function, set_trace_callback, set_authorizer, set_progress_handler): **Plan:** [docs/PLAN_OPTION_A_PHASE_2_7_CALLBACKS.md](PLAN_OPTION_A_PHASE_2_7_CALLBACKS.md)
+- **Phase 2.7 callbacks** (✅ Complete): All callbacks implemented (enable_load_extension, create_function, set_trace_callback, set_authorizer, set_progress_handler). **Plan:** [docs/PLAN_OPTION_A_PHASE_2_7_CALLBACKS.md](PLAN_OPTION_A_PHASE_2_7_CALLBACKS.md)
 
 ### Prepared Statements & Parameterized Queries
 
@@ -202,13 +205,14 @@ Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
 
 ### Advanced SQLite Features
 
-- **Phase 2.7 callbacks** ⏳ (in progress — implementation pending)
-  - ⏳ `enable_load_extension()` — `test_enable_load_extension*`
-  - ⏳ `create_function()` / `remove_function()` — `test_create_function*`, `test_custom_function_*`
-  - ⏳ `set_trace_callback()` — `test_set_trace_callback*`, etc.
-  - ⏳ `set_authorizer()` — `test_set_authorizer*`, etc.
-  - ⏳ `set_progress_handler()` — `test_set_progress_handler*`, etc.
-- **iterdump** ⏳ (Phase 2.8+): `Connection.iterdump()` — `test_iterdump`
+- **Phase 2.7 callbacks** ✅ (complete)
+  - ✅ `enable_load_extension()` — `test_enable_load_extension*`
+  - ✅ `create_function()` / `remove_function()` — `test_create_function*`, `test_custom_function_*`
+  - ✅ `set_trace_callback()` — `test_set_trace_callback*`, etc.
+  - ✅ `set_authorizer()` — `test_set_authorizer*`, etc.
+  - ✅ `set_progress_handler()` — `test_set_progress_handler*`, etc.
+- **iterdump** ✅ (Phase 2.8 complete): `Connection.iterdump()` — `test_iterdump`, comprehensive tests in `test_callback_robustness.py`
+- **backup** ✅ (Phase 2.9 complete): `Connection.backup()` — comprehensive backup tests including rapsqlite-to-rapsqlite backup
 - **SQLite-specific features**
   - Full-text search (FTS) support
   - JSON functions support
@@ -216,11 +220,16 @@ Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
   - Common Table Expressions (CTEs)
   - UPSERT operations (INSERT OR REPLACE, etc.)
 
-- **Schema operations**
-  - Schema introspection (tables, columns, indexes)
-  - Migration utilities
-  - Schema validation
-  - Foreign key constraint support
+- **Schema operations** ✅ (Phase 2.10 complete)
+  - ✅ Schema introspection (tables, columns, indexes, views) - `get_tables()`, `get_table_info()`, `get_indexes()`, `get_foreign_keys()`, `get_schema()`
+  - ✅ Extended schema introspection - `get_views()`, `get_index_list()`, `get_index_info()`, `get_table_xinfo()`
+  - ✅ View introspection - `get_views()` for listing and filtering views
+  - ✅ Index details - `get_index_list()` using PRAGMA index_list (seq, name, unique, origin, partial)
+  - ✅ Index column information - `get_index_info()` using PRAGMA index_info (seqno, cid, name)
+  - ✅ Extended table information - `get_table_xinfo()` using PRAGMA table_xinfo (includes hidden column flag)
+  - ⏳ Migration utilities (planned)
+  - ⏳ Schema validation (planned)
+  - ✅ Foreign key constraint support - `get_foreign_keys()` implemented
 
 - **Performance features**
   - Index recommendations
@@ -424,4 +433,4 @@ Following semantic versioning:
 - `v1.0`: Stable API, Phase 1 complete, production-ready (ready for release)
 - `v1.x+`: Phase 2 and 3 features, backwards-compatible additions
 
-**Current Version: v0.2.0** — Phase 1 complete; Phase 2 in progress (row factory, transaction context manager, execute_many-in-transaction fix, optional parameters). Core aiosqlite API compatibility improved. Python 3.8–3.14 supported. Ready for v1.0 when Phase 2 goals are met.
+**Current Version: v0.2.0** — Phase 1 complete; Phase 2.1-2.10 complete (parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection). Core aiosqlite API compatibility significantly improved. Python 3.8–3.14 supported. 276 tests passing. Ready for v1.0 when remaining Phase 2 goals are met.
