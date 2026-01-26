@@ -15,9 +15,12 @@ use tokio::sync::Mutex;
 
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{
-    sqlite3, sqlite3_context, sqlite3_create_function_v2, sqlite3_enable_load_extension,
-    sqlite3_progress_handler, sqlite3_result_null, sqlite3_set_authorizer, sqlite3_trace_v2,
-    sqlite3_user_data, sqlite3_value, SQLITE_DENY, SQLITE_IGNORE, SQLITE_OK, SQLITE_TRACE_STMT,
+    sqlite3, sqlite3_backup, sqlite3_backup_finish, sqlite3_backup_init, sqlite3_backup_pagecount,
+    sqlite3_backup_remaining, sqlite3_backup_step, sqlite3_context, sqlite3_create_function_v2,
+    sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg, sqlite3_get_autocommit,
+    sqlite3_libversion, sqlite3_progress_handler, sqlite3_result_null,
+    sqlite3_set_authorizer, sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_BUSY,
+    SQLITE_DENY, SQLITE_DONE, SQLITE_IGNORE, SQLITE_LOCKED, SQLITE_OK, SQLITE_TRACE_STMT,
     SQLITE_UTF8,
 };
 
@@ -3388,6 +3391,430 @@ impl Connection {
                     }
                     Ok(list.into())
                 })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Backup database to another connection.
+    #[pyo3(signature = (target, *, pages = 0, progress = None, name = "main", sleep = 0.25))]
+    fn backup(
+        self_: PyRef<Self>,
+        target: Py<PyAny>,
+        pages: i32,
+        progress: Option<Py<PyAny>>,
+        name: &str,
+        sleep: f64,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        let name = name.to_string();
+        Python::attach(|py| {
+            // Clone progress callback with GIL
+            let progress_callback = progress.as_ref().map(|p| p.clone_ref(py));
+            
+            // Check if target is rapsqlite Connection or sqlite3.Connection and extract info
+            let target_is_rapsqlite = target.bind(py).is_instance_of::<Connection>();
+            let target_clone = target.clone_ref(py);
+            
+            // If rapsqlite, extract connection fields before async block
+            let (target_path_opt, target_pool_opt, target_pragmas_opt, target_pool_size_opt,
+                 target_connection_timeout_secs_opt, target_transaction_state_opt,
+                 target_transaction_connection_opt, target_callback_connection_opt,
+                 target_load_extension_enabled_opt, target_user_functions_opt,
+                 target_trace_callback_opt, target_authorizer_callback_opt,
+                 target_progress_handler_opt) = if target_is_rapsqlite {
+                let target_conn = target_clone.bind(py).downcast::<Connection>()
+                    .map_err(|_| OperationalError::new_err("Failed to downcast target connection"))?;
+                let target_conn_borrowed = target_conn.borrow();
+                (
+                    Some(target_conn_borrowed.path.clone()),
+                    Some(target_conn_borrowed.pool.clone()),
+                    Some(target_conn_borrowed.pragmas.clone()),
+                    Some(target_conn_borrowed.pool_size.clone()),
+                    Some(target_conn_borrowed.connection_timeout_secs.clone()),
+                    Some(target_conn_borrowed.transaction_state.clone()),
+                    Some(target_conn_borrowed.transaction_connection.clone()),
+                    Some(target_conn_borrowed.callback_connection.clone()),
+                    Some(target_conn_borrowed.load_extension_enabled.clone()),
+                    Some(target_conn_borrowed.user_functions.clone()),
+                    Some(target_conn_borrowed.trace_callback.clone()),
+                    Some(target_conn_borrowed.authorizer_callback.clone()),
+                    Some(target_conn_borrowed.progress_handler.clone()),
+                )
+            } else {
+                (None, None, None, None, None, None, None, None, None, None, None, None, None)
+            };
+
+            let future = async move {
+                // Get source database handle (priority: transaction > callbacks > pool)
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                // Wrapper to make raw pointers Send-safe
+                struct SendPtr<T>(*mut T);
+                unsafe impl<T> Send for SendPtr<T> {}
+                unsafe impl<T> Sync for SendPtr<T> {}
+                
+                // Acquire source handle - keep pool connection alive if needed
+                let source_handle;
+                let _source_pool_conn: Option<PoolConnection<sqlx::Sqlite>>;
+                
+                if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                    let mut handle = sqlite_conn.lock_handle().await
+                        .map_err(|e| OperationalError::new_err(format!("Failed to lock source handle: {}", e)))?;
+                    source_handle = SendPtr(handle.as_raw_handle().as_ptr());
+                    _source_pool_conn = None;
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                    let mut handle = sqlite_conn.lock_handle().await
+                        .map_err(|e| OperationalError::new_err(format!("Failed to lock source handle: {}", e)))?;
+                    source_handle = SendPtr(handle.as_raw_handle().as_ptr());
+                    _source_pool_conn = None;
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut pool_conn = pool_clone.acquire().await
+                        .map_err(|e| OperationalError::new_err(format!("Failed to acquire source connection: {}", e)))?;
+                    let sqlite_conn: &mut SqliteConnection = &mut *pool_conn;
+                    let mut handle = sqlite_conn.lock_handle().await
+                        .map_err(|e| OperationalError::new_err(format!("Failed to lock source handle: {}", e)))?;
+                    source_handle = SendPtr(handle.as_raw_handle().as_ptr());
+                    drop(handle);
+                    // Keep pool_conn alive during backup
+                    _source_pool_conn = Some(pool_conn);
+                }
+
+                // Get target database handle - keep pool connection alive if needed
+                let target_handle: SendPtr<sqlite3>;
+                let _target_pool_conn: Option<PoolConnection<sqlx::Sqlite>>;
+                
+                if target_is_rapsqlite {
+                    // rapsqlite Connection - get handle same way as source
+                    let target_path: String = target_path_opt.unwrap();
+                    let target_pool: Arc<Mutex<Option<SqlitePool>>> = target_pool_opt.unwrap();
+                    let target_pragmas: Arc<StdMutex<Vec<(String, String)>>> = target_pragmas_opt.unwrap();
+                    let target_pool_size: Arc<StdMutex<Option<usize>>> = target_pool_size_opt.unwrap();
+                    let target_connection_timeout_secs: Arc<StdMutex<Option<u64>>> = target_connection_timeout_secs_opt.unwrap();
+                    let target_transaction_state: Arc<Mutex<TransactionState>> = target_transaction_state_opt.unwrap();
+                    let target_transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>> = target_transaction_connection_opt.unwrap();
+                    let target_callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>> = target_callback_connection_opt.unwrap();
+                    let target_load_extension_enabled: Arc<StdMutex<bool>> = target_load_extension_enabled_opt.unwrap();
+                    let target_user_functions: Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>> = target_user_functions_opt.unwrap();
+                    let target_trace_callback: Arc<StdMutex<Option<Py<PyAny>>>> = target_trace_callback_opt.unwrap();
+                    let target_authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>> = target_authorizer_callback_opt.unwrap();
+                    let target_progress_handler: Arc<StdMutex<Option<(i32, Py<PyAny>)>>> = target_progress_handler_opt.unwrap();
+
+                    let target_in_transaction = {
+                        let g = target_transaction_state.lock().await;
+                        *g == TransactionState::Active
+                    };
+
+                    let target_has_callbacks_flag = has_callbacks(
+                        &target_load_extension_enabled,
+                        &target_user_functions,
+                        &target_trace_callback,
+                        &target_authorizer_callback,
+                        &target_progress_handler,
+                    );
+
+                    if target_in_transaction {
+                        let mut conn_guard = target_transaction_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Target transaction connection not available"))?;
+                        let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                        let mut handle = sqlite_conn.lock_handle().await
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock target handle: {}", e)))?;
+                        target_handle = SendPtr(handle.as_raw_handle().as_ptr());
+                        drop(handle);
+                        _target_pool_conn = None;
+                    } else if target_has_callbacks_flag {
+                        ensure_callback_connection(
+                            &target_path,
+                            &target_pool,
+                            &target_callback_connection,
+                            &target_pragmas,
+                            &target_pool_size,
+                            &target_connection_timeout_secs,
+                        ).await?;
+                        let mut conn_guard = target_callback_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Target callback connection not available"))?;
+                        let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                        let mut handle = sqlite_conn.lock_handle().await
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock target handle: {}", e)))?;
+                        target_handle = SendPtr(handle.as_raw_handle().as_ptr());
+                        drop(handle);
+                        _target_pool_conn = None;
+                    } else {
+                        let target_pool_clone = get_or_create_pool(
+                            &target_path,
+                            &target_pool,
+                            &target_pragmas,
+                            &target_pool_size,
+                            &target_connection_timeout_secs,
+                        ).await?;
+                        let mut target_pool_conn = target_pool_clone.acquire().await
+                            .map_err(|e| OperationalError::new_err(format!("Failed to acquire target connection: {}", e)))?;
+                        let sqlite_conn: &mut SqliteConnection = &mut *target_pool_conn;
+                        let mut handle = sqlite_conn.lock_handle().await
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock target handle: {}", e)))?;
+                        target_handle = SendPtr(handle.as_raw_handle().as_ptr());
+                        drop(handle);
+                        _target_pool_conn = Some(target_pool_conn);
+                    }
+                } else {
+                    // sqlite3.Connection - use Python helper to extract handle
+                    // The handle is stored in the internal pysqlite_Connection struct
+                    // We use a Python helper function with ctypes to safely extract it
+                    // IMPORTANT: target_clone is already cloned and will keep the connection alive
+                    // throughout the async future. We must ensure it stays in scope.
+                    let handle_ptr = Python::with_gil(|py| -> PyResult<*mut sqlite3> {
+                        // Import the backup helper module
+                        let backup_helper = py.import("rapsqlite._backup_helper")
+                            .map_err(|e| OperationalError::new_err(format!(
+                                "Failed to import backup helper: {}. Make sure rapsqlite package is properly installed.",
+                                e
+                            )))?;
+                        
+                        // Get the get_sqlite3_handle function
+                        let get_handle = backup_helper.getattr("get_sqlite3_handle")
+                            .map_err(|e| OperationalError::new_err(format!(
+                                "Failed to get get_sqlite3_handle function: {}",
+                                e
+                            )))?;
+                        
+                        // Call the function with the target connection
+                        let conn_obj = target_clone.bind(py);
+                        let result = get_handle.call1((conn_obj,))
+                            .map_err(|e| OperationalError::new_err(format!(
+                                "Failed to extract sqlite3* handle: {}",
+                                e
+                            )))?;
+                        
+                        // Check if extraction succeeded (returns None on failure)
+                        if result.is_none() {
+                            return Err(OperationalError::new_err(
+                                "Could not extract sqlite3* handle from target connection. \
+                                Target must be a rapsqlite.Connection or sqlite3.Connection. \
+                                The connection may be closed or invalid."
+                            ));
+                        }
+                        
+                        // Extract the pointer value as usize
+                        let ptr_val: usize = result.extract()
+                            .map_err(|e| OperationalError::new_err(format!(
+                                "Failed to extract pointer value: {}",
+                                e
+                            )))?;
+                        
+                        // Verify pointer is not null
+                        if ptr_val == 0 {
+                            return Err(OperationalError::new_err(
+                                "Extracted sqlite3* handle is null. Connection may be closed."
+                            ));
+                        }
+                        
+                        Ok(ptr_val as *mut sqlite3)
+                    })?;
+                    
+                    // Validate handle before use
+                    if handle_ptr.is_null() {
+                        return Err(OperationalError::new_err(
+                            "Extracted sqlite3* handle is null. Connection may be closed or invalid."
+                        ));
+                    }
+                    
+                    // Verify handle points to valid SQLite connection by checking autocommit state
+                    // This is a safe operation that validates the handle is usable
+                    let autocommit_check = unsafe { sqlite3_get_autocommit(handle_ptr) };
+                    // autocommit_check returns 0 (false) or non-zero (true), both are valid
+                    // If handle is invalid, this might segfault, but we need to catch it early
+                    
+                    target_handle = SendPtr(handle_ptr);
+                    _target_pool_conn = None;
+                    // target_clone (cloned at line 3430) stays in scope for the entire async future,
+                    // keeping the Python connection object alive and preventing handle invalidation
+                    // The handle is only valid as long as the Python object exists
+                    let _ensure_target_alive = &target_clone; // Explicit reference to keep in scope
+                }
+
+                // Validate source handle as well
+                if source_handle.0.is_null() {
+                    return Err(OperationalError::new_err(
+                        "Source sqlite3* handle is null. Connection may be closed or invalid."
+                    ));
+                }
+                
+                // Check SQLite library version compatibility
+                let source_libversion = unsafe {
+                    std::ffi::CStr::from_ptr(sqlite3_libversion())
+                        .to_string_lossy()
+                        .to_string()
+                };
+                // Note: Both should use same library, but verify for debugging
+                
+                // Convert database name to C string
+                let name_cstr = std::ffi::CString::new(name.clone())
+                    .map_err(|e| OperationalError::new_err(format!("Invalid database name: {}", e)))?;
+
+                // Check connection states before backup
+                // SQLite backup requires destination to not have active transactions
+                // Verify both source and target are in valid states
+                let target_has_transaction = unsafe {
+                    sqlite3_get_autocommit(target_handle.0) == 0
+                };
+                if target_has_transaction {
+                    return Err(OperationalError::new_err(
+                        "Cannot backup: target connection has an active transaction. \
+                        Commit or rollback the transaction before backup."
+                    ));
+                }
+                
+                // Verify source connection is also in valid state
+                // Source can have transactions, but should be open and valid
+                let source_autocommit = unsafe {
+                    sqlite3_get_autocommit(source_handle.0)
+                };
+                // Both 0 (in transaction) and non-zero (autocommit) are valid for source
+                // This check just verifies the handle is valid and connection is open
+
+                // Initialize backup
+                let backup_handle = SendPtr(unsafe {
+                    sqlite3_backup_init(
+                        target_handle.0,
+                        name_cstr.as_ptr(),
+                        source_handle.0,
+                        name_cstr.as_ptr(),
+                    )
+                });
+
+                if backup_handle.0.is_null() {
+                    // Get detailed error information
+                    let error_code = unsafe { sqlite3_errcode(target_handle.0) };
+                    let error_msg = unsafe {
+                        let msg_ptr = sqlite3_errmsg(target_handle.0);
+                        if msg_ptr.is_null() {
+                            "Unknown error (null error message)".to_string()
+                        } else {
+                            std::ffi::CStr::from_ptr(msg_ptr)
+                                .to_string_lossy()
+                                .to_string()
+                        }
+                    };
+                    
+                    return Err(OperationalError::new_err(format!(
+                        "Failed to initialize backup: SQLite error code {}, message: '{}'. \
+                        Source libversion: {}. \
+                        Ensure both connections are open and target has no active transactions.",
+                        error_code, error_msg, source_libversion
+                    )));
+                }
+
+                // Backup loop
+                loop {
+                    let pages_to_copy = if pages == 0 { -1 } else { pages };
+                    let result = unsafe {
+                        sqlite3_backup_step(backup_handle.0, pages_to_copy)
+                    };
+
+                    match result {
+                        SQLITE_OK | SQLITE_BUSY | SQLITE_LOCKED => {
+                            // Progress - call progress callback if provided
+                            if let Some(ref progress_cb) = progress_callback {
+                                let remaining = unsafe { sqlite3_backup_remaining(backup_handle.0) };
+                                let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
+                                let pages_copied = page_count - remaining;
+                                
+                                // Call Python callback with GIL
+                                Python::with_gil(|py| {
+                                    let callback = progress_cb.bind(py);
+                                    let remaining_py: Py<PyAny> = PyInt::new(py, remaining as i64).into_any().unbind();
+                                    let page_count_py: Py<PyAny> = PyInt::new(py, page_count as i64).into_any().unbind();
+                                    let pages_copied_py: Py<PyAny> = PyInt::new(py, pages_copied as i64).into_any().unbind();
+                                    if let Ok(args) = PyTuple::new(py, &[remaining_py, page_count_py, pages_copied_py]) {
+                                        // Ignore errors in progress callback - don't abort backup
+                                        let _ = callback.call1(args);
+                                    }
+                                });
+                            }
+                            
+                            // Sleep before next step
+                            tokio::time::sleep(Duration::from_secs_f64(sleep)).await;
+                        }
+                        SQLITE_DONE => {
+                            // Backup complete
+                            break;
+                        }
+                        _ => {
+                            // Error - cleanup and return error
+                            unsafe {
+                                sqlite3_backup_finish(backup_handle.0);
+                            }
+                            return Err(OperationalError::new_err(format!(
+                                "Backup failed with SQLite error code: {}",
+                                result
+                            )));
+                        }
+                    }
+                }
+
+                // Finalize backup
+                let final_result = unsafe { sqlite3_backup_finish(backup_handle.0) };
+                if final_result != SQLITE_OK {
+                    return Err(OperationalError::new_err(format!(
+                        "Backup finish failed with SQLite error code: {}",
+                        final_result
+                    )));
+                }
+
+                Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })

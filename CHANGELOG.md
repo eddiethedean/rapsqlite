@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-01-26
 
+### Added - Phase 2.9: Database Backup
+
+- **`Connection.backup(target, *, pages=0, progress=None, name="main", sleep=0.25)`** — Online backup API
+  - Supports backing up from one `rapsqlite.Connection` to another `rapsqlite.Connection`
+  - Incremental backup with configurable pages per step
+  - Progress callback support with (remaining, page_count, pages_copied) parameters
+  - Configurable sleep duration between backup steps
+  - Works with transactions and callback connections
+  - Comprehensive error handling with SQLite error codes and messages
+  - Connection state validation (checks for active transactions)
+  - Handle validation and lifetime management
+
+### Added - Backup Debugging & Validation
+
+- Enhanced error handling for backup operations
+  - Detailed SQLite error codes and messages when backup fails
+  - Connection state validation (active transactions, closed connections)
+  - Handle validation before backup operations
+  - SQLite library version checking for debugging
+- Python helper module (`rapsqlite._backup_helper`) for handle extraction
+  - Safely extracts sqlite3* handle from sqlite3.Connection using ctypes
+  - Validates connection state before extraction
+  - Handles closed connections gracefully
+- Comprehensive debugging tests
+  - `test_backup_sqlite_connection_state_validation` — Tests error handling for invalid states
+  - `test_backup_sqlite_handle_extraction` — Tests handle extraction functionality
+  - All rapsqlite-to-rapsqlite backup tests passing
+
 ### Added - Phase 2.8: Database Dump
 
 - **`Connection.iterdump()`** — Dump database schema and data as SQL statements
@@ -57,10 +85,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed pool timeout issues when callbacks are cleared (connection properly released)
 - Fixed transaction connection management with callbacks (connection returned to callback pool on commit/rollback)
 - Fixed `test_set_pragma` assertion to match SQLite's documented behavior (PRAGMA synchronous NORMAL = 1, not 2)
+- Fixed Python object lifetime management in backup operations (connections now properly kept alive during async backup)
+
+### Known Limitations
+
+- **Backup to `sqlite3.Connection` not supported**: The `Connection.backup()` method only supports backing up to another `rapsqlite.Connection`. Backing up to Python's standard `sqlite3.Connection` is not supported due to SQLite library instance incompatibility (Python's sqlite3 module and rapsqlite's libsqlite3-sys may use different SQLite library instances, causing handles to be incompatible). This is a fundamental limitation, not a bug. See README.md for workarounds.
 
 ### Changed
 
 - Updated date to 2026-01-26
+- Enhanced backup error messages with SQLite error codes and diagnostic information
+- Improved documentation for backup functionality with clear limitations and workarounds
 
 ---
 

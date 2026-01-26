@@ -1,6 +1,6 @@
 """Type stubs for _rapsqlite Rust extension module."""
 
-from typing import Any, Coroutine, List, Optional, Type
+from typing import Any, Callable, Coroutine, List, Optional, Type
 
 class Error(Exception):
     """Base exception class for rapsqlite errors."""
@@ -84,6 +84,37 @@ class Connection:
         self, n: int, callback: Optional[Any]
     ) -> Coroutine[Any, Any, None]: ...
     def iterdump(self) -> Coroutine[Any, Any, List[str]]: ...
+    def backup(
+        self,
+        target: Any,
+        *,
+        pages: int = 0,
+        progress: Optional[Callable[[int, int, int], None]] = None,
+        name: str = "main",
+        sleep: float = 0.25,
+    ) -> Coroutine[Any, Any, None]:
+        """Make a backup of the current database to a target database.
+        
+        Args:
+            target: Target connection for backup. Must be a rapsqlite.Connection.
+                Backing up to Python's standard sqlite3.Connection is NOT supported
+                and will cause a segmentation fault due to SQLite library instance
+                incompatibility.
+            pages: Number of pages to copy per step (0 = all pages). Default: 0
+            progress: Optional progress callback function receiving (remaining, page_count, pages_copied).
+                Default: None
+            name: Database name to backup (e.g., "main", "temp"). Default: "main"
+            sleep: Sleep duration in seconds between backup steps. Default: 0.25
+        
+        Raises:
+            OperationalError: If backup fails or target connection is invalid
+        
+        Note:
+            The target parameter must be a rapsqlite.Connection. Backing up to
+            sqlite3.Connection is not supported due to SQLite library instance
+            incompatibility. See README.md for details and workarounds.
+        """
+        ...
 
 class TransactionContextManager:
     """Async context manager for transactions. Returned by Connection.transaction()."""

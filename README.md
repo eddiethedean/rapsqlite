@@ -221,6 +221,32 @@ async def main():
 asyncio.run(main())
 ```
 
+### Database Backup
+
+```python
+import asyncio
+from rapsqlite import Connection
+
+async def main():
+    # Create source database with data
+    async with Connection("source.db") as source:
+        await source.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        await source.execute("INSERT INTO test (name) VALUES ('Alice')")
+        await source.execute("INSERT INTO test (name) VALUES ('Bob')")
+        
+        # Backup to another rapsqlite connection
+        async with Connection("backup.db") as target:
+            await source.backup(target)
+            
+            # Verify backup
+            rows = await target.fetch_all("SELECT * FROM test")
+            print(rows)  # Output: [[1, 'Alice'], [2, 'Bob']]
+
+asyncio.run(main())
+```
+
+**⚠️ Important**: The `backup()` method only supports backing up to another `rapsqlite.Connection`. Backing up to Python's standard `sqlite3.Connection` is **not supported** and will cause a segmentation fault. See [Backup Limitations](#backup-limitations) for details.
+
 ## API Reference
 
 ### `connect(path: str, **kwargs: Any) -> Connection`
@@ -418,6 +444,76 @@ Fetch multiple rows from the query result.
 **Raises:**
 - `ProgrammingError`: If no query has been executed
 
+#### `Connection.backup(target, *, pages=0, progress=None, name="main", sleep=0.25) -> None`
+
+Make a backup of the current database to a target database.
+
+**Parameters:**
+- `target` (Connection): Target connection for backup (must be a `rapsqlite.Connection`)
+- `pages` (int, optional): Number of pages to copy per step (0 = all pages). Default: 0
+- `progress` (Callable[[int, int, int], None], optional): Progress callback function receiving (remaining, page_count, pages_copied). Default: None
+- `name` (str, optional): Database name to backup (e.g., "main", "temp"). Default: "main"
+- `sleep` (float, optional): Sleep duration in seconds between backup steps. Default: 0.25
+
+**Raises:**
+- `OperationalError`: If backup fails or target connection is invalid
+
+**Example:**
+```python
+async with Connection("source.db") as source:
+    async with Connection("target.db") as target:
+        await source.backup(target)
+```
+
+**⚠️ Important Limitation**: The `target` parameter must be a `rapsqlite.Connection`. Backing up to Python's standard `sqlite3.Connection` is **not supported** due to SQLite library instance incompatibility. See [Backup Limitations](#backup-limitations) for details.
+
+### Backup Limitations
+
+**SQLite Library Instance Incompatibility**
+
+The `Connection.backup()` method supports backing up from one `rapsqlite.Connection` to another `rapsqlite.Connection`. However, backing up to Python's standard `sqlite3.Connection` is **not supported** and will cause a segmentation fault.
+
+**Root Cause:**
+- Python's `sqlite3` module uses one SQLite library instance (from Python's build)
+- `rapsqlite` uses `libsqlite3-sys` which may link to a different SQLite library instance
+- SQLite handles are only valid within the same library instance
+- Mixing handles from different instances causes undefined behavior (segfault)
+
+**Workaround:**
+Use `rapsqlite.Connection` for both source and target:
+
+```python
+# ✅ Supported: rapsqlite-to-rapsqlite backup
+async with Connection("source.db") as source:
+    async with Connection("target.db") as target:
+        await source.backup(target)
+
+# ❌ Not supported: rapsqlite-to-sqlite3.Connection backup
+import sqlite3
+source = Connection("source.db")
+target = sqlite3.connect("target.db")  # This will cause a segfault
+await source.backup(target)  # DO NOT DO THIS
+```
+
+**Alternative Solutions:**
+1. Convert `sqlite3.Connection` to `rapsqlite.Connection`:
+   ```python
+   # Instead of using sqlite3.Connection, use rapsqlite.Connection
+   target = Connection("target.db")
+   await source.backup(target)
+   ```
+
+2. Use file-based backup methods if you need to work with `sqlite3.Connection`:
+   ```python
+   # Use Python's sqlite3 backup if both are sqlite3.Connection
+   import sqlite3
+   source_sqlite3 = sqlite3.connect("source.db")
+   target_sqlite3 = sqlite3.connect("target.db")
+   source_sqlite3.backup(target_sqlite3)  # This works
+   ```
+
+For more technical details, see [docs/BACKUP_SQLITE3_CONNECTION_FIX.md](docs/BACKUP_SQLITE3_CONNECTION_FIX.md).
+
 ### Exception Classes
 
 The following exception classes are available, matching the aiosqlite API:
@@ -477,6 +573,7 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and version history.
 - ⏳ Limited SQL dialect support (basic SQLite features)
 - ⏳ Not yet a complete drop-in replacement for `aiosqlite` (work in progress)
 - ⏳ Not designed for synchronous use cases
+- ⚠️ **Backup to `sqlite3.Connection` not supported**: The `Connection.backup()` method supports backing up to another `rapsqlite.Connection`, but backing up to Python's standard `sqlite3.Connection` is not supported due to SQLite library instance incompatibility. See [Backup Limitations](#backup-limitations) below for details.
 
 **Phase 1 improvements (v0.1.0 – v0.1.1):**
 - ✅ Connection lifecycle management (async context managers)

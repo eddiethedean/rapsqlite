@@ -1047,18 +1047,158 @@ async def test_iterdump(test_db):
         assert "COMMIT" in dump[-1]
 
 
-@pytest.mark.skip(reason="backup not yet implemented in rapsqlite")
 @pytest.mark.asyncio
 async def test_backup_aiosqlite(test_db):
     """Test backup functionality."""
-    pass
+    import rapsqlite
+    
+    # Create source database with data
+    source_conn = rapsqlite.Connection(test_db)
+    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
+    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
+    
+    # Create target database
+    import tempfile
+    import os
+    target_path = test_db + ".backup"
+    if os.path.exists(target_path):
+        os.remove(target_path)
+    
+    # Create empty target database file first
+    with open(target_path, 'w'):
+        pass
+    
+    target_conn = rapsqlite.Connection(target_path)
+    
+    # Perform backup
+    await source_conn.backup(target_conn)
+    
+    # Verify data in target
+    rows = await target_conn.fetch_all("SELECT * FROM test ORDER BY id")
+    assert len(rows) == 2
+    assert rows[0][1] == "test1"
+    assert rows[1][1] == "test2"
+    
+    await source_conn.close()
+    await target_conn.close()
+    
+    # Cleanup
+    if os.path.exists(target_path):
+        os.remove(target_path)
 
 
-@pytest.mark.skip(reason="backup not yet implemented in rapsqlite")
+@pytest.mark.skip(reason="sqlite3.Connection backup causes segfault - handles from different SQLite library instances are incompatible. Use rapsqlite-to-rapsqlite backup instead.")
 @pytest.mark.asyncio
 async def test_backup_sqlite(test_db):
-    """Test backup to sqlite3 connection."""
-    pass
+    """Test backup to sqlite3 connection.
+    
+    NOTE: This test is skipped because Python's sqlite3 module and rapsqlite's
+    libsqlite3-sys may use different SQLite library instances, making handles
+    incompatible. The segfault occurs because the handle from Python's sqlite3.Connection
+    cannot be used with rapsqlite's SQLite library instance.
+    
+    Workaround: Use rapsqlite-to-rapsqlite backup instead.
+    """
+    import rapsqlite
+    import sqlite3
+    
+    # Create source database with data
+    source_conn = rapsqlite.Connection(test_db)
+    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
+    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
+    
+    # Create target database using standard sqlite3
+    import tempfile
+    import os
+    target_path = test_db + ".backup"
+    if os.path.exists(target_path):
+        os.remove(target_path)
+    
+    # Create empty target database file first
+    with open(target_path, 'w'):
+        pass
+    
+    target_conn = sqlite3.connect(target_path)
+    
+    # Perform backup
+    await source_conn.backup(target_conn)
+    
+    # Verify data in target
+    cursor = target_conn.cursor()
+    cursor.execute("SELECT * FROM test ORDER BY id")
+    rows = cursor.fetchall()
+    assert len(rows) == 2
+    assert rows[0][1] == "test1"
+    assert rows[1][1] == "test2"
+    
+    await source_conn.close()
+    target_conn.close()
+    
+    # Cleanup
+    if os.path.exists(target_path):
+        os.remove(target_path)
+
+
+@pytest.mark.asyncio
+async def test_backup_sqlite_connection_state_validation(test_db):
+    """Test that backup fails gracefully with proper error messages for invalid connection states."""
+    import rapsqlite
+    import sqlite3
+    import os
+    
+    # Create source database
+    source_conn = rapsqlite.Connection(test_db)
+    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
+    
+    # Test 1: Target with active transaction should fail
+    target_path = test_db + ".backup_tx"
+    if os.path.exists(target_path):
+        os.remove(target_path)
+    with open(target_path, 'w'):
+        pass
+    
+    target_conn = sqlite3.connect(target_path)
+    target_conn.execute("BEGIN")
+    
+    try:
+        await source_conn.backup(target_conn)
+        assert False, "Should have raised OperationalError for active transaction"
+    except rapsqlite.OperationalError as e:
+        assert "transaction" in str(e).lower() or "active" in str(e).lower()
+    finally:
+        target_conn.rollback()
+        target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
+    
+    await source_conn.close()
+
+
+@pytest.mark.asyncio
+async def test_backup_sqlite_handle_extraction(test_db):
+    """Test that handle extraction works and provides diagnostic information."""
+    import rapsqlite
+    import sqlite3
+    import rapsqlite._backup_helper as bh
+    
+    # Test handle extraction
+    conn = sqlite3.connect(":memory:")
+    handle = bh.get_sqlite3_handle(conn)
+    
+    assert handle is not None, "Handle extraction should succeed"
+    assert handle != 0, "Handle should not be null"
+    
+    # Test with closed connection
+    conn.close()
+    handle_closed = bh.get_sqlite3_handle(conn)
+    # Closed connection should return None (our helper checks for closed connections)
+    assert handle_closed is None, "Closed connection should return None"
+    
+    # Test with invalid object
+    invalid_handle = bh.get_sqlite3_handle("not a connection")
+    assert invalid_handle is None, "Invalid object should return None"
 
 
 @pytest.mark.skip(reason="Multi-loop usage pattern not applicable to rapsqlite")
