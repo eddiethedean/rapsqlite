@@ -1051,80 +1051,82 @@ async def test_iterdump(test_db):
 async def test_backup_aiosqlite(test_db):
     """Test backup functionality."""
     import rapsqlite
-    
+
     # Create source database with data
     source_conn = rapsqlite.Connection(test_db)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
-    
+
     # Create target database
-    import tempfile
     import os
+
     target_path = test_db + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
-    
+
     # Create empty target database file first
-    with open(target_path, 'w'):
+    with open(target_path, "w"):
         pass
-    
+
     target_conn = rapsqlite.Connection(target_path)
-    
+
     # Perform backup
     await source_conn.backup(target_conn)
-    
+
     # Verify data in target
     rows = await target_conn.fetch_all("SELECT * FROM test ORDER BY id")
     assert len(rows) == 2
     assert rows[0][1] == "test1"
     assert rows[1][1] == "test2"
-    
+
     await source_conn.close()
     await target_conn.close()
-    
+
     # Cleanup
     if os.path.exists(target_path):
         os.remove(target_path)
 
 
-@pytest.mark.skip(reason="sqlite3.Connection backup causes segfault - handles from different SQLite library instances are incompatible. Use rapsqlite-to-rapsqlite backup instead.")
+@pytest.mark.skip(
+    reason="sqlite3.Connection backup causes segfault - handles from different SQLite library instances are incompatible. Use rapsqlite-to-rapsqlite backup instead."
+)
 @pytest.mark.asyncio
 async def test_backup_sqlite(test_db):
     """Test backup to sqlite3 connection.
-    
+
     NOTE: This test is skipped because Python's sqlite3 module and rapsqlite's
     libsqlite3-sys may use different SQLite library instances, making handles
     incompatible. The segfault occurs because the handle from Python's sqlite3.Connection
     cannot be used with rapsqlite's SQLite library instance.
-    
+
     Workaround: Use rapsqlite-to-rapsqlite backup instead.
     """
     import rapsqlite
     import sqlite3
-    
+
     # Create source database with data
     source_conn = rapsqlite.Connection(test_db)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
-    
+
     # Create target database using standard sqlite3
-    import tempfile
     import os
+
     target_path = test_db + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
-    
+
     # Create empty target database file first
-    with open(target_path, 'w'):
+    with open(target_path, "w"):
         pass
-    
+
     target_conn = sqlite3.connect(target_path)
-    
+
     # Perform backup
     await source_conn.backup(target_conn)
-    
+
     # Verify data in target
     cursor = target_conn.cursor()
     cursor.execute("SELECT * FROM test ORDER BY id")
@@ -1132,10 +1134,10 @@ async def test_backup_sqlite(test_db):
     assert len(rows) == 2
     assert rows[0][1] == "test1"
     assert rows[1][1] == "test2"
-    
+
     await source_conn.close()
     target_conn.close()
-    
+
     # Cleanup
     if os.path.exists(target_path):
         os.remove(target_path)
@@ -1147,21 +1149,21 @@ async def test_backup_sqlite_connection_state_validation(test_db):
     import rapsqlite
     import sqlite3
     import os
-    
+
     # Create source database
     source_conn = rapsqlite.Connection(test_db)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-    
+
     # Test 1: Target with active transaction should fail
     target_path = test_db + ".backup_tx"
     if os.path.exists(target_path):
         os.remove(target_path)
-    with open(target_path, 'w'):
+    with open(target_path, "w"):
         pass
-    
+
     target_conn = sqlite3.connect(target_path)
     target_conn.execute("BEGIN")
-    
+
     try:
         await source_conn.backup(target_conn)
         assert False, "Should have raised OperationalError for active transaction"
@@ -1172,30 +1174,29 @@ async def test_backup_sqlite_connection_state_validation(test_db):
         target_conn.close()
         if os.path.exists(target_path):
             os.remove(target_path)
-    
+
     await source_conn.close()
 
 
 @pytest.mark.asyncio
 async def test_backup_sqlite_handle_extraction(test_db):
     """Test that handle extraction works and provides diagnostic information."""
-    import rapsqlite
     import sqlite3
     import rapsqlite._backup_helper as bh
-    
+
     # Test handle extraction
     conn = sqlite3.connect(":memory:")
     handle = bh.get_sqlite3_handle(conn)
-    
+
     assert handle is not None, "Handle extraction should succeed"
     assert handle != 0, "Handle should not be null"
-    
+
     # Test with closed connection
     conn.close()
     handle_closed = bh.get_sqlite3_handle(conn)
     # Closed connection should return None (our helper checks for closed connections)
     assert handle_closed is None, "Closed connection should return None"
-    
+
     # Test with invalid object
     invalid_handle = bh.get_sqlite3_handle("not a connection")
     assert invalid_handle is None, "Invalid object should return None"
@@ -2199,7 +2200,7 @@ async def test_row_factory_comprehensive(test_db):
 
 
 # Schema Operations Compatibility Tests
-# 
+#
 # Note: aiosqlite does not have built-in schema introspection methods like
 # get_tables(), get_table_info(), get_indexes(), get_foreign_keys(), or get_schema().
 # These are rapsqlite enhancements. However, we verify that rapsqlite's schema
@@ -2214,16 +2215,16 @@ async def test_get_tables_equivalent_to_sqlite_master(test_db):
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT)")
         await conn.execute("CREATE VIEW user_view AS SELECT name FROM users")
-        
+
         # Using rapsqlite's get_tables()
         tables_method = await conn.get_tables()
-        
+
         # Equivalent aiosqlite query
         tables_query = await conn.fetch_all(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         )
         tables_manual = [row[0] for row in tables_query]
-        
+
         assert set(tables_method) == set(tables_manual)
         assert len(tables_method) == 2
         assert "users" in tables_method
@@ -2243,28 +2244,30 @@ async def test_get_table_info_equivalent_to_pragma_table_info(test_db):
                 age INTEGER DEFAULT 0
             )
         """)
-        
+
         # Using rapsqlite's get_table_info()
         info_method = await conn.get_table_info("users")
-        
+
         # Equivalent aiosqlite query
         info_query = await conn.fetch_all("PRAGMA table_info(users)")
-        
+
         # Convert query results to dict format for comparison
         info_manual = []
         for row in info_query:
-            info_manual.append({
-                "cid": row[0],
-                "name": row[1],
-                "type": row[2],
-                "notnull": row[3],
-                "dflt_value": row[4],
-                "pk": row[5],
-            })
-        
+            info_manual.append(
+                {
+                    "cid": row[0],
+                    "name": row[1],
+                    "type": row[2],
+                    "notnull": row[3],
+                    "dflt_value": row[4],
+                    "pk": row[5],
+                }
+            )
+
         assert len(info_method) == len(info_manual)
         assert len(info_method) == 4
-        
+
         # Compare each column
         for method_col, manual_col in zip(info_method, info_manual):
             assert method_col["cid"] == manual_col["cid"]
@@ -2290,35 +2293,39 @@ async def test_get_indexes_equivalent_to_sqlite_master(test_db):
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
         await conn.execute("CREATE INDEX idx_email ON users(email)")
         await conn.execute("CREATE UNIQUE INDEX idx_unique_email ON users(email)")
-        
+
         # Using rapsqlite's get_indexes()
         indexes_method = await conn.get_indexes(table_name="users")
-        
+
         # Equivalent aiosqlite query
         indexes_query = await conn.fetch_all(
             "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name='users' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         )
-        
+
         indexes_manual = []
         for row in indexes_query:
             # Determine unique from SQL
             sql = row[2] or ""
             is_unique = 1 if "UNIQUE" in sql.upper() else 0
-            indexes_manual.append({
-                "name": row[0],
-                "table": row[1],
-                "unique": is_unique,
-                "sql": row[2],
-            })
-        
+            indexes_manual.append(
+                {
+                    "name": row[0],
+                    "table": row[1],
+                    "unique": is_unique,
+                    "sql": row[2],
+                }
+            )
+
         # Compare (may have different ordering)
         method_names = {idx["name"] for idx in indexes_method}
         manual_names = {idx["name"] for idx in indexes_manual}
         assert method_names == manual_names
-        
+
         # Compare details for each index
         for method_idx in indexes_method:
-            manual_idx = next(idx for idx in indexes_manual if idx["name"] == method_idx["name"])
+            manual_idx = next(
+                idx for idx in indexes_manual if idx["name"] == method_idx["name"]
+            )
             assert method_idx["table"] == manual_idx["table"]
             assert method_idx["unique"] == manual_idx["unique"]
             assert method_idx["sql"] == manual_idx["sql"]
@@ -2337,30 +2344,32 @@ async def test_get_foreign_keys_equivalent_to_pragma_foreign_key_list(test_db):
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE ON UPDATE RESTRICT
             )
         """)
-        
+
         # Using rapsqlite's get_foreign_keys()
         fks_method = await conn.get_foreign_keys("posts")
-        
+
         # Equivalent aiosqlite query
         fks_query = await conn.fetch_all("PRAGMA foreign_key_list(posts)")
-        
+
         # Convert query results to dict format for comparison
         fks_manual = []
         for row in fks_query:
-            fks_manual.append({
-                "id": row[0],
-                "seq": row[1],
-                "table": row[2],
-                "from": row[3],
-                "to": row[4],
-                "on_update": row[5] or "NO ACTION",
-                "on_delete": row[6] or "NO ACTION",
-                "match": row[7] or "NONE",
-            })
-        
+            fks_manual.append(
+                {
+                    "id": row[0],
+                    "seq": row[1],
+                    "table": row[2],
+                    "from": row[3],
+                    "to": row[4],
+                    "on_update": row[5] or "NO ACTION",
+                    "on_delete": row[6] or "NO ACTION",
+                    "match": row[7] or "NONE",
+                }
+            )
+
         assert len(fks_method) == len(fks_manual)
         assert len(fks_method) >= 1
-        
+
         # Compare each foreign key
         for method_fk, manual_fk in zip(fks_method, fks_manual):
             assert method_fk["id"] == manual_fk["id"]
@@ -2393,69 +2402,75 @@ async def test_get_schema_equivalent_to_combined_queries(test_db):
             )
         """)
         await conn.execute("CREATE INDEX idx_posts_user ON posts(user_id)")
-        
+
         # Using rapsqlite's get_schema()
         schema_method = await conn.get_schema(table_name="posts")
-        
+
         # Equivalent manual queries
         table_info = await conn.fetch_all("PRAGMA table_info(posts)")
         indexes_query = await conn.fetch_all(
             "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name='posts' AND name NOT LIKE 'sqlite_%'"
         )
         fks_query = await conn.fetch_all("PRAGMA foreign_key_list(posts)")
-        
+
         # Build manual schema
         columns_manual = []
         for row in table_info:
-            columns_manual.append({
-                "cid": row[0],
-                "name": row[1],
-                "type": row[2],
-                "notnull": row[3],
-                "dflt_value": row[4],
-                "pk": row[5],
-            })
-        
+            columns_manual.append(
+                {
+                    "cid": row[0],
+                    "name": row[1],
+                    "type": row[2],
+                    "notnull": row[3],
+                    "dflt_value": row[4],
+                    "pk": row[5],
+                }
+            )
+
         indexes_manual = []
         for row in indexes_query:
             sql = row[2] or ""
             is_unique = 1 if "UNIQUE" in sql.upper() else 0
-            indexes_manual.append({
-                "name": row[0],
-                "table": row[1],
-                "unique": is_unique,
-                "sql": row[2],
-            })
-        
+            indexes_manual.append(
+                {
+                    "name": row[0],
+                    "table": row[1],
+                    "unique": is_unique,
+                    "sql": row[2],
+                }
+            )
+
         fks_manual = []
         for row in fks_query:
-            fks_manual.append({
-                "id": row[0],
-                "seq": row[1],
-                "table": row[2],
-                "from": row[3],
-                "to": row[4],
-                "on_update": row[5] or "NO ACTION",
-                "on_delete": row[6] or "NO ACTION",
-                "match": row[7] or "NONE",
-            })
-        
+            fks_manual.append(
+                {
+                    "id": row[0],
+                    "seq": row[1],
+                    "table": row[2],
+                    "from": row[3],
+                    "to": row[4],
+                    "on_update": row[5] or "NO ACTION",
+                    "on_delete": row[6] or "NO ACTION",
+                    "match": row[7] or "NONE",
+                }
+            )
+
         # Compare
         assert schema_method["table_name"] == "posts"
         assert len(schema_method["columns"]) == len(columns_manual)
         assert len(schema_method["indexes"]) == len(indexes_manual)
         assert len(schema_method["foreign_keys"]) == len(fks_manual)
-        
+
         # Verify columns match
         method_col_names = {col["name"] for col in schema_method["columns"]}
         manual_col_names = {col["name"] for col in columns_manual}
         assert method_col_names == manual_col_names
-        
+
         # Verify indexes match
         method_idx_names = {idx["name"] for idx in schema_method["indexes"]}
         manual_idx_names = {idx["name"] for idx in indexes_manual}
         assert method_idx_names == manual_idx_names
-        
+
         # Verify foreign keys match
         assert len(schema_method["foreign_keys"]) == len(fks_manual)
         if fks_manual:
@@ -2472,19 +2487,19 @@ async def test_schema_methods_work_like_manual_queries_in_transaction(test_db):
         await conn.begin()
         try:
             await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
-            
+
             # Schema method
             tables_method = await conn.get_tables()
-            
+
             # Manual query
             tables_manual = await conn.fetch_all(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
             tables_manual_names = [row[0] for row in tables_manual]
-            
+
             assert set(tables_method) == set(tables_manual_names)
             assert "test" in tables_method
-            
+
             await conn.commit()
         except Exception:
             await conn.rollback()

@@ -79,17 +79,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connection lifecycle management: callbacks released when all cleared
 - Transaction support: callbacks work correctly with begin/commit/rollback
 
-### Added - Testing
-
-- **`tests/test_callback_robustness.py`** — 35 comprehensive tests covering:
-  - Edge cases for all callback types (many arguments, stateful functions, BLOBs, NULLs, exceptions)
-  - Complex scenarios (transactions, concurrent calls, rapid queries, special characters)
-  - Integration tests (all callbacks together, pool size variations, cursor operations)
-  - Comprehensive iterdump tests (indexes, triggers, views, BLOBs, special characters, multiple tables)
-- **`tests/test_aiosqlite_compat.py`** — 22 callback and iterdump compatibility tests (all passing)
-- **`tests/test_schema_operations.py`** — 72 comprehensive tests for schema introspection methods
-- **276 total tests passing** (7 skipped)
-
 ### Added - Phase 2.8: Database Dump
 
 - **`Connection.iterdump()`** — Dump database schema and data as SQL statements
@@ -166,70 +155,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hidden field indicates: 0=normal, 1=hidden, 2=virtual, 3=stored
   - Useful for detecting generated columns and hidden system columns
 
-### Added - Phase 2.9: Database Backup
+### Added - Phase 2.11: Database Initialization Hooks
 
-- **`Connection.backup(target, *, pages=0, progress=None, name="main", sleep=0.25)`** — Online backup API
-  - Supports backing up from one `rapsqlite.Connection` to another `rapsqlite.Connection`
-  - Incremental backup with configurable pages per step
-  - Progress callback support with (remaining, page_count, pages_copied) parameters
-  - Configurable sleep duration between backup steps
-  - Works with transactions and callback connections
-  - Comprehensive error handling with SQLite error codes and messages
-  - Connection state validation (checks for active transactions)
-  - Handle validation and lifetime management
+- **`Connection.__new__(path, *, pragmas=None, init_hook=None)`** — `init_hook` parameter for automatic database initialization
+  - **Note:** This is a rapsqlite-specific enhancement and is not available in aiosqlite
+  - Optional async callable that receives the `Connection` object
+  - Called automatically once when the connection pool is first used
+  - Perfect for schema setup, initial data seeding, and PRAGMA configuration
+  - Hook is only called once per `Connection` instance
+  - Errors in the hook are properly propagated to the caller
+  - Works with all connection operations (execute, fetch_*, schema introspection, transactions, etc.)
+  - Comprehensive test suite with 36 tests covering all use cases
 
-### Added - Backup Debugging & Validation
+### Added - Code Quality & Type Safety
 
-- Enhanced error handling for backup operations
-  - Detailed SQLite error codes and messages when backup fails
-  - Connection state validation (active transactions, closed connections)
-  - Handle validation before backup operations
-  - SQLite library version checking for debugging
-- Python helper module (`rapsqlite._backup_helper`) for handle extraction
-  - Safely extracts sqlite3* handle from sqlite3.Connection using ctypes
-  - Validates connection state before extraction
-  - Handles closed connections gracefully
-- Comprehensive debugging tests
-  - `test_backup_sqlite_connection_state_validation` — Tests error handling for invalid states
-  - `test_backup_sqlite_handle_extraction` — Tests handle extraction functionality
-  - All rapsqlite-to-rapsqlite backup tests passing
-
-### Added - Phase 2.8: Database Dump
-
-- **`Connection.iterdump()`** — Dump database schema and data as SQL statements
-  - Returns `List[str]` matching aiosqlite API
-  - Handles tables, indexes, triggers, and views
-  - Proper SQL escaping for strings and BLOB data (hex encoding)
-  - Preserves all data types (INTEGER, REAL, TEXT, BLOB, NULL)
-  - Works with transactions and callback connections
-
-### Added - Phase 2.7: Advanced SQLite Callbacks
-
-- **`Connection.enable_load_extension(enabled: bool)`** — Enable/disable SQLite extension loading
-- **`Connection.create_function(name: str, nargs: int, func: Optional[Callable])`** — Create or remove user-defined SQL functions
-  - Supports 0-6+ arguments with proper tuple unpacking
-  - Handles all return types (int, float, str, bytes, None)
-  - Works in transactions, aggregates, and complex queries
-- **`Connection.set_trace_callback(callback: Optional[Callable])`** — Set callback to trace SQL statements
-  - Captures all query types (CREATE, INSERT, SELECT, UPDATE, DELETE)
-  - Works with transactions (BEGIN, COMMIT, ROLLBACK)
-- **`Connection.set_authorizer(callback: Optional[Callable])`** — Set authorization callback for database operations
-  - Supports all SQLite action codes
-  - Can selectively deny operations
-- **`Connection.set_progress_handler(n: int, callback: Optional[Callable])`** — Set progress handler for long-running operations
-  - Can abort long-running operations
-  - Handles exceptions gracefully
-
-### Added - Architecture Improvements
-
-- Dedicated callback connection architecture for safe C API access
-- Callback trampolines for Python-to-SQLite C API integration
-- All callback methods wired to execute/fetch operations (transaction > callbacks > pool priority)
-- Connection lifecycle management: callbacks released when all cleared
-- Transaction support: callbacks work correctly with begin/commit/rollback
+- **Type checking** — Full mypy type checking support
+  - Fixed type stub syntax issues in `_rapsqlite.pyi`
+  - Added type alias for `init_hook` callback signature
+  - Fixed type annotations in `_backup_helper.py` for platform-dependent pointer sizes
+  - All 13 source files pass mypy type checking
+- **Code formatting and linting** — Ruff integration
+  - Configured Ruff formatter and linter in `pyproject.toml`
+  - Excluded `.pyi` files from formatting (type stubs have distinct syntax)
+  - Fixed unused imports and variables across test files
+  - All code passes `ruff format` and `ruff check`
 
 ### Added - Testing
 
+- **`tests/test_init_hook.py`** — 36 comprehensive tests for database initialization hooks
+  - Schema setup and data seeding
+  - PRAGMA configuration
+  - Error handling (SQL errors, database constraint errors, exceptions)
+  - Concurrent access and recursive prevention
+  - Integration with all connection operations (execute, fetch_*, schema introspection, transactions, cursors, etc.)
+  - Complex schema initialization
 - **`tests/test_callback_robustness.py`** — 35 comprehensive tests covering:
   - Edge cases for all callback types (many arguments, stateful functions, BLOBs, NULLs, exceptions)
   - Complex scenarios (transactions, concurrent calls, rapid queries, special characters)
@@ -239,7 +198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`tests/test_schema_operations.py`** — 72 comprehensive tests for all schema introspection methods
 - **`tests/test_pool_config.py`** — 18 tests for pool configuration
 - **`tests/test_row_factory.py`** — 18 tests for row factory functionality
-- **276 total tests passing** (7 skipped)
+- **312 total tests passing** (7 skipped)
 
 ### Fixed
 
@@ -258,6 +217,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated date to 2026-01-26
 - Enhanced backup error messages with SQLite error codes and diagnostic information
 - Improved documentation for backup functionality with clear limitations and workarounds
+- Updated test suite count from 276 to 312 passing tests (36 new init_hook tests)
 
 ---
 

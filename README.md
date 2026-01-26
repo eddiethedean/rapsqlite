@@ -311,6 +311,51 @@ async def main():
 asyncio.run(main())
 ```
 
+### Database Initialization Hooks
+
+**Note:** `init_hook` is a **rapsqlite-specific enhancement** and is not available in aiosqlite. This feature provides automatic database initialization capabilities that go beyond standard aiosqlite functionality.
+
+The `init_hook` parameter allows you to run custom initialization code automatically when a connection pool is first created. This is useful for setting up schema, inserting initial data, or configuring database settings.
+
+```python
+import asyncio
+from rapsqlite import Connection
+
+async def init_hook(conn):
+    """Initialize database schema and data."""
+    # Create tables
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE
+        )
+    """)
+    
+    # Insert initial data
+    await conn.execute("INSERT OR IGNORE INTO users (name, email) VALUES ('Admin', 'admin@example.com')")
+    
+    # Set additional PRAGMAs
+    await conn.set_pragma("foreign_keys", True)
+
+async def main():
+    # Connection will automatically call init_hook on first use
+    async with Connection("example.db", init_hook=init_hook) as conn:
+        # Tables are already created and initialized
+        users = await conn.fetch_all("SELECT * FROM users")
+        print(users)  # Output: [[1, 'Admin', 'admin@example.com']]
+
+asyncio.run(main())
+```
+
+**Key features:**
+- The hook is called **once** per `Connection` instance, when the pool is first used
+- The hook receives the `Connection` object as an argument, allowing full database access
+- If the hook raises an exception, it will be propagated to the caller
+- The hook can perform any database operations (create tables, insert data, set PRAGMAs, etc.)
+
+**Compatibility note:** `init_hook` is a rapsqlite-specific enhancement and is not available in aiosqlite. This feature provides automatic database initialization capabilities that go beyond standard aiosqlite functionality.
+
 ## API Reference
 
 ### `connect(path: str, **kwargs: Any) -> Connection`
@@ -330,18 +375,25 @@ async with connect("example.db") as conn:
     await conn.execute("CREATE TABLE test (id INTEGER)")
 ```
 
-### `Connection(path: str)`
+### `Connection(path: str, *, pragmas=None, init_hook=None)`
 
 Create a new async SQLite connection.
 
 **Parameters:**
 - `path` (str): Path to the SQLite database file
+- `pragmas` (Optional[Dict[str, Any]]): Optional dictionary of PRAGMA settings to apply at connection time
+- `init_hook` (Optional[Callable[[Connection], Coroutine[Any, Any, None]]]): Optional async callable that receives the Connection object and runs initialization code. Called once when the connection pool is first used.
+  
+  **Note:** `init_hook` is a rapsqlite-specific feature and is not available in aiosqlite. This enhancement provides automatic database initialization capabilities beyond standard aiosqlite functionality.
 
 **Example:**
 ```python
-conn = Connection("example.db")
+async def init_hook(conn):
+    await conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)")
+
+conn = Connection("example.db", pragmas={"foreign_keys": True}, init_hook=init_hook)
 async with conn:
-    await conn.execute("CREATE TABLE test (id INTEGER)")
+    await conn.execute("INSERT INTO users (name) VALUES ('Alice')")
 ```
 
 ### Connection Methods

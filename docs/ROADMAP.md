@@ -29,11 +29,12 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 - ✅ **Phase 2.8 Complete**: Database dump (`Connection.iterdump()`)
 - ✅ **Phase 2.9 Complete**: Database backup (`Connection.backup()`)
 - ✅ **Phase 2.10 Complete**: Schema operations and introspection (`get_tables`, `get_table_info`, `get_indexes`, `get_foreign_keys`, `get_schema`, `get_views`, `get_index_list`, `get_index_info`, `get_table_xinfo`)
-- ⏳ **Phase 2.11+**: Remaining Phase 2 features (prepared statements, set_pragma behavior fix, etc.)
+- ✅ **Phase 2.11 Complete**: Database initialization hooks (`init_hook` parameter for automatic schema setup and data seeding)
+- ⏳ **Phase 2.12+**: Remaining Phase 2 features (prepared statements, set_pragma behavior fix, etc.)
 
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
 
-**Recent progress:** Phase 2.10 schema operations complete with 9 introspection methods (`get_tables`, `get_table_info`, `get_indexes`, `get_foreign_keys`, `get_schema`, `get_views`, `get_index_list`, `get_index_info`, `get_table_xinfo`) and comprehensive test suite (72 tests in `tests/test_schema_operations.py`). All phases 2.1-2.10 now complete with robust testing.
+**Recent progress:** Phase 2.11 database initialization hooks complete with `init_hook` parameter for automatic database setup. The feature is a rapsqlite-specific enhancement that allows automatic schema setup, data seeding, and PRAGMA configuration when the connection pool is first used. Comprehensive test suite with 36 tests covering all use cases. Code quality improvements: full mypy type checking support (all 13 source files pass), Ruff formatter and linter integration. Phase 2.10 schema operations complete with 9 introspection methods (`get_tables`, `get_table_info`, `get_indexes`, `get_foreign_keys`, `get_schema`, `get_views`, `get_index_list`, `get_index_info`, `get_table_xinfo`) and comprehensive test suite (72 tests in `tests/test_schema_operations.py`). All phases 2.1-2.11 now complete with robust testing. Test suite expanded to 312 passing tests (7 skipped).
 
 ## Phase 1 — Credibility
 
@@ -159,7 +160,7 @@ Focus: Fix critical performance issues, add essential features for production us
 
 Focus: Feature additions, performance optimizations, and broader SQLite feature support.
 
-**Current Phase 2 Status**: Phases 2.1-2.10 complete. All core features implemented including parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, and comprehensive schema introspection. Each phase has dedicated robust test suites.
+**Current Phase 2 Status**: Phases 2.1-2.11 complete. All core features implemented including parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection, and database initialization hooks. Each phase has dedicated robust test suites. Code quality: full mypy type checking and Ruff formatting/linting.
 
 ### Phase 2 features to implement (from compat gaps)
 
@@ -245,7 +246,7 @@ Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
   - ✅ Connection string support (URI format: `file:path?param=value`) - complete
   - ✅ PRAGMA settings via constructor parameter - complete
   - ⏳ `set_pragma` behavior investigation — `test_set_pragma` fails (assertion `1 == 2`); possible PRAGMA application or return-value mismatch
-  - ⏳ Database initialization hooks (infrastructure added, async execution pending)
+  - ✅ Database initialization hooks (Phase 2.11 complete: `init_hook` parameter for automatic schema setup and data seeding)
   - ⏳ Custom SQLite extensions (if applicable) (planned)
 
 - **Pool configuration** ✅ (Phase 2.4 complete)
@@ -433,4 +434,4 @@ Following semantic versioning:
 - `v1.0`: Stable API, Phase 1 complete, production-ready (ready for release)
 - `v1.x+`: Phase 2 and 3 features, backwards-compatible additions
 
-**Current Version: v0.2.0** — Phase 1 complete; Phase 2.1-2.10 complete (parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection). Core aiosqlite API compatibility significantly improved. Python 3.8–3.14 supported. 276 tests passing. Ready for v1.0 when remaining Phase 2 goals are met.
+**Current Version: v0.2.0** — Phase 1 complete; Phase 2.1-2.11 complete (parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection, database initialization hooks). Core aiosqlite API compatibility significantly improved. Python 3.8–3.14 supported. 312 tests passing (7 skipped). Full mypy type checking and Ruff formatting/linting. Ready for v1.0 when remaining Phase 2 goals are met.

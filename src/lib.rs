@@ -4,7 +4,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
-use pyo3_async_runtimes::tokio::future_into_py;
+use pyo3_async_runtimes::tokio::{future_into_py, into_future};
 use sqlx::{Column, Row, SqlitePool};
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{SqliteConnection, SqlitePoolOptions};
@@ -1015,9 +1015,6 @@ async fn get_or_create_pool(
                 .map_err(|e| map_sqlx_error(e, path, &pragma_query))?;
         }
         
-        // TODO: Call init_hook if provided (requires proper async coroutine handling)
-        // This will be implemented in a follow-up optimization
-        
         *pool_guard = Some(new_pool);
     }
     Ok(pool_guard.as_ref().unwrap().clone())
@@ -1047,6 +1044,58 @@ async fn ensure_callback_connection(
         
         *callback_guard = Some(pool_conn);
     }
+    Ok(())
+}
+
+/// Execute init_hook if it hasn't been called yet.
+/// This should be called from the first operation method that uses the pool.
+async fn execute_init_hook_if_needed(
+    init_hook: &Arc<StdMutex<Option<Py<PyAny>>>>,
+    init_hook_called: &Arc<StdMutex<bool>>,
+    connection: Py<Connection>,
+) -> Result<(), PyErr> {
+    // Check if init_hook has already been called
+    let already_called = {
+        let guard = init_hook_called.lock().unwrap();
+        *guard
+    };
+    
+    if already_called {
+        return Ok(());
+    }
+    
+    // Check if init_hook is set and call it if needed
+    let hook_opt: Option<Py<PyAny>> = Python::with_gil(|py| {
+        let guard = init_hook.lock().unwrap();
+        guard.as_ref().map(|h| h.clone_ref(py))
+    });
+    
+    if let Some(hook) = hook_opt {
+        // Mark as called before execution (to avoid re-entry if hook calls other methods)
+        {
+            let mut guard = init_hook_called.lock().unwrap();
+            *guard = true;
+        }
+        
+        // Call the hook with the Connection object and await the coroutine
+        let coro_future = Python::with_gil(|py| -> PyResult<_> {
+            let hook_bound = hook.bind(py);
+            let conn_bound = connection.bind(py);
+            
+            // Call the hook with Connection as argument
+            let coro = hook_bound.call1((conn_bound,))
+                .map_err(|e| OperationalError::new_err(format!("Failed to call init_hook: {}", e)))?;
+            
+            // Convert Python coroutine to Rust future (into_future expects Bound)
+            into_future(coro)
+                .map_err(|e| OperationalError::new_err(format!("Failed to convert init_hook coroutine to future: {}", e)))
+        })?;
+        
+        // Await the future
+        coro_future.await
+            .map_err(|e| OperationalError::new_err(format!("init_hook raised an exception: {}", e)))?;
+    }
+    
     Ok(())
 }
 
@@ -1172,6 +1221,7 @@ struct Connection {
     last_changes: Arc<Mutex<u64>>,
     pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Store PRAGMA settings
     init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
+    init_hook_called: Arc<StdMutex<bool>>, // Track if init_hook has been executed
     pool_size: Arc<StdMutex<Option<usize>>>, // Configurable pool size
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>, // Connection timeout in seconds
     row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // None | "dict" | "tuple" | callable
@@ -1225,6 +1275,7 @@ impl Connection {
             last_changes: Arc::new(Mutex::new(0)),
             pragmas: Arc::new(StdMutex::new(all_pragmas)),
             init_hook: Arc::new(StdMutex::new(init_hook)),
+            init_hook_called: Arc::new(StdMutex::new(false)),
             pool_size: Arc::new(StdMutex::new(None)),
             connection_timeout_secs: Arc::new(StdMutex::new(None)),
             row_factory: Arc::new(StdMutex::new(None)),
@@ -1460,27 +1511,44 @@ impl Connection {
     }
 
     /// Begin a transaction.
-    fn begin(&self) -> PyResult<Py<PyAny>> {
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let transaction_state = Arc::clone(&self.transaction_state);
-        let transaction_connection = Arc::clone(&self.transaction_connection);
+    fn begin(self_: PyRef<Self>) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
         // Callback infrastructure (Phase 2.7)
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let user_functions = Arc::clone(&self.user_functions);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
         Python::attach(|py| {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard == TransactionState::Active {
                     return Err(OperationalError::new_err("Transaction already in progress"));
                 }
+
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                get_or_create_pool(
+                    &path,
+                    &pool,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                )
+                .await?;
+
+                // Execute init_hook if needed (before starting transaction)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
                 // Check if callbacks are set - if so, use callback connection for transaction
                 let has_callbacks_flag = has_callbacks(
@@ -1677,6 +1745,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
         
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1710,6 +1782,22 @@ impl Connection {
                     *g == TransactionState::Active
                 };
                 
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
+                
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
@@ -1717,7 +1805,7 @@ impl Connection {
                     &authorizer_callback,
                     &progress_handler,
                 );
-                
+
                 let result = if in_transaction {
                     // Use transaction connection - need &mut **conn to access underlying connection that implements Executor
                     let mut conn_guard = transaction_connection.lock().await;
@@ -1790,6 +1878,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
         
         // Process all parameter sets
         // Each element in parameters is a list/tuple of parameters for one execution
@@ -1815,6 +1907,22 @@ impl Connection {
                     let trans_guard = transaction_state.lock().await;
                     *trans_guard == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -1913,6 +2021,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1945,6 +2057,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -2027,6 +2155,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -2054,6 +2186,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -2131,6 +2279,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -2158,6 +2310,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -2269,16 +2437,22 @@ impl Connection {
             transaction_state: Arc::clone(&slf.transaction_state),
             transaction_connection: Arc::clone(&slf.transaction_connection),
             connection: slf.into(),
+            init_hook: Arc::clone(&slf.init_hook),
+            init_hook_called: Arc::clone(&slf.init_hook_called),
         })
     }
 
     /// Set a PRAGMA value on the database connection.
-    fn set_pragma(&self, name: String, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+    fn set_pragma(self_: PyRef<Self>, name: String, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
         
         // Convert value to string for PRAGMA
         let pragma_value = Python::with_gil(|py| -> PyResult<String> {
@@ -2322,6 +2496,9 @@ impl Connection {
                     &connection_timeout_secs,
                 )
                 .await?;
+
+                // Execute init_hook if needed (before setting PRAGMA)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
                 sqlx::query(&pragma_query)
                     .execute(&pool_clone)
@@ -3415,6 +3592,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         Python::attach(|py| {
             let future = async move {
@@ -3422,6 +3603,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -3502,6 +3699,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         // Escape table name for SQL
         let escaped_table_name = table_name.replace("'", "''");
@@ -3513,6 +3714,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -3625,6 +3842,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         // Build query
         let query = if let Some(ref tbl_name) = table_name {
@@ -3640,6 +3861,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -3743,6 +3980,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         // Escape table name for SQL
         let escaped_table_name = table_name.replace("'", "''");
@@ -3754,6 +3995,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -4145,6 +4402,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         Python::attach(|py| {
             let future = async move {
@@ -4152,6 +4413,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -4232,6 +4509,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         // Escape table name for SQL
         let escaped_table_name = table_name.replace("'", "''");
@@ -4243,6 +4524,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -4344,6 +4641,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         // Escape index name for SQL
         let escaped_index_name = index_name.replace("'", "''");
@@ -4355,6 +4656,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -4445,6 +4762,10 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Init hook infrastructure (Phase 2.11)
+        let init_hook = Arc::clone(&self_.init_hook);
+        let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let connection_self = self_.into();
 
         // Escape table name for SQL
         let escaped_table_name = table_name.replace("'", "''");
@@ -4456,6 +4777,22 @@ impl Connection {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
+                // Skip if in transaction (transaction has its own connection)
+                if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                }
+                
+                // Execute init_hook if needed (before any operations)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
                 
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
@@ -4992,6 +5329,8 @@ struct TransactionContextManager {
     transaction_state: Arc<Mutex<TransactionState>>,
     transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     connection: Py<Connection>,
+    init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
+    init_hook_called: Arc<StdMutex<bool>>, // Track if init_hook has been executed
 }
 
 #[pymethods]
@@ -5007,6 +5346,8 @@ impl TransactionContextManager {
             let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
             let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
             let connection = slf.borrow(py).connection.clone_ref(py);
+            let init_hook = Arc::clone(&slf.borrow(py).init_hook);
+            let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard == TransactionState::Active {
@@ -5020,6 +5361,9 @@ impl TransactionContextManager {
                     &connection_timeout_secs,
                 )
                 .await?;
+
+                // Execute init_hook if needed (before starting transaction)
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
                 let mut conn = pool_clone
                     .acquire()
                     .await

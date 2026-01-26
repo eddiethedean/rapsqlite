@@ -2,6 +2,9 @@
 
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Type
 
+# Type alias for init_hook callback
+InitHook = Callable[["Connection"], Coroutine[Any, Any, None]]
+
 class Error(Exception):
     """Base exception class for rapsqlite errors."""
     def __init__(self, message: str) -> None: ...
@@ -29,7 +32,28 @@ class IntegrityError(DatabaseError):
 class Connection:
     """Async SQLite connection."""
 
-    def __init__(self, path: str) -> None: ...
+    def __new__(
+        cls,
+        path: str,
+        *,
+        pragmas: Optional[Dict[str, Any]] = None,
+        init_hook: Optional[InitHook] = None,
+    ) -> "Connection":
+        """Create a new async SQLite connection.
+        
+        Args:
+            path: Path to SQLite database file
+            pragmas: Optional dict of PRAGMA settings
+            init_hook: Optional async callable that receives Connection and runs initialization code.
+                The hook is called once when the connection pool is first used.
+                Example: async def init_hook(conn): await conn.execute("CREATE TABLE ...")
+                
+        Note:
+            init_hook is a rapsqlite-specific enhancement and is not available in aiosqlite.
+            This feature provides automatic database initialization capabilities beyond
+            standard aiosqlite functionality.
+        """
+        ...
     def __aenter__(self) -> "Connection": ...
     def __aexit__(
         self,
