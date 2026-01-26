@@ -1338,7 +1338,9 @@ async def test_set_pragma(test_db):
         await db.set_pragma("synchronous", "NORMAL")
         rows = await db.fetch_all("PRAGMA synchronous")
         assert len(rows) == 1
-        assert rows[0][0] == 1  # NORMAL = 1 (per SQLite: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA)
+        assert (
+            rows[0][0] == 1
+        )  # NORMAL = 1 (per SQLite: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA)
 
 
 @pytest.mark.asyncio

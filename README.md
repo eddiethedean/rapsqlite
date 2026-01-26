@@ -467,75 +467,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 
 ## Changelog
 
-### v0.2.0 (2026-01-25) — Phase 2
-
-**Phase 2.5 — Row factory:**
-- ✅ `Connection.row_factory` getter/setter
-- ✅ Supported values: `None` (list rows), `"dict"` (column names as keys), `"tuple"`, or a callable `(row) -> any`
-- ✅ `fetch_all`, `fetch_one`, and `fetch_optional` respect `row_factory`
-- ✅ Cursor `fetchone`, `fetchall`, and `fetchmany` use the connection’s `row_factory`
-- ✅ Row factory works with parameterized queries and inside `transaction()`
-
-**Phase 2.6 — Transaction context manager & execute_many fixes:**
-- ✅ `Connection.transaction()` async context manager (`async with db.transaction():`)
-- ✅ `execute_many` no longer raises "database is locked" when used inside a transaction
-- ✅ `fetch_*` use the transaction connection when inside a transaction (avoids deadlock)
-
-**Phase 2.7 — Advanced SQLite callbacks:**
-- ✅ `Connection.enable_load_extension(enabled: bool)` — Enable/disable SQLite extension loading
-- ✅ `Connection.create_function(name: str, nargs: int, func: Optional[Callable])` — Create or remove user-defined SQL functions
-- ✅ `Connection.set_trace_callback(callback: Optional[Callable])` — Set callback to trace SQL statements
-- ✅ `Connection.set_authorizer(callback: Optional[Callable])` — Set authorization callback for database operations
-- ✅ `Connection.set_progress_handler(n: int, callback: Optional[Callable])` — Set progress handler for long-running operations
-- ✅ Dedicated callback connection architecture for safe C API access
-- ✅ Callback trampolines for Python-to-SQLite C API integration
-- ✅ Proper cleanup of callbacks on connection close
-
-**API compatibility:**
-- ✅ `parameters` is optional on `execute`, `fetch_all`, `fetch_one`, `fetch_optional`, and `Cursor.execute`
-
-**Testing and tooling:**
-- ✅ `tests/test_row_factory.py`: 18 tests for row_factory (fetch_one/optional, empty/multi-row, NULLs, duplicate columns, cursor, parameterized, transactions, callable edge cases, BLOB)
-- ✅ Python tests moved into `tests/` directory; `pyproject.toml` `testpaths = ["tests"]`; CI updated
-- ✅ Ruff format and ruff check applied; unused imports and variables fixed
-
-**Bug Fixes:**
-- ✅ Fixed `test_set_pragma` assertion to match SQLite's documented behavior (PRAGMA synchronous NORMAL = 1, not 2)
-
-### v0.1.1 (2026-01-16)
-
-**Python 3.14 Support:**
-- ✅ Added Python 3.14 support with ABI3 forward compatibility
-- ✅ Updated CI/CD workflows to test and build for Python 3.14
-
-**Python 3.13 Support:**
-- ✅ Added Python 3.13 support with ABI3 forward compatibility
-- ✅ Updated CI/CD workflows to test and build for Python 3.13
-- ✅ Fixed exception handling for ABI3 compatibility (using `create_exception!` macro)
-- ✅ Explicitly registered exception classes in Python module
-
-**Bug Fixes:**
-- Fixed exception registration issue where exceptions created with `create_exception!` were not accessible from Python
-
-**Compatibility:**
-- Python 3.8 through 3.14 supported
-- All platforms: Ubuntu (x86-64, aarch64), macOS (aarch64, x86-64), Windows (x86-64, aarch64)
-
-### v0.1.0 (2025-01-12)
-
-**Initial Release - Phase 1 Complete:**
-- Connection lifecycle management (async context managers)
-- Transaction support (begin, commit, rollback)
-- Type system improvements (proper Python types: int, float, str, bytes, None)
-- Enhanced error handling (custom exception classes matching aiosqlite)
-- API improvements (fetch_one, fetch_optional, execute_many, last_insert_rowid, changes)
-- Cursor API (execute, executemany, fetchone, fetchall, fetchmany)
-- aiosqlite compatibility (connect function, exception types)
-- Security fixes: Upgraded dependencies (pyo3 0.27, pyo3-async-runtimes 0.27, sqlx 0.8)
-- Connection pooling: Connection reuses connection pool across operations
-- Input validation: Added path validation (non-empty, no null bytes)
-- Improved error handling: Enhanced error messages with database path and query context
-- Type stubs: Added `.pyi` type stubs for better IDE support and type checking
+See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and version history.
 
 ## Limitations (v0.2.0)
 

@@ -1465,6 +1465,13 @@ impl Connection {
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        // Callback infrastructure (Phase 2.7)
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
         Python::attach(|py| {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
@@ -1472,19 +1479,41 @@ impl Connection {
                     return Err(OperationalError::new_err("Transaction already in progress"));
                 }
 
-                let pool_clone = get_or_create_pool(
-                    &path,
-                    &pool,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                )
-                .await?;
+                // Check if callbacks are set - if so, use callback connection for transaction
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
 
-                // Acquire a connection from the pool and store it for the transaction
-                // All operations within the transaction must use this same connection
-                let mut conn = pool_clone.acquire().await
-                    .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {}", e)))?;
+                let mut conn = if has_callbacks_flag {
+                    // Use callback connection for transaction
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    conn_guard.take()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?
+                } else {
+                    // Acquire a connection from the pool
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                    pool_clone.acquire().await
+                        .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {}", e)))?
+                };
 
                 // Set PRAGMA busy_timeout on this connection to handle lock contention
                 sqlx::query("PRAGMA busy_timeout = 5000")
@@ -1517,12 +1546,28 @@ impl Connection {
         let path = self.path.clone();
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        // Callback infrastructure (Phase 2.7) - need to return connection if it came from callbacks
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
         Python::attach(|py| {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard != TransactionState::Active {
                     return Err(OperationalError::new_err("No transaction in progress"));
                 }
+
+                // Check if callbacks are set - if so, we need to return connection to callback_connection
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
 
                 // Retrieve the stored transaction connection
                 let mut conn_guard = transaction_connection.lock().await;
@@ -1535,8 +1580,14 @@ impl Connection {
                     .await
                     .map_err(|e| map_sqlx_error(e, &path, "COMMIT"))?;
 
-                // Connection is automatically returned to pool when dropped
-                drop(conn);
+                // If callbacks are set, return connection to callback_connection; otherwise it goes back to pool
+                if has_callbacks_flag {
+                    let mut callback_guard = callback_connection.lock().await;
+                    *callback_guard = Some(conn);
+                } else {
+                    // Connection is automatically returned to pool when dropped
+                    drop(conn);
+                }
 
                 *trans_guard = TransactionState::None;
                 Ok(())
@@ -1550,12 +1601,28 @@ impl Connection {
         let path = self.path.clone();
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        // Callback infrastructure (Phase 2.7) - need to return connection if it came from callbacks
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
         Python::attach(|py| {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard != TransactionState::Active {
                     return Err(OperationalError::new_err("No transaction in progress"));
                 }
+
+                // Check if callbacks are set - if so, we need to return connection to callback_connection
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
 
                 // Retrieve the stored transaction connection
                 let mut conn_guard = transaction_connection.lock().await;
@@ -1568,8 +1635,14 @@ impl Connection {
                     .await
                     .map_err(|e| map_sqlx_error(e, &path, "ROLLBACK"))?;
 
-                // Connection is automatically returned to pool when dropped
-                drop(conn);
+                // If callbacks are set, return connection to callback_connection; otherwise it goes back to pool
+                if has_callbacks_flag {
+                    let mut callback_guard = callback_connection.lock().await;
+                    *callback_guard = Some(conn);
+                } else {
+                    // Connection is automatically returned to pool when dropped
+                    drop(conn);
+                }
 
                 *trans_guard = TransactionState::None;
                 Ok(())
@@ -1594,6 +1667,13 @@ impl Connection {
         let last_changes = Arc::clone(&self_.last_changes);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        // Callback infrastructure (Phase 2.7)
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
         
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1621,27 +1701,57 @@ impl Connection {
         
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = get_or_create_pool(
-                    &path,
-                    &pool,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                )
-                .await?;
-
-                // Check if we're in a transaction - use stored connection if active
-                let mut conn_guard = transaction_connection.lock().await;
-                let result = if let Some(conn) = conn_guard.as_mut() {
+                // Priority: transaction > callbacks > pool
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+                
+                let result = if in_transaction {
                     // Use transaction connection - need &mut **conn to access underlying connection that implements Executor
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard.as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
+                        .await?
+                } else if has_callbacks_flag {
+                    // Ensure callback connection exists
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    
+                    // Use callback connection
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard.as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                     bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
                         .await?
                 } else {
                     // Use pool
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
                     bind_and_execute(&processed_query, &param_values, &pool_clone, &path)
                         .await?
                 };
-                drop(conn_guard);
 
                 let rowid = result.last_insert_rowid();
                 let changes = result.rows_affected();
@@ -1670,6 +1780,13 @@ impl Connection {
         let last_changes = Arc::clone(&self_.last_changes);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        // Callback infrastructure (Phase 2.7)
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
         
         // Process all parameter sets
         // Each element in parameters is a list/tuple of parameters for one execution
@@ -1690,23 +1807,22 @@ impl Connection {
         
         Python::attach(|py| {
             let future = async move {
-                let pool_clone = get_or_create_pool(
-                    &path,
-                    &pool,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                )
-                .await?;
-
-                let mut total_changes = 0u64;
-                let mut last_row_id = 0i64;
-
-                // Check if we're in a transaction - use stored connection if active
+                // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let trans_guard = transaction_state.lock().await;
                     *trans_guard == TransactionState::Active
                 };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+                
+                let mut total_changes = 0u64;
+                let mut last_row_id = 0i64;
 
                 if in_transaction {
                     // Use stored transaction connection. Release lock each iteration
@@ -1722,7 +1838,39 @@ impl Connection {
                         last_row_id = result.last_insert_rowid();
                         drop(conn_guard);
                     }
+                } else if has_callbacks_flag {
+                    // Ensure callback connection exists once before the loop
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    
+                    // Use callback connection for each iteration
+                    for param_values in processed_params.iter() {
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        let result =
+                            bind_and_execute_on_connection(&query, param_values, conn, &path).await?;
+                        total_changes += result.rows_affected();
+                        last_row_id = result.last_insert_rowid();
+                        drop(conn_guard);
+                    }
                 } else {
+                    // Use pool
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
                     for param_values in processed_params {
                         let result = bind_and_execute(&query, &param_values, &pool_clone, &path)
                             .await?;
@@ -1755,6 +1903,13 @@ impl Connection {
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
+        // Callback infrastructure (Phase 2.7)
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
 
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1782,16 +1937,42 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
                     let conn = conn_guard
                         .as_mut()
                         .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path).await?
+                } else if has_callbacks_flag {
+                    // Ensure callback connection exists
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    
+                    // Use callback connection
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                     bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path).await?
                 } else {
                     let pool_clone = get_or_create_pool(
@@ -1836,6 +2017,13 @@ impl Connection {
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
+        // Callback infrastructure (Phase 2.7)
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
 
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1858,16 +2046,42 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
 
                 let row = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
                     let conn = conn_guard
                         .as_mut()
                         .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path).await?
+                } else if has_callbacks_flag {
+                    // Ensure callback connection exists
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    
+                    // Use callback connection
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                     bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path).await?
                 } else {
                     let pool_clone = get_or_create_pool(
@@ -1907,6 +2121,13 @@ impl Connection {
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
+        // Callback infrastructure (Phase 2.7)
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
 
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1929,16 +2150,42 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     *g == TransactionState::Active
                 };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
 
                 let opt = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
                     let conn = conn_guard
                         .as_mut()
                         .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    bind_and_fetch_optional_on_connection(&processed_query, &param_values, conn, &path).await?
+                } else if has_callbacks_flag {
+                    // Ensure callback connection exists
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    
+                    // Use callback connection
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                     bind_and_fetch_optional_on_connection(&processed_query, &param_values, conn, &path).await?
                 } else {
                     let pool_clone = get_or_create_pool(
@@ -2158,13 +2405,18 @@ impl Connection {
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let user_functions = Arc::clone(&self.user_functions);
+        // Need all callback fields to check if all are cleared
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
         
         Python::attach(|py| {
             // Clone the callback with GIL to avoid Send issues
             let func_clone = func.as_ref().map(|f| f.clone_ref(py));
             
             let future = async move {
-                // Ensure callback connection exists
+                // Ensure callback connection exists (needed for both adding and removing functions)
                 ensure_callback_connection(
                     &path,
                     &pool,
@@ -2185,13 +2437,13 @@ impl Connection {
                 let raw_db = handle.as_raw_handle().as_ptr();
                 
                 if func_clone.is_none() {
-                    // Remove the function
+                    // Remove the function from user_functions
                     {
                         let mut funcs_guard = user_functions.lock().unwrap();
                         funcs_guard.remove(&name);
                     }
                     
-                    // Call sqlite3_create_function_v2 with NULL callback to remove
+                    // Remove from SQLite by calling sqlite3_create_function_v2 with NULL callback
                     let name_cstr = std::ffi::CString::new(name.clone())
                         .map_err(|e| OperationalError::new_err(format!("Function name contains null byte: {}", e)))?;
                     let result = unsafe {
@@ -2212,6 +2464,23 @@ impl Connection {
                         return Err(OperationalError::new_err(
                             format!("Failed to remove function '{}': SQLite error code {}", name, result)
                         ));
+                    }
+                    
+                    // After removing, check if all callbacks are now cleared
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        // Release the callback connection
+                        drop(handle);
+                        drop(conn_guard);
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                        return Ok(());
                     }
                 } else {
                     // Store the function - need to clone the callback with GIL
@@ -2275,29 +2544,76 @@ impl Connection {
                                     }
                                 }
                                 
-                                // Call the Python callback
-                                match PyTuple::new(py, py_args) {
-                                    Ok(py_args_tuple) => {
-                                        match callback.bind(py).call1((py_args_tuple,)) {
-                                            Ok(result) => {
-                                                // Convert result back to SQLite
-                                                match py_to_sqlite_c_result(py, ctx, &result) {
-                                                    Ok(_) => {}
-                                                    Err(e) => {
-                                                        let error_msg = format!("Error converting result: {}", e);
-                                                        libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
-                                                    }
-                                                }
-                                            }
+                                // Call the Python callback with proper argument unpacking
+                                // PyO3's call1 with a tuple passes it as a single argument
+                                // We need to unpack based on argument count
+                                let result = match py_args.len() {
+                                    0 => callback.bind(py).call0(),
+                                    1 => {
+                                        // Single argument - pass directly
+                                        callback.bind(py).call1((py_args[0].clone_ref(py),))
+                                    }
+                                    2 => {
+                                        // Two arguments
+                                        callback.bind(py).call1((py_args[0].clone_ref(py), py_args[1].clone_ref(py)))
+                                    }
+                                    3 => {
+                                        // Three arguments
+                                        callback.bind(py).call1((py_args[0].clone_ref(py), py_args[1].clone_ref(py), py_args[2].clone_ref(py)))
+                                    }
+                                    4 => {
+                                        // Four arguments
+                                        callback.bind(py).call1((py_args[0].clone_ref(py), py_args[1].clone_ref(py), py_args[2].clone_ref(py), py_args[3].clone_ref(py)))
+                                    }
+                                    5 => {
+                                        // Five arguments
+                                        callback.bind(py).call1((py_args[0].clone_ref(py), py_args[1].clone_ref(py), py_args[2].clone_ref(py), py_args[3].clone_ref(py), py_args[4].clone_ref(py)))
+                                    }
+                                    _ => {
+                                        // For more than 5 arguments, use Python's unpacking
+                                        // Create a helper function that unpacks the tuple
+                                        let args_tuple = match PyTuple::new(py, py_args.iter().map(|arg| arg.clone_ref(py))) {
+                                            Ok(t) => t,
                                             Err(e) => {
-                                                // Python exception - convert to SQLite error
-                                                let error_msg = format!("Python function error: {}", e);
+                                                let error_msg = format!("Error creating argument tuple: {}", e);
+                                                libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
+                                                return;
+                                            }
+                                        };
+                                        // Use Python code to unpack: lambda f, args: f(*args)
+                                        let code_str = match std::ffi::CString::new("lambda f, args: f(*args)") {
+                                            Ok(s) => s,
+                                            Err(_) => {
+                                                libsqlite3_sys::sqlite3_result_error(ctx, b"Error creating CString\0".as_ptr() as *const i8, 22);
+                                                return;
+                                            }
+                                        };
+                                        let unpack_code = match py.eval(code_str.as_c_str(), None, None) {
+                                            Ok(code) => code,
+                                            Err(e) => {
+                                                let error_msg = format!("Error creating unpack helper: {}", e);
+                                                libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
+                                                return;
+                                            }
+                                        };
+                                        unpack_code.call1((callback.bind(py), args_tuple))
+                                    }
+                                };
+                                
+                                match result {
+                                    Ok(result) => {
+                                        // Convert result back to SQLite
+                                        match py_to_sqlite_c_result(py, ctx, &result) {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                let error_msg = format!("Error converting result: {}", e);
                                                 libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        let error_msg = format!("Error creating argument tuple: {}", e);
+                                        // Python exception - convert to SQLite error
+                                        let error_msg = format!("Python function error: {}", e);
                                         libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
                                     }
                                 }
@@ -2359,6 +2675,11 @@ impl Connection {
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let trace_callback = Arc::clone(&self.trace_callback);
+        // Need all callback fields to check if all are cleared
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
         
         Python::attach(|py| {
             // Clone the callback with GIL
@@ -2371,7 +2692,7 @@ impl Connection {
             }
             
             let future = async move {
-                // Ensure callback connection exists
+                // Ensure callback connection exists (needed to clear callbacks on SQLite)
                 ensure_callback_connection(
                     &path,
                     &pool,
@@ -2470,6 +2791,25 @@ impl Connection {
                     ));
                 }
                 
+                // After clearing, check if all callbacks are now cleared
+                if callback.is_none() {
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        // Release the callback connection
+                        drop(handle);
+                        drop(conn_guard);
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                        return Ok(());
+                    }
+                }
+                
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -2486,6 +2826,11 @@ impl Connection {
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        // Need all callback fields to check if all are cleared
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
         
         Python::attach(|py| {
             // Clone the callback with GIL
@@ -2498,6 +2843,24 @@ impl Connection {
             }
             
             let future = async move {
+                // If clearing the callback, check if all callbacks are now cleared
+                if callback.is_none() {
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        // Release the callback connection
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                        // Clear the authorizer on SQLite side (already cleared in state)
+                        return Ok(());
+                    }
+                }
+                
                 // Ensure callback connection exists
                 ensure_callback_connection(
                     &path,
@@ -2621,6 +2984,25 @@ impl Connection {
                     );
                 }
                 
+                // After clearing, check if all callbacks are now cleared
+                if callback.is_none() {
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        // Release the callback connection
+                        drop(handle);
+                        drop(conn_guard);
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                        return Ok(());
+                    }
+                }
+                
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -2637,6 +3019,11 @@ impl Connection {
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let progress_handler = Arc::clone(&self.progress_handler);
+        // Need all callback fields to check if all are cleared
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
         
         Python::attach(|py| {
             // Clone the callback with GIL
@@ -2649,6 +3036,24 @@ impl Connection {
             }
             
             let future = async move {
+                // If clearing the callback, check if all callbacks are now cleared
+                if callback.is_none() {
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        // Release the callback connection
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                        // Clear the progress handler on SQLite side (already cleared in state)
+                        return Ok(());
+                    }
+                }
+                
                 // Ensure callback connection exists
                 ensure_callback_connection(
                     &path,
@@ -2733,7 +3138,256 @@ impl Connection {
                     );
                 }
                 
+                // After clearing, check if all callbacks are now cleared
+                if callback.is_none() {
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        // Release the callback connection
+                        drop(handle);
+                        drop(conn_guard);
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                        return Ok(());
+                    }
+                }
+                
                 Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Dump the database as a list of SQL statements.
+    /// Returns a list of SQL strings that can recreate the database.
+    fn iterdump(self_: PyRef<Self>) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        // Callback infrastructure (Phase 2.7)
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+
+        Python::attach(|py| {
+            let future = async move {
+                // Priority: transaction > callbacks > pool
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+
+                // Helper function to encode bytes as hex
+                fn bytes_to_hex(bytes: &[u8]) -> String {
+                    bytes.iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect()
+                }
+
+                // Get connection for queries
+                // We need to handle different connection types
+                let mut statements = Vec::new();
+                statements.push("BEGIN TRANSACTION;".to_string());
+
+                // Query sqlite_master - use appropriate connection
+                let schema_rows = if in_transaction {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
+                        .fetch_all(&mut **conn)
+                        .await
+                        .map_err(|e| map_sqlx_error(e, &path, "SELECT FROM sqlite_master"))?
+                } else if has_callbacks_flag {
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard
+                        .as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
+                        .fetch_all(&mut **conn)
+                        .await
+                        .map_err(|e| map_sqlx_error(e, &path, "SELECT FROM sqlite_master"))?
+                } else {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
+                        .fetch_all(&pool_clone)
+                        .await
+                        .map_err(|e| map_sqlx_error(e, &path, "SELECT FROM sqlite_master"))?
+                };
+
+
+                // Collect table names for data dumping
+                let mut table_names = Vec::new();
+
+                // Process schema rows
+                for row in schema_rows {
+                    let row_type: String = row.get(0);
+                    let name: String = row.get(1);
+                    let sql: Option<String> = row.get(2);
+
+                    if let Some(sql_stmt) = sql {
+                        match row_type.as_str() {
+                            "table" => {
+                                // Skip system tables for data, but include schema
+                                if !name.starts_with("sqlite_") {
+                                    table_names.push(name.clone());
+                                }
+                                statements.push(format!("{};", sql_stmt));
+                            }
+                            "index" => {
+                                // Skip system indexes
+                                if !name.starts_with("sqlite_") {
+                                    statements.push(format!("{};", sql_stmt));
+                                }
+                            }
+                            "trigger" => {
+                                statements.push(format!("{};", sql_stmt));
+                            }
+                            "view" => {
+                                statements.push(format!("{};", sql_stmt));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Helper function to escape SQL string
+                let escape_sql_string = |s: &str| -> String {
+                    s.replace("'", "''")
+                };
+
+                // Helper function to format value for INSERT
+                let format_value = |row: &sqlx::sqlite::SqliteRow, idx: usize| -> String {
+                    use sqlx::Row;
+                    // Try different types in order
+                    if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(idx) {
+                        return v.to_string();
+                    }
+                    if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(idx) {
+                        return v.to_string();
+                    }
+                    if let Ok(Some(v)) = row.try_get::<Option<String>, _>(idx) {
+                        return format!("'{}'", escape_sql_string(&v));
+                    }
+                    if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(idx) {
+                        // Convert BLOB to hex string
+                        return format!("X'{}'", bytes_to_hex(&v));
+                    }
+                    // Check for NULL
+                    if row.try_get::<Option<i64>, _>(idx).is_ok() {
+                        return "NULL".to_string();
+                    }
+                    "NULL".to_string()
+                };
+
+                // Dump data for each table
+                for table_name in table_names {
+                    let query = format!("SELECT * FROM {}", table_name);
+                    let rows = if in_transaction {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        sqlx::query(&query)
+                            .fetch_all(&mut **conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &query))?
+                    } else if has_callbacks_flag {
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        sqlx::query(&query)
+                            .fetch_all(&mut **conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &query))?
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                        sqlx::query(&query)
+                            .fetch_all(&pool_clone)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &query))?
+                    };
+
+                    if rows.is_empty() {
+                        continue;
+                    }
+
+                    // Get column names
+                    let column_count = rows[0].len();
+                    let column_names: Vec<String> = (0..column_count)
+                        .map(|i| {
+                            rows[0].columns().get(i).map(|c| c.name().to_string()).unwrap_or_else(|| format!("column_{}", i))
+                        })
+                        .collect();
+
+                    // Generate INSERT statements
+                    for row in rows {
+                        let mut values = Vec::new();
+                        for i in 0..column_count {
+                            values.push(format_value(&row, i));
+                        }
+                        let values_str = values.join(", ");
+                        statements.push(format!("INSERT INTO {} ({}) VALUES ({});", 
+                            table_name, 
+                            column_names.join(", "), 
+                            values_str));
+                    }
+                }
+
+                statements.push("COMMIT;".to_string());
+
+                // Convert to Python list
+                Python::attach(|py| -> PyResult<Py<PyAny>> {
+                    let list = PyList::empty(py);
+                    for stmt in statements {
+                        list.append(PyString::new(py, &stmt))?;
+                    }
+                    Ok(list.into())
+                })
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })
