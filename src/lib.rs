@@ -1177,36 +1177,6 @@ fn has_callbacks(
 
 /// Helper to determine which connection to use for operations.
 /// Returns:
-/// - Transaction connection if transaction is active (priority)
-/// - Callback connection if callbacks are set
-/// - None if using pool
-async fn get_active_connection_for_operation(
-    transaction_state: &Arc<Mutex<TransactionState>>,
-    transaction_connection: &Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-    callback_connection: &Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-    has_callbacks_flag: bool,
-) -> Option<PoolConnection<sqlx::Sqlite>> {
-    // Check transaction first (highest priority)
-    let trans_guard = transaction_state.lock().await;
-    if *trans_guard == TransactionState::Active {
-        drop(trans_guard);
-        let _conn_guard = transaction_connection.lock().await;
-        // Don't take ownership, just check if it exists
-        // Actually, we can't return a reference, so we need a different approach
-        // For now, return None and let the caller handle it
-        return None; // Signal to use transaction connection (handled separately)
-    }
-    drop(trans_guard);
-    
-    // If callbacks are set, use callback connection
-    if has_callbacks_flag {
-        let _conn_guard = callback_connection.lock().await;
-        // Similar issue - can't return reference
-        return None; // Signal to use callback connection (handled separately)
-    }
-    
-    None // Use pool
-}
 
 /// Map sqlx error to appropriate Python exception.
 fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
@@ -1414,6 +1384,60 @@ struct Connection {
 #[pymethods]
 impl Connection {
     /// Create a new async SQLite connection.
+    ///
+    /// The connection uses lazy initialization - the actual database connection
+    /// pool is created on first use. This allows configuration (like pool_size
+    /// and connection_timeout) to be set before the pool is created.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the SQLite database file. Can be ":memory:" for an
+    ///   in-memory database, a file path, or a URI format: "file:path?param=value".
+    ///   The path is validated for security (non-empty, no null bytes).
+    /// * `pragmas` - Optional dictionary of PRAGMA settings to apply when the
+    ///   connection pool is first created. Example: {"journal_mode": "WAL",
+    ///   "synchronous": "NORMAL", "foreign_keys": True}. See SQLite PRAGMA
+    ///   documentation for available settings.
+    /// * `init_hook` - Optional async callable that receives the Connection
+    ///   object and runs initialization code. Called once when the connection
+    ///   pool is first used. This is a rapsqlite-specific enhancement for
+    ///   automatic database initialization (schema setup, data seeding, etc.).
+    ///
+    /// # Returns
+    ///
+    /// A new Connection instance. The connection must be used as an async
+    /// context manager or explicitly closed to ensure proper resource cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Raises ValueError if the database path is invalid (empty or contains
+    /// null bytes). Raises OperationalError if the database connection cannot
+    /// be established.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// from rapsqlite import Connection
+    ///
+    /// # Basic connection
+    /// async with Connection("example.db") as conn:
+    ///     await conn.execute("CREATE TABLE test (id INTEGER)")
+    ///
+    /// # With PRAGMA settings
+    /// async with Connection("example.db", pragmas={
+    ///     "journal_mode": "WAL",
+    ///     "foreign_keys": True
+    /// }) as conn:
+    ///     await conn.execute("CREATE TABLE test (id INTEGER)")
+    ///
+    /// # With initialization hook
+    /// async def init_db(conn):
+    ///     await conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER)")
+    ///
+    /// async with Connection("example.db", init_hook=init_db) as conn:
+    ///     # Database is already initialized
+    ///     pass
+    /// ```
     #[new]
     #[pyo3(signature = (path, *, pragmas = None, init_hook = None))]
     fn new(
@@ -1490,7 +1514,29 @@ impl Connection {
     }
 
     /// Get the total number of database changes since connection was opened.
-    /// This is a cumulative count of all INSERT, UPDATE, and DELETE operations.
+    ///
+    /// This is a cumulative count of all INSERT, UPDATE, and DELETE operations
+    /// performed on this connection. The count includes changes from all
+    /// transactions and is reset when the connection is closed.
+    ///
+    /// # Returns
+    ///
+    /// Returns an awaitable that resolves to an integer (u64) representing the
+    /// total number of changes.
+    ///
+    /// # Note
+    ///
+    /// In aiosqlite, this is a property. In rapsqlite, it's an async method
+    /// due to internal implementation, but functionally equivalent. You must
+    /// await the result: `changes = await conn.total_changes()`
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// await conn.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
+    /// await conn.execute("INSERT INTO users (name) VALUES (?)", ["Bob"])
+    /// changes = await conn.total_changes()  # Returns 2
+    /// ```
     fn total_changes(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
@@ -1550,6 +1596,30 @@ impl Connection {
     }
 
     /// Check if connection is currently in a transaction.
+    ///
+    /// Returns True if a transaction has been started with `begin()` or
+    /// `transaction()` context manager and not yet committed or rolled back.
+    ///
+    /// # Returns
+    ///
+    /// Returns an awaitable that resolves to a boolean indicating whether the
+    /// connection is currently in a transaction.
+    ///
+    /// # Note
+    ///
+    /// In aiosqlite, this is a property. In rapsqlite, it's an async method
+    /// due to internal implementation, but functionally equivalent. You must
+    /// await the result: `in_tx = await conn.in_transaction()`
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// in_tx = await conn.in_transaction()  # False
+    /// await conn.begin()
+    /// in_tx = await conn.in_transaction()  # True
+    /// await conn.commit()
+    /// in_tx = await conn.in_transaction()  # False
+    /// ```
     fn in_transaction(&self) -> PyResult<Py<PyAny>> {
         let transaction_state = Arc::clone(&self.transaction_state);
         
@@ -2001,6 +2071,54 @@ impl Connection {
     }
 
     /// Execute a SQL query (does not return results).
+    ///
+    /// Executes a SQL statement such as CREATE, INSERT, UPDATE, DELETE, etc.
+    /// For SELECT queries, use `fetch_all()`, `fetch_one()`, or `fetch_optional()`
+    /// instead. This method supports parameterized queries with both named and
+    /// positional parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - SQL query string to execute. Can contain parameter placeholders:
+    ///   - Named parameters: `:name`, `@name`, `$name`
+    ///   - Positional parameters: `?`, `?1`, `?2`
+    /// * `parameters` - Optional parameters for the query. Can be:
+    ///   - A dictionary for named parameters: `{"name": "value", ...}`
+    ///   - A list/tuple for positional parameters: `[value1, value2, ...]`
+    ///   - A single value (treated as single positional parameter)
+    ///   - None (no parameters)
+    ///
+    /// # Returns
+    ///
+    /// Returns an ExecuteContextManager that can be used as:
+    /// - `await conn.execute(...)` - Execute and return None
+    /// - `async with conn.execute(...) as cursor:` - Execute and get cursor
+    ///
+    /// # Errors
+    ///
+    /// Raises OperationalError if the query execution fails (e.g., database
+    /// locked, disk full). Raises ProgrammingError for SQL syntax errors.
+    /// Raises IntegrityError for constraint violations.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// # Simple query
+    /// await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+    ///
+    /// # With positional parameters
+    /// await conn.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
+    ///
+    /// # With named parameters
+    /// await conn.execute(
+    ///     "INSERT INTO users (name, email) VALUES (:name, :email)",
+    ///     {"name": "Bob", "email": "bob@example.com"}
+    /// )
+    ///
+    /// # Using as context manager (returns cursor)
+    /// async with conn.execute("SELECT * FROM users") as cursor:
+    ///     rows = await cursor.fetchall()
+    /// ```
     #[pyo3(signature = (query, parameters = None))]
     fn execute(
         self_: PyRef<Self>,
@@ -2310,6 +2428,45 @@ impl Connection {
     }
 
     /// Fetch all rows from a SELECT query.
+    ///
+    /// Executes a SELECT query and returns all rows as a list. Each row is
+    /// formatted according to the current `row_factory` setting (default: list).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - SELECT query string. Can contain parameter placeholders.
+    /// * `parameters` - Optional parameters (same format as `execute()`).
+    ///
+    /// # Returns
+    ///
+    /// Returns an awaitable that resolves to a list of rows. Each row format
+    /// depends on `row_factory`:
+    /// - None: List of values `[value1, value2, ...]`
+    /// - "dict": Dictionary with column names as keys
+    /// - "tuple": Tuple of values
+    /// - Callable: Result of calling the factory function
+    /// - Row class: Dict-like Row object
+    ///
+    /// # Errors
+    ///
+    /// Raises ProgrammingError for SQL syntax errors or if query is not a SELECT.
+    /// Raises OperationalError for database errors.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// # Default (list format)
+    /// rows = await conn.fetch_all("SELECT * FROM users")
+    /// # rows = [[1, "Alice"], [2, "Bob"]]
+    ///
+    /// # With dict factory
+    /// conn.row_factory = "dict"
+    /// rows = await conn.fetch_all("SELECT * FROM users")
+    /// # rows = [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+    ///
+    /// # With parameters
+    /// rows = await conn.fetch_all("SELECT * FROM users WHERE id > ?", [5])
+    /// ```
     #[pyo3(signature = (query, parameters = None))]
     fn fetch_all(
         self_: PyRef<Self>,
@@ -2452,6 +2609,38 @@ impl Connection {
     }
 
     /// Fetch a single row from a SELECT query.
+    ///
+    /// Executes a SELECT query and returns exactly one row. Raises an error
+    /// if no rows or more than one row is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - SELECT query string. Should return exactly one row.
+    /// * `parameters` - Optional parameters (same format as `execute()`).
+    ///
+    /// # Returns
+    ///
+    /// Returns an awaitable that resolves to a single row (format depends on
+    /// `row_factory`, same as `fetch_all()`).
+    ///
+    /// # Errors
+    ///
+    /// Raises ProgrammingError if no rows are found or if more than one row
+    /// is returned. Raises OperationalError for database errors.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// # Fetch user by ID (expects exactly one)
+    /// user = await conn.fetch_one("SELECT * FROM users WHERE id = ?", [1])
+    /// # user = [1, "Alice"]  # or dict/Row depending on row_factory
+    ///
+    /// # This will raise if user doesn't exist
+    /// try:
+    ///     user = await conn.fetch_one("SELECT * FROM users WHERE id = ?", [999])
+    /// except ProgrammingError:
+    ///     print("User not found")
+    /// ```
     #[pyo3(signature = (query, parameters = None))]
     fn fetch_one(
         self_: PyRef<Self>,
@@ -2579,6 +2768,42 @@ impl Connection {
     }
 
     /// Fetch a single row from a SELECT query, returning None if no rows.
+    ///
+    /// Executes a SELECT query and returns one row or None. Raises an error
+    /// if more than one row is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - SELECT query string. Should return zero or one row.
+    /// * `parameters` - Optional parameters (same format as `execute()`).
+    ///
+    /// # Returns
+    ///
+    /// Returns an awaitable that resolves to:
+    /// - A single row (format depends on `row_factory`) if one row is found
+    /// - None if no rows are found
+    ///
+    /// # Errors
+    ///
+    /// Raises ProgrammingError if more than one row is returned. Raises
+    /// OperationalError for database errors.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// # Fetch user by ID (may not exist)
+    /// user = await conn.fetch_optional("SELECT * FROM users WHERE id = ?", [1])
+    /// if user:
+    ///     print(f"Found: {user}")
+    /// else:
+    ///     print("User not found")
+    ///
+    /// # Safe for optional lookups
+    /// user = await conn.fetch_optional(
+    ///     "SELECT * FROM users WHERE email = ?",
+    ///     ["alice@example.com"]
+    /// )
+    /// ```
     #[pyo3(signature = (query, parameters = None))]
     fn fetch_optional(
         self_: PyRef<Self>,
@@ -3203,7 +3428,7 @@ impl Connection {
         #[allow(deprecated)]
         Python::with_gil(|py| {
                                 // Clone the callback to use it (the original stays in the Box)
-                                let callback = unsafe { (*callback_ptr).clone_ref(py) };
+                                let callback = (*callback_ptr).clone_ref(py);
                                 
                                 let mut py_args = Vec::new();
                                 for i in 0..argc {

@@ -233,6 +233,30 @@ async def test_connection_properties(test_db):
 
 
 @pytest.mark.asyncio
+async def test_total_changes_and_in_transaction_semantics(test_db):
+    """total_changes() and in_transaction() behave like aiosqlite properties."""
+    async with connect(test_db) as db:
+        # Initial values: no changes, not in a transaction
+        changes_before = await db.total_changes()
+        assert isinstance(changes_before, int)
+        assert await db.in_transaction() is False
+
+        # A DDL + DML change total_changes
+        await db.execute("CREATE TABLE tc (id INTEGER PRIMARY KEY, v INTEGER)")
+        await db.execute("INSERT INTO tc (v) VALUES (1)")
+        changes_after = await db.total_changes()
+        assert isinstance(changes_after, int)
+        assert changes_after >= changes_before + 1
+
+        # in_transaction reports True only inside an explicit transaction
+        assert await db.in_transaction() is False
+        async with db.transaction():
+            assert await db.in_transaction() is True
+            await db.execute("INSERT INTO tc (v) VALUES (2)")
+        assert await db.in_transaction() is False
+
+
+@pytest.mark.asyncio
 async def test_iterable_cursor(test_db):
     """Test cursor with parameterized queries."""
     async with connect(test_db) as db:
@@ -1048,6 +1072,75 @@ async def test_iterdump(test_db):
 
 
 @pytest.mark.asyncio
+async def test_iterdump_async_for(test_db):
+    """iterdump supports async iteration, mirroring aiosqlite patterns."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        await db.execute("INSERT INTO test (name) VALUES (?)", ["Alice"])
+        await db.execute("INSERT INTO test (name) VALUES (?)", ["Bob"])
+
+        lines = []
+        async for line in db.iterdump():
+            lines.append(line)
+
+    assert isinstance(lines, list)
+    assert any("CREATE TABLE test" in l for l in lines)
+    assert any("INSERT" in l for l in lines)
+
+
+@pytest.mark.asyncio
+async def test_iterdump_async_for_matches_await(test_db):
+    """Async iteration over iterdump yields same content as await-to-list."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        for i in range(5):
+            await db.execute("INSERT INTO t (v) VALUES (?)", [f"v{i}"])
+
+        list_result = await db.iterdump()
+
+        iter_result = []
+        async for line in db.iterdump():
+            iter_result.append(line)
+
+    assert isinstance(list_result, list)
+    assert isinstance(iter_result, list)
+    assert list_result == iter_result
+
+
+@pytest.mark.asyncio
+async def test_iterdump_contains_schema_and_data(test_db):
+    """iterdump output includes both schema and data statements."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+        await db.execute("INSERT INTO users (name) VALUES ('Alice')")
+        await db.execute("INSERT INTO users (name) VALUES ('Bob')")
+
+        dump = await db.iterdump()
+
+    assert isinstance(dump, list)
+    dump_sql = "\n".join(dump)
+    assert "CREATE TABLE users" in dump_sql
+    # SQLite may quote table names differently; accept either form.
+    assert (
+        "INSERT INTO \"users\"" in dump_sql
+        or "INSERT INTO 'users'" in dump_sql
+        or "INSERT INTO users" in dump_sql
+    )
+
+
+@pytest.mark.asyncio
+async def test_iterdump_empty_database(test_db):
+    """iterdump on an empty database still returns a valid transaction script."""
+    async with connect(test_db) as db:
+        dump = await db.iterdump()
+
+    assert isinstance(dump, list)
+    assert len(dump) >= 2
+    assert "BEGIN TRANSACTION" in dump[0]
+    assert "COMMIT" in dump[-1]
+
+
+@pytest.mark.asyncio
 async def test_backup_aiosqlite(test_db):
     """Test backup functionality."""
     import rapsqlite
@@ -1064,6 +1157,47 @@ async def test_backup_aiosqlite(test_db):
     target_path = test_db + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
+
+
+@pytest.mark.asyncio
+async def test_backup_with_pages_and_progress(test_db):
+    """Backup supports pages parameter and invokes progress callback."""
+    import rapsqlite
+
+    progress_calls = []
+
+    async with rapsqlite.Connection(test_db) as source_conn:
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
+        for i in range(10):
+            await source_conn.execute(
+                "INSERT INTO test (name) VALUES (?)", [f"name_{i}"]
+            )
+
+        target_path = test_db + ".backup_pages"
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        # Ensure file exists so platforms/filesystems that expect it are happy
+        with open(target_path, "w"):
+            pass
+
+        target_conn = rapsqlite.Connection(target_path)
+
+        def progress(remaining, page_count, pages_copied):
+            progress_calls.append((remaining, page_count, pages_copied))
+
+        try:
+            await source_conn.backup(target_conn, pages=1, progress=progress)
+            rows = await target_conn.fetch_all("SELECT COUNT(*) FROM test")
+            assert rows[0][0] == 10
+        finally:
+            await target_conn.close()
+            if os.path.exists(target_path):
+                os.remove(target_path)
+
+    # We expect progress to have been reported at least once for a paged backup
+    assert len(progress_calls) >= 1
 
     # Create empty target database file first
     with open(target_path, "w"):
@@ -1088,20 +1222,9 @@ async def test_backup_aiosqlite(test_db):
         os.remove(target_path)
 
 
-@pytest.mark.skip(
-    reason="sqlite3.Connection backup causes segfault - handles from different SQLite library instances are incompatible. Use rapsqlite-to-rapsqlite backup instead."
-)
 @pytest.mark.asyncio
 async def test_backup_sqlite(test_db):
-    """Test backup to sqlite3 connection.
-
-    NOTE: This test is skipped because Python's sqlite3 module and rapsqlite's
-    libsqlite3-sys may use different SQLite library instances, making handles
-    incompatible. The segfault occurs because the handle from Python's sqlite3.Connection
-    cannot be used with rapsqlite's SQLite library instance.
-
-    Workaround: Use rapsqlite-to-rapsqlite backup instead.
-    """
+    """Test backup to sqlite3 connection using safe file-based strategy."""
     import rapsqlite
     import sqlite3
 
@@ -1144,8 +1267,27 @@ async def test_backup_sqlite(test_db):
 
 
 @pytest.mark.asyncio
+async def test_backup_sqlite_memory_raises(test_db):
+    """Backup to sqlite3.Connection from an in-memory rapsqlite database should fail."""
+    import rapsqlite
+    import sqlite3
+
+    source_conn = rapsqlite.Connection(":memory:")
+    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+    await source_conn.execute("INSERT INTO test (name) VALUES ('x')")
+
+    target_conn = sqlite3.connect(":memory:")
+
+    with pytest.raises(rapsqlite.OperationalError):
+        await source_conn.backup(target_conn)
+
+    await source_conn.close()
+    target_conn.close()
+
+
+@pytest.mark.asyncio
 async def test_backup_sqlite_connection_state_validation(test_db):
-    """Test that backup fails gracefully with proper error messages for invalid connection states."""
+    """Test that backup fails gracefully with proper error messages for invalid sqlite3 connection states."""
     import rapsqlite
     import sqlite3
     import os
@@ -1154,7 +1296,7 @@ async def test_backup_sqlite_connection_state_validation(test_db):
     source_conn = rapsqlite.Connection(test_db)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
-    # Test 1: Target with active transaction should fail
+    # Test 1: Target with active transaction should fail (sqlite3 in_transaction=True)
     target_path = test_db + ".backup_tx"
     if os.path.exists(target_path):
         os.remove(target_path)
@@ -1165,10 +1307,10 @@ async def test_backup_sqlite_connection_state_validation(test_db):
     target_conn.execute("BEGIN")
 
     try:
-        await source_conn.backup(target_conn)
-        assert False, "Should have raised OperationalError for active transaction"
-    except rapsqlite.OperationalError as e:
-        assert "transaction" in str(e).lower() or "active" in str(e).lower()
+        with pytest.raises(rapsqlite.OperationalError) as exc:
+            await source_conn.backup(target_conn)
+        msg = str(exc.value).lower()
+        assert "transaction" in msg or "active" in msg
     finally:
         target_conn.rollback()
         target_conn.close()

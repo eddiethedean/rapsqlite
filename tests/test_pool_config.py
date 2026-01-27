@@ -1,5 +1,6 @@
 """Robust tests for Phase 2.4 pool configuration (pool_size, connection_timeout)."""
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -304,3 +305,26 @@ async def test_pool_config_large_values(test_db):
         await db.execute("INSERT INTO t DEFAULT VALUES")
         assert db.pool_size == 1000
         assert db.connection_timeout == 86400
+
+
+@pytest.mark.asyncio
+async def test_pool_config_high_concurrency_with_transactions(test_db):
+    """High-concurrency workload with transactions respects pool configuration."""
+    async with connect(test_db) as db:
+        db.pool_size = 5
+        db.connection_timeout = 5
+
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
+
+        async def worker(offset: int) -> None:
+            async with db.transaction():
+                for i in range(10):
+                    await db.execute(
+                        "INSERT INTO t (value) VALUES (?)", [offset + i]
+                    )
+
+        # Run several workers concurrently to stress the pool
+        await asyncio.gather(*(worker(j * 100) for j in range(5)))
+
+        rows = await db.fetch_all("SELECT COUNT(*) FROM t")
+        assert rows[0][0] == 50

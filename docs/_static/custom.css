@@ -1,0 +1,24 @@
+/* Custom CSS for rapsqlite documentation */
+
+/* Ensure code blocks have proper spacing */
+.rst-content pre {
+    margin: 1em 0;
+}
+
+/* Style for API reference sections */
+.api-reference {
+    margin-top: 2em;
+}
+
+/* Improve readability of method signatures */
+.py.method {
+    margin-bottom: 1.5em;
+}
+
+/* Style for examples */
+.highlight {
+    background-color: #f8f8f8;
+    border-left: 4px solid #2980b9;
+    padding: 1em;
+    margin: 1em 0;
+}

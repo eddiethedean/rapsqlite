@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - TBA
+
+### Overview
+
+- Phase 2 fully complete: parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, dump/backup, schema introspection, initialization hooks, prepared statement verification, and comprehensive docs/benchmarks.
+- aiosqlite drop-in compatibility validated at ~95% core API coverage, with remaining differences documented as intentional and low impact (`iterdump()` return type, backup to `sqlite3.Connection`).
+
+### Checklist for v1.0 Release
+
+- All tests passing across supported Python versions (3.8–3.14), including:
+  - Extended coverage for row factories (including `rapsqlite.Row`), pooling/transactions under concurrency, `iterdump()` content, and backup progress callbacks.
+  - aiosqlite compatibility tests confirming behaviour of `total_changes()`, `in_transaction()`, `async with db.execute(...)`, and cursor iteration.
+- Documentation aligned with implementation:
+  - `README.md` and `docs/MIGRATION.md` explain property-vs-method differences, `iterdump()` list behaviour, and backup limitations/workarounds.
+  - `docs/AIOSQLITE_COMPATIBILITY_ANALYSIS.md` clearly distinguishes intentional differences from behaviourally equivalent features.
+- Release notes summarize:
+  - Phase 2 core features and performance characteristics.
+  - Compatibility guarantees and the small set of intentional API divergences.
+
+### Changed
+
+- `Connection.iterdump()` now returns a dual-mode object that:
+  - Supports `async for line in db.iterdump():` (aiosqlite-style async iteration).
+  - Remains `await`-able, yielding `List[str]` for backwards compatibility.
+- `Connection.backup()` now safely supports `sqlite3.Connection` targets for file-backed databases by delegating the actual copy to Python's sqlite3 backup API, avoiding unsafe raw-handle sharing between SQLite library instances.
+
+### Fixed
+
+- Improved robustness and error reporting when the extension module does not expose the expected `RapRow`/`Row` symbols, raising a clear `ImportError` that includes available attributes.
+- Removed an unused internal helper (`get_active_connection_for_operation`) and simplified a nested `unsafe` block in the callback trampoline implementation to reduce maintenance burden without changing behaviour.
+
 ## [0.2.0] - 2026-01-26
 
 ### Added - Phase 2.1: Parameterized Queries

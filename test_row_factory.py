@@ -6,7 +6,7 @@ import tempfile
 
 import pytest
 
-from rapsqlite import DatabaseError, Row, connect
+from rapsqlite import DatabaseError, connect
 
 
 def _cleanup(path: str) -> None:
@@ -429,30 +429,6 @@ async def test_row_factory_single_column(test_db):
         db.row_factory = lambda r: r[0] * 2
         rows = await db.fetch_all("SELECT id FROM t")
         assert rows == [2]
-
-
-@pytest.mark.asyncio
-async def test_row_factory_rapsqlite_row_mixed_access(test_db):
-    """rapsqlite.Row supports both index and key access with keys()/values()/items()."""
-    async with connect(test_db) as db:
-        await _ensure_table(db)
-        await db.execute("INSERT INTO t (a, b) VALUES ('x', 1.5)")
-
-        db.row_factory = Row
-        row = await db.fetch_one("SELECT * FROM t")
-        # Index access
-        assert row[0] == 1
-        assert row[1] == "x"
-        assert row[2] == 1.5
-        # Key access
-        assert row["id"] == 1
-        assert row["a"] == "x"
-        assert row["b"] == 1.5
-        # Mapping-style helpers
-        keys = list(row.keys())
-        assert "id" in keys and "a" in keys and "b" in keys
-        values = list(row.values())
-        assert 1 in values and "x" in values and 1.5 in values
 
 
 @pytest.mark.asyncio

@@ -746,7 +746,7 @@ await source.backup(target)  # DO NOT DO THIS
    source_sqlite3.backup(target_sqlite3)  # This works
    ```
 
-For more technical details, see [docs/BACKUP_SQLITE3_CONNECTION_FIX.md](docs/BACKUP_SQLITE3_CONNECTION_FIX.md).
+For more technical details, see the [Backup documentation](https://rapsqlite.readthedocs.io/en/latest/api-reference/connection.html#rapsqlite.Connection.backup) in the API reference.
 
 ### Exception Classes
 
@@ -835,14 +835,43 @@ For most applications, this is all you need! All core aiosqlite APIs are support
 - `executescript()` and `load_extension()` methods
 - Exception types
 
-**See [docs/MIGRATION.md](docs/MIGRATION.md) for a complete migration guide** with:
+**Practical compatibility notes:**
+
+- **`total_changes` / `in_transaction`**: these are properties in `aiosqlite` and async methods in `rapsqlite`:
+
+  ```python
+  # aiosqlite
+  changes = db.total_changes
+  in_tx = db.in_transaction
+
+  # rapsqlite
+  changes = await db.total_changes()
+  in_tx = await db.in_transaction()
+  ```
+
+- **`iterdump()`**: `aiosqlite` exposes an async iterator, while `rapsqlite` returns `List[str]`:
+
+  ```python
+  # aiosqlite
+  lines = [line async for line in db.iterdump()]
+
+  # rapsqlite
+  lines = await db.iterdump()
+  dump_sql = "\n".join(lines)
+  ```
+
+- **`backup()` targets**: `rapsqlite` only supports backups where both source and target are `rapsqlite.Connection` objects. For flows that used `sqlite3.Connection` as a target in `aiosqlite`, prefer:
+  - rapsqlite-to-rapsqlite backup when staying within rapsqlite, or
+  - file-based copy / sqlite3’s own backup API when working purely with `sqlite3`.
+
+**See the [Migration Guide](https://rapsqlite.readthedocs.io/en/latest/guides/migration-guide.html) for a complete migration guide** with:
 - Step-by-step migration instructions
 - Code examples for common patterns
 - API differences and limitations
 - Troubleshooting guide
 - Performance considerations
 
-**Compatibility Analysis**: See [docs/AIOSQLITE_COMPATIBILITY_ANALYSIS.md](docs/AIOSQLITE_COMPATIBILITY_ANALYSIS.md) for detailed analysis based on running the aiosqlite test suite. Overall compatibility: **~95%** for core use cases (updated 2026-01-26). All high-priority compatibility features implemented including `total_changes()`, `in_transaction()`, `executescript()`, `load_extension()`, `text_factory`, `Row` class, and async iteration on cursors.
+**Compatibility Analysis**: See the [Compatibility Guide](https://rapsqlite.readthedocs.io/en/latest/guides/compatibility.html) for detailed analysis based on running the aiosqlite test suite. Overall compatibility: **~95%** for core use cases (updated 2026-01-26). All high-priority compatibility features implemented including `total_changes()`, `in_transaction()`, `executescript()`, `load_extension()`, `text_factory`, `Row` class, and async iteration on cursors.
 
 ## Roadmap
 
