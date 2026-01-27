@@ -9,7 +9,7 @@ from typing import Generator
 
 def cleanup_db(test_db: str) -> None:
     """Helper to clean up database file.
-    
+
     Args:
         test_db: Path to database file to clean up
     """
@@ -28,10 +28,10 @@ def cleanup_db(test_db: str) -> None:
 @pytest.fixture
 def test_db() -> Generator[str, None, None]:
     """Create a temporary database file for testing.
-    
+
     Yields:
         Path to temporary database file
-        
+
     The database file is automatically cleaned up after the test.
     """
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
@@ -45,7 +45,7 @@ def test_db() -> Generator[str, None, None]:
 @pytest.fixture
 def test_db_memory() -> str:
     """Create an in-memory database for testing.
-    
+
     Returns:
         ":memory:" database path
     """

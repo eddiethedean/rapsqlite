@@ -64,9 +64,7 @@ async def test_async_with_execute_insert():
 
             # Non-SELECT queries can use async with pattern
             # The query executes in __aenter__, then cursor is returned
-            async with conn.execute(
-                "INSERT INTO test (value) VALUES ('hello')"
-            ) as _:
+            async with conn.execute("INSERT INTO test (value) VALUES ('hello')") as _:
                 # Cursor is returned but has no results for non-SELECT
                 # Note: Don't call fetchall() on non-SELECT cursors as it may re-execute
                 # The query is already executed in __aenter__

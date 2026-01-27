@@ -1084,8 +1084,8 @@ async def test_iterdump_async_for(test_db):
             lines.append(line)
 
     assert isinstance(lines, list)
-    assert any("CREATE TABLE test" in l for l in lines)
-    assert any("INSERT" in l for l in lines)
+    assert any("CREATE TABLE test" in line for line in lines)
+    assert any("INSERT" in line for line in lines)
 
 
 @pytest.mark.asyncio
@@ -1122,7 +1122,7 @@ async def test_iterdump_contains_schema_and_data(test_db):
     assert "CREATE TABLE users" in dump_sql
     # SQLite may quote table names differently; accept either form.
     assert (
-        "INSERT INTO \"users\"" in dump_sql
+        'INSERT INTO "users"' in dump_sql
         or "INSERT INTO 'users'" in dump_sql
         or "INSERT INTO users" in dump_sql
     )

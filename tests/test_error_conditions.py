@@ -1,8 +1,6 @@
 """Error handling and exception tests for rapsqlite."""
 
 import os
-import sys
-import tempfile
 import pytest
 
 from rapsqlite import (
@@ -23,7 +21,7 @@ async def test_database_file_creation(test_db):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
         await db.execute("INSERT INTO t DEFAULT VALUES")
-        
+
         # Verify file exists and operations work
         assert os.path.exists(test_db)
         rows = await db.fetch_all("SELECT COUNT(*) FROM t")
@@ -38,7 +36,7 @@ async def test_invalid_database_path():
     with pytest.raises((ValueError, OperationalError)):
         async with connect("") as db:
             await db.execute("SELECT 1")
-    
+
     # Path with null bytes should fail
     with pytest.raises(ValueError):
         async with connect("/tmp/test\0db.db") as db:
@@ -53,7 +51,7 @@ async def test_syntax_error(test_db):
         # Clearly invalid SQL should raise error
         with pytest.raises((ProgrammingError, DatabaseError, OperationalError)):
             await db.execute("INVALID SQL SYNTAX HERE")
-        
+
         # Malformed statement
         with pytest.raises((ProgrammingError, DatabaseError, OperationalError)):
             await db.execute("CREATE TABLE")
@@ -63,7 +61,7 @@ async def test_syntax_error(test_db):
 @pytest.mark.asyncio
 async def test_table_not_found(test_db):
     """Test behavior when table doesn't exist.
-    
+
     Note: SELECT on non-existent table may return empty result or raise error
     depending on SQLite version. INSERT/UPDATE/DELETE should raise error.
     """
@@ -71,10 +69,10 @@ async def test_table_not_found(test_db):
         # INSERT/UPDATE/DELETE should raise error
         with pytest.raises((OperationalError, DatabaseError)):
             await db.execute("INSERT INTO nonexistent_table VALUES (1)")
-        
+
         with pytest.raises((OperationalError, DatabaseError)):
             await db.execute("UPDATE nonexistent_table SET id = 1")
-        
+
         with pytest.raises((OperationalError, DatabaseError)):
             await db.execute("DELETE FROM nonexistent_table")
 
@@ -86,11 +84,11 @@ async def test_column_not_found(test_db):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
         await db.execute("INSERT INTO t (name) VALUES (?)", ["test"])
-        
+
         # UPDATE with non-existent column should raise error
         with pytest.raises((OperationalError, DatabaseError, ProgrammingError)):
             await db.execute("UPDATE t SET nonexistent_column = 'value'")
-        
+
         # INSERT with non-existent column should raise error
         with pytest.raises((OperationalError, DatabaseError, ProgrammingError)):
             await db.execute("INSERT INTO t (nonexistent_column) VALUES (?)", ["value"])
@@ -103,7 +101,7 @@ async def test_unique_constraint_violation(test_db):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
         await db.execute("INSERT INTO t (name) VALUES (?)", ["test"])
-        
+
         # Should raise IntegrityError
         with pytest.raises(IntegrityError):
             await db.execute("INSERT INTO t (name) VALUES (?)", ["test"])
@@ -115,7 +113,7 @@ async def test_not_null_constraint_violation(test_db):
     """Test IntegrityError on NOT NULL constraint violation."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
-        
+
         # Should raise IntegrityError
         with pytest.raises(IntegrityError):
             await db.execute("INSERT INTO t (name) VALUES (?)", [None])
@@ -128,8 +126,10 @@ async def test_foreign_key_constraint_violation(test_db):
     async with connect(test_db) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         await db.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
-        await db.execute("CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))")
-        
+        await db.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))"
+        )
+
         # Should raise IntegrityError
         with pytest.raises(IntegrityError):
             await db.execute("INSERT INTO child (parent_id) VALUES (?)", [999])
@@ -141,7 +141,7 @@ async def test_missing_parameter_error(test_db):
     """Test error when required parameter is missing."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
-        
+
         # Missing parameter should raise KeyError or similar
         with pytest.raises((KeyError, ProgrammingError, DatabaseError)):
             await db.execute("INSERT INTO t (name) VALUES (:name)", {})
@@ -153,7 +153,7 @@ async def test_invalid_parameter_type(test_db):
     """Test error with invalid parameter type."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
-        
+
         # Invalid type (e.g., dict instead of simple value)
         with pytest.raises((TypeError, ProgrammingError)):
             await db.execute("INSERT INTO t (name) VALUES (?)", [{"invalid": "type"}])
@@ -183,7 +183,7 @@ async def test_fetch_one_not_found(test_db):
     """Test that fetch_one raises when no row found."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
-        
+
         with pytest.raises((OperationalError, DatabaseError)):
             await db.fetch_one("SELECT * FROM t WHERE id = ?", [999])
 
@@ -194,7 +194,7 @@ async def test_fetch_optional_not_found(test_db):
     """Test that fetch_optional returns None when no row found."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
-        
+
         result = await db.fetch_optional("SELECT * FROM t WHERE id = ?", [999])
         assert result is None
 
@@ -206,7 +206,7 @@ async def test_cursor_on_closed_connection(test_db):
     db = Connection(test_db)
     await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     await db.close()
-    
+
     # Cursor creation might succeed, but execution should fail
     # Or cursor might recreate connection (both are acceptable)
     cursor = db.cursor()

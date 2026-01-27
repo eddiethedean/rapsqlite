@@ -319,9 +319,7 @@ async def test_pool_config_high_concurrency_with_transactions(test_db):
         async def worker(offset: int) -> None:
             async with db.transaction():
                 for i in range(10):
-                    await db.execute(
-                        "INSERT INTO t (value) VALUES (?)", [offset + i]
-                    )
+                    await db.execute("INSERT INTO t (value) VALUES (?)", [offset + i])
 
         # Run several workers concurrently to stress the pool
         await asyncio.gather(*(worker(j * 100) for j in range(5)))

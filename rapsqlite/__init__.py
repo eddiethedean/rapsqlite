@@ -47,7 +47,7 @@ Example:
                 await conn.rollback()
 """
 
-from typing import Any, List
+from typing import Any, List, Optional
 
 try:
     # Preferred: import extension from the local module name used when installed.
@@ -97,7 +97,7 @@ __all__: List[str] = [
 ]
 
 
-def connect(path: str, *, pragmas: Any = None, **kwargs: Any) -> Connection:
+def connect(path: str, *, pragmas: Any = None, **kwargs: Any) -> "Connection":  # type: ignore[valid-type]
     """Connect to a SQLite database.
 
     This function matches the aiosqlite.connect() API for compatibility,
@@ -164,7 +164,7 @@ def connect(path: str, *, pragmas: Any = None, **kwargs: Any) -> Connection:
         :class:`Connection`: For more advanced connection options including
         initialization hooks.
     """
-    return Connection(path, pragmas=pragmas)
+    return Connection(path, pragmas=pragmas)  # type: ignore[no-any-return]
 
 
 # -----------------------------------------------------------------------------
@@ -195,9 +195,9 @@ class _IterdumpWrapper:
                 print(line)
     """
 
-    def __init__(self, conn: Connection) -> None:
+    def __init__(self, conn: "Connection") -> None:  # type: ignore[valid-type]
         self._conn = conn
-        self._lines: List[str] | None = None
+        self._lines: Optional[List[str]] = None
         self._index: int = 0
 
     def __aiter__(self) -> "_IterdumpWrapper":
@@ -219,12 +219,13 @@ class _IterdumpWrapper:
     def __await__(self):
         async def _inner() -> List[str]:
             # Preserve existing semantics: await conn.iterdump() -> List[str]
-            return await _raw_iterdump(self._conn)  # type: ignore[arg-type]
+            result = await _raw_iterdump(self._conn)  # type: ignore[arg-type]
+            return result  # type: ignore[no-any-return]
 
         return _inner().__await__()
 
 
-def _iterdump(self: Connection) -> _IterdumpWrapper:
+def _iterdump(self: "Connection") -> _IterdumpWrapper:  # type: ignore[valid-type]
     """Return a dual-mode iterdump wrapper.
 
     - async for line in conn.iterdump():  # async iterator
@@ -238,7 +239,7 @@ Connection.iterdump = _iterdump  # type: ignore[assignment]
 
 
 async def _backup(
-    self: Connection,
+    self: "Connection",  # type: ignore[valid-type]
     target: Any,
     *,
     pages: int = 0,
@@ -280,7 +281,7 @@ async def _backup(
     # sqlite3.Connection target: use file-based backup via sqlite3 API.
     if isinstance(target, sqlite3.Connection):
         # Ensure we are working with a file-backed database.
-        rows = await self.fetch_all("PRAGMA database_list")
+        rows = await self.fetch_all("PRAGMA database_list")  # type: ignore[attr-defined]
         main_row = next((row for row in rows if row[1] == "main"), None)
         if not main_row or not main_row[2]:
             raise OperationalError(
@@ -291,7 +292,7 @@ async def _backup(
 
         # Best-effort flush of WAL to ensure committed state is visible on disk.
         try:
-            await self.execute("PRAGMA wal_checkpoint(FULL)")
+            await self.execute("PRAGMA wal_checkpoint(FULL)")  # type: ignore[attr-defined]
         except Exception:
             # Not all configurations use WAL; ignore failures here.
             pass
@@ -319,7 +320,7 @@ async def _backup(
         return None
 
     # Fallback: rapsqlite-to-rapsqlite backup via the original Rust method.
-    return await _raw_backup(
+    await _raw_backup(
         self,
         target,
         pages=pages,
@@ -327,6 +328,7 @@ async def _backup(
         name=name,
         sleep=sleep,
     )
+    return None
 
 
 Connection._backup_raw = _raw_backup  # type: ignore[attr-defined]
