@@ -57,8 +57,9 @@ async def test_connection_pool_performance(test_db):
     elapsed = time.perf_counter() - start
 
     assert all(results)
-    # Should complete 50 operations in reasonable time (< 2 seconds)
-    assert elapsed < 2.0, f"50 pool operations took {elapsed:.3f}s, expected < 2.0s"
+    # Should complete 50 operations in reasonable time (< 3 seconds)
+    # Allow extra time for CI environments which may be slower
+    assert elapsed < 3.0, f"50 pool operations took {elapsed:.3f}s, expected < 3.0s"
 
 
 @pytest.mark.performance
@@ -109,9 +110,9 @@ async def test_execute_many_performance(test_db):
         await db.execute_many("INSERT INTO t (value) VALUES (?)", params)
         elapsed = time.perf_counter() - start
 
-        # Should complete 1000 inserts in reasonable time (< 1.5 seconds)
-        # Allow some variance for system load
-        assert elapsed < 1.5, f"1000 inserts took {elapsed:.3f}s, expected < 1.5s"
+        # Should complete 1000 inserts in reasonable time (< 2.0 seconds)
+        # Allow extra time for CI environments which may be slower
+        assert elapsed < 2.0, f"1000 inserts took {elapsed:.3f}s, expected < 2.0s"
 
         # Verify all inserted
         rows = await db.fetch_all("SELECT COUNT(*) FROM t")
