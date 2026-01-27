@@ -4,7 +4,7 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 
 ## Current Status
 
-**Current Version (v0.2.0)** — Phase 1 Complete, Phase 2 In Progress:
+**Current Version (v0.2.0)** — Phase 1 Complete, Phase 2 Complete:
 
 **Phase 1 Complete:**
 - ✅ Connection lifecycle management (async context managers)
@@ -18,7 +18,7 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 - ✅ Input validation and security improvements
 - ✅ Type stubs for IDE support
 
-**Phase 2 Progress:**
+**Phase 2 Complete (v0.2.0):**
 - ✅ **Phase 2.1 Complete**: Parameterized queries (named and positional parameters, execute_many with binding)
 - ✅ **Phase 2.2 Complete**: Cursor improvements (fetchmany size-based slicing, result caching, state management)
 - ✅ **Phase 2.3 Complete**: Connection configuration (PRAGMA settings, connection string parsing, constructor parameters)
@@ -35,9 +35,11 @@ This roadmap outlines the development plan for `rapsqlite`, aligned with the [RA
 - ✅ **Phase 2.14 Complete**: Drop-in replacement validation (aiosqlite compatibility features, migration guide) — All high-priority compatibility features implemented
 - ✅ **Phase 2.15 Complete**: Documentation & benchmarking — Benchmarks documented, advanced usage guide enhanced, all documentation updated
 
+**Phase 3 Status:** In Planning — Advanced features, ecosystem integration, and optimizations leading to v1.0.0 release
+
 **Goal**: Achieve drop-in replacement compatibility with `aiosqlite` to enable seamless migration with true async performance.
 
-**Recent progress:** Phase 2.14 aiosqlite compatibility completion - All high-priority compatibility features implemented including `total_changes()`, `in_transaction()`, `executescript()`, `load_extension()`, `text_factory`, `Row` class, and async iteration on cursors. Core API compatibility increased from ~85% to ~95%. Migration guide and compatibility analysis updated. Fixed critical deadlock issue in `init_hook` when used with `begin()` and `transaction()` context managers. The deadlock occurred because `begin()` and `TransactionContextManager.__aenter__()` held the `transaction_state` lock while calling `execute_init_hook_if_needed()`, preventing init_hook's `conn.execute()` calls from checking transaction state. Fix releases the lock before calling init_hook and re-acquires it afterward. All tests passing (345 passed, 7 skipped). Phase 2.11 database initialization hooks complete with `init_hook` parameter for automatic database setup. The feature is a rapsqlite-specific enhancement that allows automatic schema setup, data seeding, and PRAGMA configuration when the connection pool is first used. Comprehensive test suite with 36 tests covering all use cases. Code quality improvements: full mypy type checking support (all 13 source files pass), Ruff formatter and linter integration. Phase 2.10 schema operations complete with 9 introspection methods (`get_tables`, `get_table_info`, `get_indexes`, `get_foreign_keys`, `get_schema`, `get_views`, `get_index_list`, `get_index_info`, `get_table_xinfo`) and comprehensive test suite (72 tests in `tests/test_schema_operations.py`). All phases 2.1-2.11, 2.12, and 2.14 now complete with robust testing. Test suite expanded to 345 passing tests (7 skipped).
+**Recent progress:** Phase 2 complete and released as v0.2.0. All high-priority compatibility features implemented including `total_changes()`, `in_transaction()`, `executescript()`, `load_extension()`, `text_factory`, `Row` class, and async iteration on cursors. Core API compatibility at ~95%. Migration guide and compatibility analysis updated. Fixed critical deadlock issue in `init_hook` when used with `begin()` and `transaction()` context managers. All tests passing (356 passed, 6 skipped). Database initialization hooks, schema operations, prepared statement caching, and comprehensive documentation all complete. Code quality: full mypy type checking and Ruff formatting/linting. **Phase 2 released as v0.2.0. Phase 3 planning in progress, leading to v1.0.0 release.**
 
 ## Phase 1 — Credibility
 
@@ -163,7 +165,7 @@ Focus: Fix critical performance issues, add essential features for production us
 
 Focus: Feature additions, performance optimizations, and broader SQLite feature support.
 
-**Current Phase 2 Status**: **Phase 2 Complete (100%)** ✅ All phases 2.1-2.15 complete. All core features implemented including parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection, database initialization hooks, prepared statement caching verification, and comprehensive documentation. Fixed critical deadlock issue in `init_hook` with `begin()` and `transaction()` context managers. Each phase has dedicated robust test suites. Code quality: full mypy type checking and Ruff formatting/linting. Test suite: 345+ passing tests (7 skipped). Benchmarks documented. Ready for v1.0 release.
+**Current Phase 2 Status**: **Phase 2 Complete (100%) - Released as v0.2.0** ✅ All phases 2.1-2.15 complete. All core features implemented including parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection, database initialization hooks, prepared statement caching verification, and comprehensive documentation. Fixed critical deadlock issue in `init_hook` with `begin()` and `transaction()` context managers. Each phase has dedicated robust test suites. Code quality: full mypy type checking and Ruff formatting/linting. Test suite: 356+ passing tests (6 skipped). Benchmarks documented. **Phase 2 released as v0.2.0. Phase 3 will lead to v1.0.0 release.**
 
 ### Path to Phase 2 Completion
 
@@ -306,11 +308,7 @@ Phase 2 is now complete. All work to achieve full drop-in replacement compatibil
 3. **Phase 2.13** (Performance) → Optimizes for production use
 4. **Phase 2.15** (Documentation) → Completes user-facing materials
 
-**Estimated total remaining effort: 12-18 days**
-
-Once Phase 2 is complete, `rapsqlite` will be ready for v1.0 release as a production-ready, drop-in replacement for `aiosqlite` with true async performance.
-
-**Note**: Phase 2.1-2.15 are complete and provide a production-ready, drop-in replacement for `aiosqlite` with ~95% API compatibility. Remaining enhancement items have been moved to Phase 3 as they represent advanced features beyond the core Phase 2 scope.
+**Phase 2 (v0.2.0) Release**: Phase 2.1-2.15 are complete and provide a production-ready, drop-in replacement for `aiosqlite` with ~95% API compatibility. **Released as v0.2.0.** Remaining enhancement items are planned for Phase 3, which will lead to the v1.0.0 release.
 
 ### Phase 2 features to implement (from compat gaps)
 
@@ -454,9 +452,14 @@ Prioritized from `test_aiosqlite_compat` failures and execute_many fix work:
   - Database migration tool integration (Alembic)
   - Testing framework integration (pytest-asyncio patterns)
 
-## Phase 3 — Ecosystem
+## Phase 3 — Ecosystem (v0.3.0 → v1.0.0)
 
-Focus: Advanced features, ecosystem integration, and query optimization.
+Focus: Advanced features, ecosystem integration, and query optimization leading to the v1.0.0 stable release.
+
+**Versioning Strategy:**
+- Phase 2 features released as **v0.2.0** (current)
+- Phase 3 features will be released incrementally as **v0.3.0, v0.4.0, etc.**
+- **v1.0.0** will be released after Phase 3 is complete, marking production stability
 
 ### Advanced Query Features
 
@@ -643,14 +646,16 @@ Focus: Advanced features, ecosystem integration, and query optimization.
 ## Success Criteria
 
 - **Phase 1**: ✅ Connection pooling implemented, ✅ transactions supported, ✅ stable API, ✅ **core aiosqlite API compatibility** (production-ready), ✅ comprehensive test suite, ✅ passes Fake Async Detector. Advanced features (parameterized queries, row factory, transaction context managers) moved to Phase 2.
-- **Phase 2**: Feature-complete for common SQLite use cases, competitive performance benchmarks, excellent documentation, seamless migration from aiosqlite, complete drop-in replacement with advanced features
-- **Phase 3**: Industry-leading performance, ecosystem integration, adoption as primary async SQLite library for Python and preferred aiosqlite alternative
+- **Phase 2 (v0.2.0)**: ✅ Feature-complete for common SQLite use cases, competitive performance benchmarks, excellent documentation, seamless migration from aiosqlite, complete drop-in replacement with advanced features
+- **Phase 3 (v0.3.0+)**: Industry-leading performance, ecosystem integration, adoption as primary async SQLite library for Python and preferred aiosqlite alternative, leading to **v1.0.0 stable release**
 
 ## Versioning Strategy
 
 Following semantic versioning:
-- `v0.x`: Breaking changes allowed, MVP and Phase 1 development
-- `v1.0`: Stable API, Phase 1 complete, production-ready (ready for release)
-- `v1.x+`: Phase 2 and 3 features, backwards-compatible additions
+- `v0.1.x`: Phase 1 development (MVP and core features)
+- `v0.2.x`: Phase 2 development and release (feature-complete drop-in replacement)
+- `v0.3.x+`: Phase 3 development (advanced features, ecosystem integration)
+- `v1.0.0`: Stable API release after Phase 3 completion, production-ready
+- `v1.x+`: Backwards-compatible additions and enhancements
 
-**Current Version: v0.2.0** — Phase 1 complete; **Phase 2 complete (100%)** ✅. All phases 2.1-2.15 complete. Core features: parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection, database initialization hooks, aiosqlite compatibility completion, prepared statement caching verification, comprehensive documentation and benchmarking. Fixed critical deadlock issue in `init_hook` with `begin()` and `transaction()` context managers. Core aiosqlite API compatibility at ~95% (increased from ~85%). All high-priority compatibility features implemented including `total_changes()`, `in_transaction()`, `executescript()`, `load_extension()`, `text_factory`, `Row` class, and async iteration. Prepared statement caching verified and documented. Benchmarks documented with actual results. Python 3.8–3.14 supported. 345+ tests passing (7 skipped). Full mypy type checking and Ruff formatting/linting. **Phase 2 complete - Ready for v1.0 release!** 🎉
+**Current Version: v0.2.0** — Phase 1 complete; **Phase 2 complete (100%)** ✅. All phases 2.1-2.15 complete. Core features: parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump, backup, comprehensive schema introspection, database initialization hooks, aiosqlite compatibility completion, prepared statement caching verification, comprehensive documentation and benchmarking. Fixed critical deadlock issue in `init_hook` with `begin()` and `transaction()` context managers. Core aiosqlite API compatibility at ~95% (increased from ~85%). All high-priority compatibility features implemented including `total_changes()`, `in_transaction()`, `executescript()`, `load_extension()`, `text_factory`, `Row` class, and async iteration. Prepared statement caching verified and documented. Benchmarks documented with actual results. Python 3.8–3.14 supported. 356+ tests passing (6 skipped). Full mypy type checking and Ruff formatting/linting. **Phase 2 released as v0.2.0. Phase 3 will lead to v1.0.0 release.**
