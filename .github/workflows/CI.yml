@@ -66,13 +66,13 @@ jobs:
       shell: bash
       run: |
         cd /tmp
-        python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml -n auto
+        python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
 
     - name: Upload coverage to Codecov
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
       uses: codecov/codecov-action@v3
       with:
-        file: ./coverage.xml
+        file: ${{ github.workspace }}/coverage.xml
         flags: unittests
         name: codecov-umbrella
         fail_ci_if_error: false
