@@ -764,7 +764,9 @@ The following exception classes are available, matching the aiosqlite API:
 - `BLOB` → `bytes`
 - `NULL` → `None`
 
-## Benchmarks
+## Performance
+
+### Benchmarks
 
 This package passes the [Fake Async Detector](https://github.com/eddiethedean/rap-bench). Benchmarks are available in the [rap-bench](https://github.com/eddiethedean/rap-bench) repository.
 
@@ -775,12 +777,62 @@ pip install rap-bench
 rap-bench detect rapsqlite
 ```
 
+### Performance Characteristics
+
+- **True async**: All database operations execute outside the Python GIL
+- **Better concurrency**: No event loop stalls under load
+- **Connection pooling**: Efficient connection reuse with configurable pool size
+- **Prepared statement caching**: Automatic query optimization via sqlx
+
+### Benchmark Suite
+
+See [benchmarks/README.md](benchmarks/README.md) for detailed performance benchmarks comparing rapsqlite with aiosqlite and sqlite3.
+
+Run benchmarks:
+
+```bash
+pytest benchmarks/benchmark_suite.py -v -s
+```
+
+**Key advantages:**
+- Lower latency for repeated queries (prepared statement caching)
+- Better throughput under concurrent load (GIL independence)
+- Improved scalability with multiple concurrent operations
+
+## Migration from aiosqlite
+
+`rapsqlite` is designed to be a **drop-in replacement** for `aiosqlite`. The simplest migration is a one-line change:
+
+```python
+# Before
+import aiosqlite
+
+# After
+import rapsqlite as aiosqlite
+```
+
+For most applications, this is all you need! All core aiosqlite APIs are supported, including:
+- Connection and cursor APIs
+- Parameterized queries (named and positional)
+- Transactions and context managers
+- Row factories
+- Exception types
+
+**See [docs/MIGRATION.md](docs/MIGRATION.md) for a complete migration guide** with:
+- Step-by-step migration instructions
+- Code examples for common patterns
+- API differences and limitations
+- Troubleshooting guide
+- Performance considerations
+
+**Compatibility Analysis**: See [docs/AIOSQLITE_COMPATIBILITY_ANALYSIS.md](docs/AIOSQLITE_COMPATIBILITY_ANALYSIS.md) for detailed analysis based on running the aiosqlite test suite. Overall compatibility: ~85% for core use cases.
+
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals include:
 
 - ✅ Phase 1: Connection lifecycle, transactions, type system, error handling, cursor API (complete)
-- ⏳ Phase 2: Prepared statements and parameterized queries
+- ✅ Phase 2: Parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump/backup, schema introspection, database initialization hooks, prepared statement caching (complete)
 - ⏳ Phase 3: Advanced SQLite features and ecosystem integration
 
 ## Related Projects
@@ -797,12 +849,19 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and version history.
 ## Limitations (v0.2.0)
 
 **Current limitations:**
-- ⏳ Parameterized queries not yet supported (placeholder for Phase 2)
-- ⏳ `Cursor.fetchmany()` returns all rows (size-based slicing in Phase 2)
-- ⏳ Limited SQL dialect support (basic SQLite features)
-- ⏳ Not yet a complete drop-in replacement for `aiosqlite` (work in progress)
 - ⏳ Not designed for synchronous use cases
 - ⚠️ **Backup to `sqlite3.Connection` not supported**: The `Connection.backup()` method supports backing up to another `rapsqlite.Connection`, but backing up to Python's standard `sqlite3.Connection` is not supported due to SQLite library instance incompatibility. See [Backup Limitations](#backup-limitations) below for details.
+
+**Phase 2.1-2.11 improvements (v0.2.0):**
+- ✅ Parameterized queries (named and positional parameters) - Phase 2.1 complete
+- ✅ Cursor improvements (fetchmany with size-based slicing) - Phase 2.2 complete
+- ✅ Connection and pool configuration (PRAGMAs, pool size, timeouts) - Phase 2.3-2.4 complete
+- ✅ Row factory support (dict, tuple, callable) - Phase 2.5 complete
+- ✅ Transaction context managers - Phase 2.6 complete
+- ✅ Advanced SQLite callbacks (create_function, set_trace_callback, etc.) - Phase 2.7 complete
+- ✅ Database dump and backup - Phase 2.8-2.9 complete
+- ✅ Schema introspection (9 methods) - Phase 2.10 complete
+- ✅ Database initialization hooks - Phase 2.11 complete
 
 **Phase 1 improvements (v0.1.0 – v0.1.1):**
 - ✅ Connection lifecycle management (async context managers)

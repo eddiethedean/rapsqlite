@@ -13,6 +13,46 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+/// Detect if a query is a SELECT query (for determining execution strategy).
+fn is_select_query(query: &str) -> bool {
+    let trimmed = query.trim().to_uppercase();
+    trimmed.starts_with("SELECT") || trimmed.starts_with("WITH")
+}
+
+/// Normalize a SQL query by removing extra whitespace and standardizing formatting.
+/// This helps improve prepared statement cache hit rates by ensuring queries with
+/// different whitespace are treated as identical.
+/// Note: sqlx already caches prepared statements per connection internally.
+fn normalize_query(query: &str) -> String {
+    // Remove leading/trailing whitespace
+    let trimmed = query.trim();
+    // Replace multiple whitespace characters with single space
+    let normalized: String = trimmed
+        .chars()
+        .fold((String::new(), false), |(mut acc, was_space), ch| {
+            let is_space = ch.is_whitespace();
+            if is_space && was_space {
+                // Skip multiple consecutive spaces
+                (acc, true)
+            } else if is_space {
+                // Replace any whitespace with single space
+                (acc + " ", true)
+            } else {
+                (acc + &ch.to_string(), false)
+            }
+        })
+        .0;
+    normalized
+}
+
+/// Track query usage in the cache for analytics and optimization.
+/// This helps identify frequently used queries that benefit from prepared statement caching.
+fn track_query_usage(query_cache: &Arc<StdMutex<HashMap<String, u64>>>, query: &str) {
+    let normalized = normalize_query(query);
+    let mut cache = query_cache.lock().unwrap();
+    *cache.entry(normalized).or_insert(0) += 1;
+}
+
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{
     sqlite3, sqlite3_backup, sqlite3_backup_finish, sqlite3_backup_init, sqlite3_backup_pagecount,
@@ -336,6 +376,7 @@ fn row_to_py_with_factory<'py>(
 
 /// Convert a Python value to a SQLite-compatible value for binding.
 /// Returns a boxed value that can be used with sqlx query binding.
+#[derive(Clone)]
 enum SqliteParam {
     Null,
     Int(i64),
@@ -1188,6 +1229,7 @@ fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
 fn _rapsqlite(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Connection>()?;
     m.add_class::<Cursor>()?;
+    m.add_class::<ExecuteContextManager>()?;
     m.add_class::<TransactionContextManager>()?;
 
     // Register exception classes (required for create_exception! to be accessible from Python)
@@ -1225,6 +1267,10 @@ struct Connection {
     pool_size: Arc<StdMutex<Option<usize>>>, // Configurable pool size
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>, // Connection timeout in seconds
     row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // None | "dict" | "tuple" | callable
+    // Prepared statement cache tracking (Phase 2.13)
+    // Tracks normalized query strings and usage counts for analytics/optimization
+    // Note: sqlx already caches prepared statements per connection internally
+    query_cache: Arc<StdMutex<HashMap<String, u64>>>, // normalized_query -> usage_count
     // Callback infrastructure (Phase 2.7)
     callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>, // Dedicated connection for callbacks
     load_extension_enabled: Arc<StdMutex<bool>>, // Track load_extension state
@@ -1279,6 +1325,8 @@ impl Connection {
             pool_size: Arc::new(StdMutex::new(None)),
             connection_timeout_secs: Arc::new(StdMutex::new(None)),
             row_factory: Arc::new(StdMutex::new(None)),
+            // Prepared statement cache tracking (Phase 2.13)
+            query_cache: Arc::new(StdMutex::new(HashMap::new())),
             // Callback infrastructure (Phase 2.7)
             callback_connection: Arc::new(Mutex::new(None)),
             load_extension_enabled: Arc::new(StdMutex::new(false)),
@@ -1745,10 +1793,16 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Prepared statement cache tracking (Phase 2.13)
+        let query_cache = Arc::clone(&self_.query_cache);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
-        let connection_self = self_.into();
+        let row_factory = Arc::clone(&self_.row_factory);
+        let connection_self: Py<Connection> = self_.into();
+        
+        // Clone query before processing (it may be moved)
+        let original_query = query.clone();
         
         // Process parameters
         let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
@@ -1774,85 +1828,87 @@ impl Connection {
             Ok((query, vec![param]))
         })?;
         
-        Python::attach(|py| {
-            let future = async move {
-                // Priority: transaction > callbacks > pool
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
-                };
-                
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    )
-                    .await?;
-                }
-                
-                // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-                
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                let result = if in_transaction {
-                    // Use transaction connection - need &mut **conn to access underlying connection that implements Executor
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut()
-                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
-                    bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
-                } else if has_callbacks_flag {
-                    // Ensure callback connection exists
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    ).await?;
-                    
-                    // Use callback connection
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut()
-                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-                    bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
-                } else {
-                    // Use pool
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    )
-                    .await?;
-                    bind_and_execute(&processed_query, &param_values, &pool_clone, &path)
-                        .await?
-                };
-
-                let rowid = result.last_insert_rowid();
-                let changes = result.rows_affected();
-
-                *last_rowid.lock().await = rowid;
-                *last_changes.lock().await = changes;
-
-                Ok(())
+        // Track query usage for prepared statement cache analytics (Phase 2.13)
+        track_query_usage(&query_cache, &processed_query);
+        
+        // Check if this is a SELECT query (for lazy execution)
+        let is_select = is_select_query(&processed_query);
+        
+        // Store original parameters for cursor (preserve original format)
+        let params_for_cursor = if let Some(params) = parameters {
+            Some(params.clone().unbind())
+        } else {
+            None
+        };
+        
+        // Clone necessary fields for cursor creation (will be used in async future)
+        let cursor_path = path.clone();
+        let cursor_pool = Arc::clone(&pool);
+        let cursor_pragmas = Arc::clone(&pragmas);
+        let cursor_pool_size = Arc::clone(&pool_size);
+        let cursor_connection_timeout_secs = Arc::clone(&connection_timeout_secs);
+        let cursor_row_factory = Arc::clone(&row_factory);
+        // Create cursor synchronously (query and params are already processed)
+        // For named parameters, processed_query has :value replaced with ?
+        // The cursor needs the ORIGINAL query (with :value) so fetchall() can process it correctly
+        // But we also need to store the processed param_values for immediate execution
+        // Solution: Store original query in cursor, but ExecuteContextManager has processed_query
+        // for execution. The cursor will re-process parameters when fetchall() is called.
+        let cursor = Python::with_gil(|py| -> PyResult<Py<Cursor>> {
+            let cursor = Cursor {
+                connection: connection_self.clone_ref(py),
+                query: original_query.clone(), // Store ORIGINAL query (with :value) for cursor processing
+                results: Arc::new(StdMutex::new(None)),
+                current_index: Arc::new(StdMutex::new(0)),
+                parameters: Arc::new(StdMutex::new(params_for_cursor)), // Store original params
+                processed_query: Some(processed_query.clone()), // Store processed query to avoid re-processing
+                processed_params: Some(param_values.clone()), // Store processed parameters to avoid re-processing
+                connection_path: path.clone(),
+                connection_pool: Arc::clone(&pool),
+                connection_pragmas: Arc::clone(&pragmas),
+                pool_size: Arc::clone(&pool_size),
+                connection_timeout_secs: Arc::clone(&connection_timeout_secs),
+                row_factory: Arc::clone(&row_factory),
+                transaction_state: Arc::clone(&transaction_state),
+                transaction_connection: Arc::clone(&transaction_connection),
+                callback_connection: Arc::clone(&callback_connection),
+                load_extension_enabled: Arc::clone(&load_extension_enabled),
+                user_functions: Arc::clone(&user_functions),
+                trace_callback: Arc::clone(&trace_callback),
+                authorizer_callback: Arc::clone(&authorizer_callback),
+                progress_handler: Arc::clone(&progress_handler),
             };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            Py::new(py, cursor)
+        })?;
+        
+        // Wrap cursor in ExecuteContextManager and return it directly
+        // Execution will happen in __aenter__ for non-SELECT queries
+        Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+            let ctx_mgr = ExecuteContextManager {
+                cursor: cursor.clone_ref(py),
+                query: processed_query,
+                param_values,
+                is_select,
+                path,
+                pool: Arc::clone(&pool),
+                pragmas: Arc::clone(&pragmas),
+                pool_size: Arc::clone(&pool_size),
+                connection_timeout_secs: Arc::clone(&connection_timeout_secs),
+                transaction_state: Arc::clone(&transaction_state),
+                transaction_connection: Arc::clone(&transaction_connection),
+                callback_connection: Arc::clone(&callback_connection),
+                load_extension_enabled: Arc::clone(&load_extension_enabled),
+                user_functions: Arc::clone(&user_functions),
+                trace_callback: Arc::clone(&trace_callback),
+                authorizer_callback: Arc::clone(&authorizer_callback),
+                progress_handler: Arc::clone(&progress_handler),
+                init_hook: Arc::clone(&init_hook),
+                init_hook_called: Arc::clone(&init_hook_called),
+                last_rowid: Arc::clone(&last_rowid),
+                last_changes: Arc::clone(&last_changes),
+                connection: connection_self.clone_ref(py),
+            };
+            Py::new(py, ctx_mgr).map(|c| c.into())
         })
     }
 
@@ -2021,6 +2077,8 @@ impl Connection {
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        // Prepared statement cache tracking (Phase 2.13)
+        let query_cache = Arc::clone(&self_.query_cache);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
@@ -2049,6 +2107,9 @@ impl Connection {
             let param = SqliteParam::from_py(&params)?;
             Ok((query, vec![param]))
         })?;
+
+        // Track query usage for prepared statement cache analytics (Phase 2.13)
+        track_query_usage(&query_cache, &processed_query);
 
         Python::attach(|py| {
             let future = async move {
@@ -2410,35 +2471,109 @@ impl Connection {
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
         let row_factory = Arc::clone(&slf.row_factory);
+        let transaction_state = Arc::clone(&slf.transaction_state);
+        let transaction_connection = Arc::clone(&slf.transaction_connection);
+        let callback_connection = Arc::clone(&slf.callback_connection);
+        let load_extension_enabled = Arc::clone(&slf.load_extension_enabled);
+        let user_functions = Arc::clone(&slf.user_functions);
+        let trace_callback = Arc::clone(&slf.trace_callback);
+        let authorizer_callback = Arc::clone(&slf.authorizer_callback);
+        let progress_handler = Arc::clone(&slf.progress_handler);
         Ok(Cursor {
             connection: slf.into(),
             query: String::new(),
             results: Arc::new(StdMutex::new(None)),
             current_index: Arc::new(StdMutex::new(0)),
             parameters: Arc::new(StdMutex::new(None)),
+            processed_query: None, // No processed query for cursor() method
+            processed_params: None, // No processed params for cursor() method
             connection_path: path,
             connection_pool: pool,
             connection_pragmas: pragmas,
             pool_size,
             connection_timeout_secs,
             row_factory,
+            transaction_state,
+            transaction_connection,
+            callback_connection,
+            load_extension_enabled,
+            user_functions,
+            trace_callback,
+            authorizer_callback,
+            progress_handler,
+        })
+    }
+
+    /// Create a cursor with a pre-initialized query and parameters.
+    /// This is used by execute() to return a cursor that can be used as an async context manager.
+    fn create_cursor_with_query(
+        slf: PyRef<Self>,
+        query: String,
+        parameters: Option<Py<PyAny>>,
+    ) -> PyResult<Cursor> {
+        let path = slf.path.clone();
+        let pool = Arc::clone(&slf.pool);
+        let pragmas = Arc::clone(&slf.pragmas);
+        let pool_size = Arc::clone(&slf.pool_size);
+        let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
+        let row_factory = Arc::clone(&slf.row_factory);
+        let transaction_state = Arc::clone(&slf.transaction_state);
+        let transaction_connection = Arc::clone(&slf.transaction_connection);
+        let callback_connection = Arc::clone(&slf.callback_connection);
+        let load_extension_enabled = Arc::clone(&slf.load_extension_enabled);
+        let user_functions = Arc::clone(&slf.user_functions);
+        let trace_callback = Arc::clone(&slf.trace_callback);
+        let authorizer_callback = Arc::clone(&slf.authorizer_callback);
+        let progress_handler = Arc::clone(&slf.progress_handler);
+        Ok(Cursor {
+            connection: slf.into(),
+            query,
+            results: Arc::new(StdMutex::new(None)),
+            current_index: Arc::new(StdMutex::new(0)),
+            parameters: Arc::new(StdMutex::new(parameters)),
+            processed_query: None, // No processed query for create_cursor_with_query() method
+            processed_params: None, // No processed params for create_cursor_with_query() method
+            connection_path: path,
+            connection_pool: pool,
+            connection_pragmas: pragmas,
+            pool_size,
+            connection_timeout_secs,
+            row_factory,
+            transaction_state,
+            transaction_connection,
+            callback_connection,
+            load_extension_enabled,
+            user_functions,
+            trace_callback,
+            authorizer_callback,
+            progress_handler,
         })
     }
 
     /// Return an async context manager for a transaction.
     /// On __aenter__ calls begin(); on __aexit__ calls commit() or rollback().
     fn transaction(slf: PyRef<Self>) -> PyResult<TransactionContextManager> {
+        let path = slf.path.clone();
+        let pool = Arc::clone(&slf.pool);
+        let pragmas = Arc::clone(&slf.pragmas);
+        let pool_size = Arc::clone(&slf.pool_size);
+        let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
+        let transaction_state = Arc::clone(&slf.transaction_state);
+        let transaction_connection = Arc::clone(&slf.transaction_connection);
+        let init_hook = Arc::clone(&slf.init_hook);
+        let init_hook_called = Arc::clone(&slf.init_hook_called);
+        let connection: Py<Connection> = slf.into();
         Ok(TransactionContextManager {
-            path: slf.path.clone(),
-            pool: Arc::clone(&slf.pool),
-            pragmas: Arc::clone(&slf.pragmas),
-            pool_size: Arc::clone(&slf.pool_size),
-            connection_timeout_secs: Arc::clone(&slf.connection_timeout_secs),
-            transaction_state: Arc::clone(&slf.transaction_state),
-            transaction_connection: Arc::clone(&slf.transaction_connection),
-            connection: slf.into(),
-            init_hook: Arc::clone(&slf.init_hook),
-            init_hook_called: Arc::clone(&slf.init_hook_called),
+            path,
+            pool,
+            pragmas,
+            pool_size,
+            connection_timeout_secs,
+            transaction_state,
+            transaction_connection,
+            connection,
+            init_hook,
+            init_hook_called,
         })
     }
 
@@ -5316,6 +5451,193 @@ impl Connection {
     }
 }
 
+/// Execute context manager returned by `Connection::execute()`.
+/// Allows `async with db.execute(...)` pattern by being both awaitable and an async context manager.
+#[pyclass]
+struct ExecuteContextManager {
+    cursor: Py<Cursor>,
+    query: String,
+    param_values: Vec<SqliteParam>,
+    is_select: bool,
+    // Connection state needed for execution
+    path: String,
+    pool: Arc<Mutex<Option<SqlitePool>>>,
+    pragmas: Arc<StdMutex<Vec<(String, String)>>>,
+    pool_size: Arc<StdMutex<Option<usize>>>,
+    connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    transaction_state: Arc<Mutex<TransactionState>>,
+    transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    load_extension_enabled: Arc<StdMutex<bool>>,
+    user_functions: Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>>,
+    trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    progress_handler: Arc<StdMutex<Option<(i32, Py<PyAny>)>>>,
+    init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
+    init_hook_called: Arc<StdMutex<bool>>,
+    last_rowid: Arc<Mutex<i64>>,
+    last_changes: Arc<Mutex<u64>>,
+    connection: Py<Connection>,
+}
+
+#[pymethods]
+impl ExecuteContextManager {
+    /// Async context manager entry - executes query if non-SELECT, then returns the cursor.
+    fn __aenter__(slf: PyRef<Self>) -> PyResult<Py<PyAny>> {
+        let slf: Py<Self> = slf.into();
+        Python::attach(|py| {
+            // Extract all fields before moving into async
+            let query = slf.borrow(py).query.clone();
+            let param_values = slf.borrow(py).param_values.clone();
+            let is_select = slf.borrow(py).is_select;
+            let path = slf.borrow(py).path.clone();
+            let pool = Arc::clone(&slf.borrow(py).pool);
+            let pragmas = Arc::clone(&slf.borrow(py).pragmas);
+            let pool_size = Arc::clone(&slf.borrow(py).pool_size);
+            let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);
+            let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
+            let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
+            let callback_connection = Arc::clone(&slf.borrow(py).callback_connection);
+            let load_extension_enabled = Arc::clone(&slf.borrow(py).load_extension_enabled);
+            let user_functions = Arc::clone(&slf.borrow(py).user_functions);
+            let trace_callback = Arc::clone(&slf.borrow(py).trace_callback);
+            let authorizer_callback = Arc::clone(&slf.borrow(py).authorizer_callback);
+            let progress_handler = Arc::clone(&slf.borrow(py).progress_handler);
+            let init_hook = Arc::clone(&slf.borrow(py).init_hook);
+            let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
+            let last_rowid = Arc::clone(&slf.borrow(py).last_rowid);
+            let last_changes = Arc::clone(&slf.borrow(py).last_changes);
+            let connection = slf.borrow(py).connection.clone_ref(py);
+            let cursor = slf.borrow(py).cursor.clone_ref(py);
+            // Get cursor's results Arc to mark it as executed for non-SELECT queries
+            let cursor_results = Python::with_gil(|py| -> PyResult<Arc<StdMutex<Option<Vec<sqlx::sqlite::SqliteRow>>>>> {
+                // We can't easily get the results Arc from Py<Cursor>
+                // Instead, we'll handle this in fetchall() by checking if it's non-SELECT
+                // For now, we'll pass None and handle it in fetchall()
+                Ok(Arc::new(StdMutex::new(None))) // Placeholder - won't be used
+            }).unwrap_or_else(|_| Arc::new(StdMutex::new(None)));
+            
+            let future = async move {
+                // For non-SELECT queries, execute immediately when entering context
+                if !is_select {
+                    let in_transaction = {
+                        let g = transaction_state.lock().await;
+                        *g == TransactionState::Active
+                    };
+                    
+                    if !in_transaction {
+                        get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                    }
+                    
+                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
+                    
+                    let has_callbacks_flag = has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+
+                    let result = if in_transaction {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard.as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                            .await?
+                    } else if has_callbacks_flag {
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        ).await?;
+                        
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard.as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                            .await?
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                        bind_and_execute(&query, &param_values, &pool_clone, &path)
+                            .await?
+                    };
+
+                    let rowid = result.last_insert_rowid();
+                    let changes = result.rows_affected();
+
+                    *last_rowid.lock().await = rowid;
+                    *last_changes.lock().await = changes;
+                    
+                    // Mark cursor results as cached (empty for non-SELECT) to prevent re-execution
+                    // The fetchall() method will check if it's non-SELECT and results are None,
+                    // and return empty results without executing. This is handled in fetchall().
+                } else {
+                    // For SELECT queries, ensure pool exists for lazy execution
+                    let in_transaction = {
+                        let g = transaction_state.lock().await;
+                        *g == TransactionState::Active
+                    };
+                    
+                    if !in_transaction {
+                        get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                    }
+                    
+                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
+                }
+                
+                Ok(cursor)
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Async context manager exit - does nothing (cursor cleanup is automatic).
+    fn __aexit__(
+        &self,
+        _exc_type: &Bound<'_, PyAny>,
+        _exc_val: &Bound<'_, PyAny>,
+        _exc_tb: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let future = async move {
+                Ok(false) // Return False to not suppress exceptions
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    // Note: __await__ is not implemented because future_into_py creates a Future
+    // which doesn't satisfy Python's __await__ protocol (needs iterator, not Future).
+    // Users should use `async with db.execute(...)` pattern instead.
+    // Full `await db.execute(...)` support would require implementing a custom iterator
+    // that wraps the coroutine, which is complex. For now, async with is the supported pattern.
+}
+
 /// Transaction context manager returned by `Connection::transaction()`.
 /// Runs begin on __aenter__ and commit/rollback on __aexit__ using the same
 /// connection state as the Connection.
@@ -5363,7 +5685,9 @@ impl TransactionContextManager {
                 .await?;
 
                 // Execute init_hook if needed (before starting transaction)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
+                // Clone connection before passing to async function
+                let connection_for_hook = Python::with_gil(|py| connection.clone_ref(py));
+                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook).await?;
                 let mut conn = pool_clone
                     .acquire()
                     .await
@@ -5430,12 +5754,24 @@ struct Cursor {
     results: Arc<StdMutex<Option<Vec<Py<PyAny>>>>>,
     current_index: Arc<StdMutex<usize>>,
     parameters: Arc<StdMutex<Option<Py<PyAny>>>>,
+    // Store processed query and parameters to avoid re-processing (fixes parameterized query issue)
+    processed_query: Option<String>,
+    processed_params: Option<Vec<SqliteParam>>,
     connection_path: String, // Store path for direct pool access
     connection_pool: Arc<Mutex<Option<SqlitePool>>>, // Reference to connection's pool
     connection_pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Reference to connection's pragmas
     pool_size: Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's row_factory at cursor creation
+    // Transaction and callback state for proper connection priority
+    transaction_state: Arc<Mutex<TransactionState>>,
+    transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    load_extension_enabled: Arc<StdMutex<bool>>,
+    user_functions: Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>>,
+    trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    progress_handler: Arc<StdMutex<Option<(i32, Py<PyAny>)>>>,
 }
 
 #[pymethods]
@@ -5505,12 +5841,22 @@ impl Cursor {
         let results = Arc::clone(&self.results);
         let current_index = Arc::clone(&self.current_index);
         let parameters = Arc::clone(&self.parameters);
+        let stored_proc_query_fetchone = self.processed_query.clone();
+        let stored_proc_params_fetchone = self.processed_params.clone();
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
+        let transaction_state = Arc::clone(&self.transaction_state);
+        let transaction_connection = Arc::clone(&self.transaction_connection);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
         
         Python::attach(|py| {
             let future = async move {
@@ -5521,33 +5867,78 @@ impl Cursor {
                 };
                 
                 if needs_fetch {
-                    let processed_params = Python::with_gil(|py| -> PyResult<Vec<SqliteParam>> {
-                        let params_guard = parameters.lock().unwrap();
-                        if let Some(ref params_py) = *params_guard {
-                            let params_bound = params_py.bind(py);
-                            if let Ok(dict) = params_bound.downcast::<pyo3::types::PyDict>() {
-                                let (_, param_values) = process_named_parameters(&query, dict)?;
-                                return Ok(param_values);
+                    // Use stored processed parameters if available, otherwise re-process
+                    let (processed_query, processed_params) = if let (Some(proc_query), Some(proc_params)) = (stored_proc_query_fetchone, stored_proc_params_fetchone) {
+                        (proc_query, proc_params)
+                    } else {
+                        // Fallback: re-process parameters
+                        Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
+                            let params_guard = parameters.lock().unwrap();
+                            if let Some(ref params_py) = *params_guard {
+                                let params_bound = params_py.bind(py);
+                                if let Ok(dict) = params_bound.downcast::<pyo3::types::PyDict>() {
+                                    let (proc_query, param_values) = process_named_parameters(&query, dict)?;
+                                    return Ok((proc_query, param_values));
+                                }
+                                if let Ok(list) = params_bound.downcast::<PyList>() {
+                                    let param_values = process_positional_parameters(list)?;
+                                    return Ok((query.clone(), param_values));
+                                }
+                                let param = SqliteParam::from_py(&params_bound)?;
+                                return Ok((query.clone(), vec![param]));
                             }
-                            if let Ok(list) = params_bound.downcast::<PyList>() {
-                                return process_positional_parameters(list);
-                            }
-                            let param = SqliteParam::from_py(&params_bound)?;
-                            return Ok(vec![param]);
-                        }
-                        Ok(Vec::new())
-                    })?;
+                            Ok((query.clone(), Vec::new()))
+                        })?
+                    };
                     
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    )
-                    .await?;
+                    // Priority: transaction > callbacks > pool
+                    let in_transaction = {
+                        let g = transaction_state.lock().await;
+                        *g == TransactionState::Active
+                    };
                     
-                    let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
+                    let has_callbacks_flag = has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    
+                    let rows = if in_transaction {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &path).await?
+                    } else if has_callbacks_flag {
+                        // Ensure callback connection exists
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        ).await?;
+                        
+                        // Use callback connection
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &path).await?
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                        bind_and_fetch_all(&processed_query, &processed_params, &pool_clone, &path).await?
+                    };
                     
                     let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
                         let guard = row_factory.lock().unwrap();
@@ -5606,6 +5997,35 @@ impl Cursor {
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
+        let transaction_state = Arc::clone(&self.transaction_state);
+        let transaction_connection = Arc::clone(&self.transaction_connection);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
+        
+        // Check if this is a non-SELECT query - if so and results are None,
+        // it means the query was already executed in __aenter__ and we should
+        // just return empty results without executing again
+        let is_select = is_select_query(&query);
+        if !is_select {
+            let results_guard = results.lock().unwrap();
+            if results_guard.is_none() {
+                // Non-SELECT query already executed in __aenter__, return empty results
+                // Mark as executed to prevent re-execution
+                drop(results_guard);
+                *results.lock().unwrap() = Some(Vec::new());
+                return Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    Ok(PyList::empty(py).into())
+                });
+            }
+        }
+        
+        // Clone processed parameters for use in async future
+        let stored_proc_query = self.processed_query.clone();
+        let stored_proc_params = self.processed_params.clone();
         
         Python::attach(|py| {
             let future = async move {
@@ -5616,48 +6036,123 @@ impl Cursor {
                 };
                 
                 if needs_fetch {
-                    let processed_params = Python::with_gil(|py| -> PyResult<Vec<SqliteParam>> {
-                        let params_guard = parameters.lock().unwrap();
-                        if let Some(ref params_py) = *params_guard {
-                            let params_bound = params_py.bind(py);
-                            if let Ok(dict) = params_bound.downcast::<pyo3::types::PyDict>() {
-                                let (_, param_values) = process_named_parameters(&query, dict)?;
-                                return Ok(param_values);
-                            }
-                            if let Ok(list) = params_bound.downcast::<PyList>() {
-                                return process_positional_parameters(list);
-                            }
-                            let param = SqliteParam::from_py(&params_bound)?;
-                            return Ok(vec![param]);
-                        }
-                        Ok(Vec::new())
-                    })?;
-                    
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    )
-                    .await?;
-                    
-                    let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
-                    
-                    let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
-                        let guard = row_factory.lock().unwrap();
-                        let factory_opt = guard.as_ref();
-                        let mut vec = Vec::new();
-                        for row in rows.iter() {
-                            let out = row_to_py_with_factory(py, row, factory_opt)?;
-                            vec.push(out.unbind());
-                        }
-                        Ok(vec)
-                    })?;
-                    
-                    {
+                    // Check if this is a non-SELECT query - if so, it was already executed in __aenter__
+                    // and we should just mark results as empty
+                    let is_select = is_select_query(&query);
+                    if !is_select {
+                        // Non-SELECT query already executed in __aenter__, mark as empty
                         let mut results_guard = results.lock().unwrap();
-                        *results_guard = Some(cached_results);
+                        *results_guard = Some(Vec::new());
+                    } else {
+                        // SELECT query - fetch results
+                        // Use stored processed parameters if available (from Connection.execute()), otherwise re-process
+                        let (processed_query, processed_params) = if let (Some(proc_query), Some(proc_params)) = (stored_proc_query, stored_proc_params) {
+                            (proc_query, proc_params)
+                        } else {
+                            // Fallback: re-process parameters (for cursors created via cursor() method)
+                            Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
+                                let params_guard = parameters.lock().unwrap();
+                                if let Some(ref params_py) = *params_guard {
+                                    let params_bound = params_py.bind(py);
+                                    
+                                    // Try dict first (named parameters)
+                                    if let Ok(dict) = params_bound.downcast::<pyo3::types::PyDict>() {
+                                        let (proc_query, param_values) = process_named_parameters(&query, dict)?;
+                                        // Verify we got parameters if query contains named placeholders
+                                        if param_values.is_empty() && (query.contains(':') || query.contains('@') || query.contains('$')) {
+                                            return Err(ProgrammingError::new_err(
+                                                format!("Named parameters found in query but none extracted. Query: '{}', Processed: '{}'", query, proc_query)
+                                            ));
+                                        }
+                                        // Additional verification: check if processed query has ? placeholders
+                                        if !proc_query.contains('?') && query.contains(':') {
+                                            return Err(ProgrammingError::new_err(
+                                                format!("Query had named parameters but processed query has no ? placeholders. Original: '{}', Processed: '{}'", query, proc_query)
+                                            ));
+                                        }
+                                        return Ok((proc_query, param_values));
+                                    }
+                                    
+                                    // Try list (positional parameters)
+                                    if let Ok(list) = params_bound.downcast::<PyList>() {
+                                        let param_values = process_positional_parameters(list)?;
+                                        return Ok((query.clone(), param_values));
+                                    }
+                                    
+                                    // Single value
+                                    let param = SqliteParam::from_py(&params_bound)?;
+                                    return Ok((query.clone(), vec![param]));
+                                }
+                                Ok((query.clone(), Vec::new()))
+                            })?
+                        };
+                        
+                        // Priority: transaction > callbacks > pool
+                        let in_transaction = {
+                            let g = transaction_state.lock().await;
+                            *g == TransactionState::Active
+                        };
+                        
+                        let has_callbacks_flag = has_callbacks(
+                            &load_extension_enabled,
+                            &user_functions,
+                            &trace_callback,
+                            &authorizer_callback,
+                            &progress_handler,
+                        );
+                        
+                        let rows = if in_transaction {
+                            let mut conn_guard = transaction_connection.lock().await;
+                            let conn = conn_guard
+                                .as_mut()
+                                .ok_or_else(|| OperationalError::new_err(
+                                    format!("Transaction is active but transaction_connection is None. This indicates a bug in transaction management.")
+                                ))?;
+                            bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &path).await?
+                        } else if has_callbacks_flag {
+                            // Ensure callback connection exists
+                            ensure_callback_connection(
+                                &path,
+                                &pool,
+                                &callback_connection,
+                                &pragmas,
+                                &pool_size,
+                                &connection_timeout_secs,
+                            ).await?;
+                            
+                            // Use callback connection
+                            let mut conn_guard = callback_connection.lock().await;
+                            let conn = conn_guard
+                                .as_mut()
+                                .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                            bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &path).await?
+                        } else {
+                            let pool_clone = get_or_create_pool(
+                                &path,
+                                &pool,
+                                &pragmas,
+                                &pool_size,
+                                &connection_timeout_secs,
+                            )
+                            .await?;
+                            bind_and_fetch_all(&processed_query, &processed_params, &pool_clone, &path).await?
+                        };
+                        
+                        let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
+                            let guard = row_factory.lock().unwrap();
+                            let factory_opt = guard.as_ref();
+                            let mut vec = Vec::new();
+                            for row in rows.iter() {
+                                let out = row_to_py_with_factory(py, row, factory_opt)?;
+                                vec.push(out.unbind());
+                            }
+                            Ok(vec)
+                        })?;
+                        
+                        {
+                            let mut results_guard = results.lock().unwrap();
+                            *results_guard = Some(cached_results);
+                        }
                     }
                 }
                 
@@ -5698,12 +6193,22 @@ impl Cursor {
         let results = Arc::clone(&self.results);
         let current_index = Arc::clone(&self.current_index);
         let parameters = Arc::clone(&self.parameters);
+        let stored_proc_query_fetchmany = self.processed_query.clone();
+        let stored_proc_params_fetchmany = self.processed_params.clone();
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
+        let transaction_state = Arc::clone(&self.transaction_state);
+        let transaction_connection = Arc::clone(&self.transaction_connection);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
         
         Python::attach(|py| {
             let future = async move {
@@ -5714,41 +6219,84 @@ impl Cursor {
                 };
                 
                 if needs_fetch {
-                    // Fetch all results using direct pool access
-                    let processed_params = Python::with_gil(|py| -> PyResult<Vec<SqliteParam>> {
-                        let params_guard = parameters.lock().unwrap();
-                        if let Some(ref params_py) = *params_guard {
-                            let params_bound = params_py.bind(py);
-                            
-                            // Check if it's a dict (named parameters)
-                            if let Ok(dict) = params_bound.downcast::<pyo3::types::PyDict>() {
-                                let (_, param_values) = process_named_parameters(&query, dict)?;
-                                return Ok(param_values);
+                    // Use stored processed parameters if available, otherwise re-process
+                    let (processed_query, processed_params) = if let (Some(proc_query), Some(proc_params)) = (stored_proc_query_fetchmany, stored_proc_params_fetchmany) {
+                        (proc_query, proc_params)
+                    } else {
+                        // Fallback: re-process parameters
+                        Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
+                            let params_guard = parameters.lock().unwrap();
+                            if let Some(ref params_py) = *params_guard {
+                                let params_bound = params_py.bind(py);
+                                
+                                // Check if it's a dict (named parameters)
+                                if let Ok(dict) = params_bound.downcast::<pyo3::types::PyDict>() {
+                                    let (proc_query, param_values) = process_named_parameters(&query, dict)?;
+                                    return Ok((proc_query, param_values));
+                                }
+                                
+                                // Check if it's a list (positional parameters)
+                                if let Ok(list) = params_bound.downcast::<PyList>() {
+                                    let param_values = process_positional_parameters(list)?;
+                                    return Ok((query.clone(), param_values));
+                                }
+                                
+                                // Single value
+                                let param = SqliteParam::from_py(&params_bound)?;
+                                return Ok((query.clone(), vec![param]));
                             }
-                            
-                            // Check if it's a list (positional parameters)
-                            if let Ok(list) = params_bound.downcast::<PyList>() {
-                                return process_positional_parameters(list);
-                            }
-                            
-                            // Single value
-                            let param = SqliteParam::from_py(&params_bound)?;
-                            return Ok(vec![param]);
-                        }
-                        Ok(Vec::new())
-                    })?;
+                            Ok((query.clone(), Vec::new()))
+                        })?
+                    };
                     
-                    // Fetch all results
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    )
-                    .await?;
+                    // Priority: transaction > callbacks > pool
+                    let in_transaction = {
+                        let g = transaction_state.lock().await;
+                        *g == TransactionState::Active
+                    };
                     
-                    let rows = bind_and_fetch_all(&query, &processed_params, &pool_clone, &path).await?;
+                    let has_callbacks_flag = has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    
+                    let rows = if in_transaction {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &path).await?
+                    } else if has_callbacks_flag {
+                        // Ensure callback connection exists
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        ).await?;
+                        
+                        // Use callback connection
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard
+                            .as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &path).await?
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                        bind_and_fetch_all(&processed_query, &processed_params, &pool_clone, &path).await?
+                    };
                     
                     // Cache results as Python objects
                     let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {

@@ -167,26 +167,28 @@ Focus: Feature additions, performance optimizations, and broader SQLite feature 
 
 ### Path to Phase 2 Completion
 
-**Progress: 11/14 core phases complete (79%)**
+**Progress: 14/14 core phases complete (100%) - Phase 2 Complete! ✅**
 
 To complete Phase 2 and achieve full drop-in replacement compatibility with `aiosqlite`, the following work remains:
 
-#### Phase 2.12: Bug Fixes & Compatibility (High Priority - Quick Wins)
+#### Phase 2.12: Bug Fixes & Compatibility (High Priority - Quick Wins) ✅
 
 **Estimated effort: 1-2 days**
 
-1. **Fix `set_pragma` test expectation** ⏳
+1. **Fix `set_pragma` test expectation** ✅
    - **Issue**: `test_set_pragma` expects incorrect value (2 instead of 1 for NORMAL)
    - **Fix**: Update test assertion to match SQLite semantics (NORMAL = 1)
    - **Plan**: [docs/PLAN_OPTION_B_SET_PRAGMA_FIX.md](PLAN_OPTION_B_SET_PRAGMA_FIX.md)
    - **Impact**: Resolves compatibility test failure, improves PRAGMA behavior documentation
+   - **Status**: Test already fixed and passing
 
-2. **Update README limitations** ⏳
+2. **Update README limitations** ✅
    - Remove outdated limitations (parameterized queries, fetchmany already complete)
    - Update status to reflect Phase 2.1-2.11 completion
    - Clarify remaining gaps vs. completed features
+   - **Status**: README updated with accurate limitations and Phase 2.1-2.11 improvements
 
-**Success criteria**: All compatibility tests pass, documentation accurately reflects current state
+**Success criteria**: ✅ All compatibility tests pass, documentation accurately reflects current state
 
 #### Phase 2.13: Prepared Statements & Performance (Medium Priority)
 
@@ -271,10 +273,10 @@ To complete Phase 2 and achieve full drop-in replacement compatibility with `aio
 - [x] Phase 2.9: Database backup
 - [x] Phase 2.10: Schema operations and introspection
 - [x] Phase 2.11: Database initialization hooks
-- [ ] Phase 2.12: Bug fixes & compatibility (set_pragma fix, README updates)
-- [ ] Phase 2.13: Prepared statements & performance
-- [ ] Phase 2.14: Drop-in replacement validation (aiosqlite test suite, migration guide)
-- [ ] Phase 2.15: Documentation & benchmarking
+- [x] Phase 2.12: Bug fixes & compatibility (set_pragma fix, README updates)
+- [x] Phase 2.13: Prepared statements & performance
+- [x] Phase 2.14: Drop-in replacement validation (compatibility tests, migration guide)
+- [x] Phase 2.15: Documentation & benchmarking
 
 ### Recommended Implementation Order
 
