@@ -73,8 +73,11 @@ jobs:
     - name: Run tests
       shell: bash
       run: |
+        # Change to a temp directory to avoid importing from source
+        # On Windows, create temp dir in workspace to avoid cross-drive path issues with pytest-xdist
         if [ "${{ runner.os }}" == "Windows" ]; then
-          cd $TEMP
+          mkdir -p ${{ github.workspace }}/.test-temp
+          cd ${{ github.workspace }}/.test-temp
         else
           cd /tmp
         fi
