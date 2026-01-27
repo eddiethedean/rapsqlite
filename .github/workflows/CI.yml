@@ -72,12 +72,13 @@ jobs:
 
     - name: Run tests
       shell: bash
-      working-directory: ${{ github.workspace }}
       run: |
         # Change to a temp directory to avoid importing from source
-        # On Windows, use working-directory instead of cd to avoid path issues
+        # On Windows, convert backslashes to forward slashes for bash compatibility
         if [ "${{ runner.os }}" == "Windows" ]; then
-          # On Windows, run from workspace (set via working-directory) using relative paths
+          # On Windows, convert workspace path and cd to it, then use relative paths
+          WORKSPACE=$(echo "${{ github.workspace }}" | sed 's|\\|/|g')
+          cd "$WORKSPACE"
           python -m pytest tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:coverage.xml -n auto
         else
           cd /tmp
