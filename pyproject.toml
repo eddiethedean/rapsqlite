@@ -41,6 +41,43 @@ features = ["pyo3/extension-module"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "edge_case: Edge case tests",
+    "concurrency: Concurrency tests",
+    "stress: Stress/load tests",
+    "performance: Performance tests",
+    "property: Property-based tests",
+    "slow: Slow-running tests",
+]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["rapsqlite"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/_backup_helper.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+precision = 2
+show_missing = true
+skip_covered = false
+
+[tool.coverage.html]
+directory = "htmlcov"
 
 [tool.mypy]
 python_version = "3.9"

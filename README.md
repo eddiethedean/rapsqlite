@@ -121,6 +121,7 @@ async def main():
         await conn.execute("INSERT INTO test (value) VALUES ('hello')")
         rows = await conn.fetch_all("SELECT * FROM test")
         print(rows)
+        # Output: [[1, 'hello']]
 
 asyncio.run(main())
 ```
@@ -143,6 +144,7 @@ async def main():
             await conn.execute("UPDATE accounts SET balance = balance + 100 WHERE id = 2")
             await conn.commit()
             print("Transaction committed")
+            # Output: Transaction committed
         except Exception:
             await conn.rollback()
             print("Transaction rolled back")
@@ -170,7 +172,12 @@ async def main():
         row = await cursor.fetchone()
         print(row)  # Output: [1, 'item1']
         
-        # Fetch all rows
+        # Fetch all remaining rows (after fetchone, only remaining rows are returned)
+        rows = await cursor.fetchall()
+        print(rows)  # Output: [[2, 'item2']]
+        
+        # Execute a fresh query to fetch all rows
+        await cursor.execute("SELECT * FROM items")
         rows = await cursor.fetchall()
         print(rows)  # Output: [[1, 'item1'], [2, 'item2']]
         
@@ -202,6 +209,7 @@ async def main():
         # Fetch all results
         rows = await conn.fetch_all("SELECT * FROM data")
         print(f"Inserted {len(rows)} rows")
+        # Output: Inserted 100 rows
 
 asyncio.run(main())
 ```
@@ -222,6 +230,7 @@ async def main():
             await conn.execute("INSERT INTO users (email) VALUES ('alice@example.com')")
         except IntegrityError as e:
             print(f"Integrity constraint violation: {e}")
+            # Output: Integrity constraint violation: Failed to execute query on database ...: error returned from database: (code: 2067) UNIQUE constraint failed: users.email
 
 asyncio.run(main())
 ```
@@ -305,13 +314,8 @@ async def main():
         
         # Get comprehensive schema
         schema = await conn.get_schema(table_name="posts")
-        print(schema)
-        # Output: {
-        #   'table_name': 'posts',
-        #   'columns': [...],
-        #   'indexes': [...],
-        #   'foreign_keys': [...]
-        # }
+        print(list(schema.keys()))
+        # Output: ['columns', 'indexes', 'foreign_keys', 'table_name']
 
 asyncio.run(main())
 ```
@@ -516,7 +520,7 @@ Get list of table names in the database.
 **Example:**
 ```python
 tables = await conn.get_tables()
-# Output: ['users', 'posts', 'comments']
+# Output: ['comments', 'posts', 'users']  # Tables are returned in alphabetical order
 
 user_table = await conn.get_tables(name="users")
 # Output: ['users']
@@ -613,7 +617,7 @@ schema = await conn.get_schema(table_name="users")
 
 # Get all tables
 all_schema = await conn.get_schema()
-# Output: {'tables': [{'name': 'users'}, {'name': 'posts'}]}
+# Output: {'tables': [{'name': 'posts'}, {'name': 'users'}]}  # Tables in alphabetical order
 ```
 
 ### Cursor Methods

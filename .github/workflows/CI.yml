@@ -46,7 +46,7 @@ jobs:
 
     - name: Install test dependencies
       shell: bash
-      run: pip install pytest pytest-asyncio
+      run: pip install pytest pytest-asyncio pytest-cov pytest-xdist hypothesis
 
     - name: Test package import
       shell: bash
@@ -55,7 +55,16 @@ jobs:
 
     - name: Run tests
       shell: bash
-      run: python -m pytest tests/test_rapsqlite.py -v
+      run: python -m pytest tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml -n auto
+
+    - name: Upload coverage to Codecov
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
 
   lint:
     name: Lint

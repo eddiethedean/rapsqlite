@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Note: v1.0.0 release details will be added after Phase 3 completion._
 
-## [0.2.0] - 2026-01-26
+## [0.2.0] - 2026-01-26 (Updated 2026-01-27)
 
 ### Added - Phase 2.1: Parameterized Queries
 
@@ -226,6 +226,93 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - **`tests/test_row_factory.py`** — 18 tests for row factory functionality
 - **345 total tests passing** (7 skipped)
 
+### Added - Test Infrastructure & Comprehensive Test Suite (2026-01-27)
+
+- **Shared test infrastructure** (`tests/conftest.py`)
+  - Centralized `test_db` fixture for temporary database files
+  - `test_db_memory` fixture for in-memory databases
+  - `cleanup_db()` helper function for database cleanup
+  - Pytest marker registration for test categorization
+- **Test organization improvements**
+  - Added pytest markers: `unit`, `integration`, `edge_case`, `concurrency`, `stress`, `performance`, `property`, `slow`
+  - Enhanced test categorization and filtering capabilities
+- **Edge case tests** (`tests/test_edge_cases.py`) — 24 comprehensive tests covering:
+  - Connection pool edge cases (exhaustion, timeouts, zero/one/large sizes)
+  - Transaction edge cases (nested transactions, closed connections, concurrent transactions)
+  - Parameter and query edge cases (empty params, large params >16, SQL injection attempts, unicode, very long queries, special characters)
+  - Connection lifecycle edge cases (operations on closed connections, multiple close calls)
+  - Row factory and type conversion edge cases (invalid factories, very large integers, NaN/infinity floats, empty/large BLOBs, NULL handling)
+- **Error condition tests** (`tests/test_error_conditions.py`) — 15 comprehensive tests covering:
+  - Database file errors (creation, invalid paths)
+  - SQL syntax errors and malformed queries
+  - Table and column not found errors
+  - Constraint violations (unique, NOT NULL, foreign key)
+  - Missing parameters and invalid parameter types
+  - Transaction errors (rollback/commit without transaction)
+  - Cursor errors on closed connections
+- **Concurrency tests** (`tests/test_concurrency.py`) — 8 comprehensive tests covering:
+  - Concurrent read operations (multiple simultaneous readers)
+  - Concurrent write operations (sequential execution due to SQLite limitations)
+  - Concurrent transactions
+  - Concurrent pool operations
+  - Race conditions in connection acquisition
+  - Database locked error handling
+  - Concurrent fetch operations
+  - Concurrent execute_many operations
+- **Stress tests** (`tests/test_stress.py`) — 8 comprehensive tests covering:
+  - High concurrency scenarios (100+ concurrent operations)
+  - Many small operations vs few large operations
+  - Large result sets (10K+ rows)
+  - Connection pool under heavy load
+  - Memory leak detection (repeated operations with garbage collection)
+  - Long-running transactions
+  - Repeated prepared statement usage (cache effectiveness)
+  - Concurrent connections stress testing
+- **Property-based tests** (`tests/test_properties.py`) — 7 Hypothesis-based property tests covering:
+  - Parameter round-trip consistency (insert → select for all types)
+  - Multiple parameters round-trip
+  - Transaction atomicity properties
+  - Pool size invariants
+  - Text, integer, and BLOB round-trip properties
+- **Integration tests** (`tests/test_integration.py`) — 8 comprehensive tests covering:
+  - Web framework usage patterns (FastAPI/aiohttp-style request-scoped connections)
+  - ORM-like usage patterns
+  - Batch processing patterns
+  - Transaction rollback patterns for error handling
+  - Connection pooling patterns for high-throughput scenarios
+  - Schema migration patterns
+  - Row factory integration in real-world usage
+  - Cursor iteration patterns
+- **Performance tests** (`tests/test_performance.py`) — 6 performance regression tests covering:
+  - Query execution time benchmarks
+  - Connection pool performance
+  - Prepared statement cache effectiveness
+  - Execute_many performance
+  - Large result set performance
+  - Transaction performance
+- **Test coverage and CI improvements**
+  - Added `pytest-cov` configuration in `pyproject.toml` with coverage thresholds
+  - Enhanced CI workflow to run full test suite with coverage reporting
+  - Added parallel test execution in CI using `pytest-xdist`
+  - Added Codecov integration for coverage tracking
+  - Coverage configuration excludes test files and sets precision to 2 decimal places
+- **Test documentation**
+  - Created `tests/README.md` with comprehensive testing documentation:
+    - Test organization and file structure
+    - Running tests (all, by category, with coverage)
+    - Test fixtures and markers
+    - Writing new tests guidelines
+    - Best practices and debugging tips
+  - Created `CONTRIBUTING.md` with contribution guidelines:
+    - Development setup instructions
+    - Code style and formatting guidelines
+    - Testing guidelines and best practices
+    - Commit message conventions
+    - Pull request process
+- **432 total tests passing** (6 skipped) — Increased from 345 tests
+  - 76 new tests added across 8 new test files
+  - Comprehensive coverage of edge cases, error conditions, concurrency, stress scenarios, property-based testing, integration patterns, and performance regression
+
 ### Fixed
 
 - Fixed `create_function` argument unpacking (functions now receive individual arguments, not tuples)
@@ -308,7 +395,7 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - Updated date to 2026-01-26
 - Enhanced backup error messages with SQLite error codes and diagnostic information
 - Improved documentation for backup functionality with clear limitations and workarounds
-- Updated test suite count from 276 to 345+ passing tests (36 new init_hook tests, deadlock fix validation, prepared statement tests)
+- Updated test suite count from 276 to 432 passing tests (36 new init_hook tests, deadlock fix validation, prepared statement tests, 76 new comprehensive test suite tests)
 - **Major aiosqlite compatibility improvements** — Implemented all high-priority compatibility features, increasing compatibility from ~85% to ~95%
 - Updated compatibility analysis and migration guide to reflect new features
 - **Phase 2 Complete** — All phases 2.1-2.15 now complete (100% of Phase 2)

@@ -17,6 +17,7 @@ Example:
                 await conn.execute("INSERT INTO test (value) VALUES ('hello')")
                 rows = await conn.fetch_all("SELECT * FROM test")
                 print(rows)
+                # Output: [[1, 'hello']]
 
         asyncio.run(main())
 
@@ -28,8 +29,10 @@ Example:
         async def main():
             async with connect("example.db") as conn:
                 await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
+                await conn.execute("INSERT INTO test (value) VALUES ('hello')")
                 rows = await conn.fetch_all("SELECT * FROM test")
                 print(rows)
+                # Output: [[1, 'hello']]
 
         asyncio.run(main())
 
@@ -122,13 +125,14 @@ def connect(path: str, *, pragmas: Any = None, **kwargs: Any) -> Connection:
         OperationalError: If the database connection cannot be established
             (e.g., permission denied, disk full, etc.)
 
-    Example:
+        Example:
         Basic usage::
 
             async with connect("example.db") as conn:
                 await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
                 await conn.execute("INSERT INTO test DEFAULT VALUES")
                 rows = await conn.fetch_all("SELECT * FROM test")
+                # rows = [[1]]
 
         In-memory database::
 
