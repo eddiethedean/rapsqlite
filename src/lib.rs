@@ -80,6 +80,17 @@ use libsqlite3_sys::{
 };
 use std::ffi::{CStr, CString};
 
+// Helper function to work around Rust version differences in CStr::from_ptr
+// The signature of CStr::from_ptr varies by Rust version and platform
+#[inline]
+unsafe fn cstr_from_i8_ptr(ptr: *const i8) -> &'static CStr {
+    // On some platforms/versions, CStr::from_ptr expects *const i8 (which is what we have)
+    // On others, it expects *const u8. We use a transmute to work around this.
+    // This is safe because both i8 and u8 have the same size and alignment,
+    // and we're just reading the same memory bytes.
+    CStr::from_ptr(std::mem::transmute(ptr))
+}
+
 // Exception classes matching aiosqlite API (ABI3 compatible)
 create_exception!(_rapsqlite, Error, PyException);
 create_exception!(_rapsqlite, Warning, PyException);
@@ -3420,7 +3431,7 @@ impl Connection {
                 // Handle error message if present
                 if result != SQLITE_OK {
                     let error_msg = if !errmsg.is_null() {
-                        let cstr = unsafe { CStr::from_ptr(errmsg) };
+                        let cstr = unsafe { cstr_from_i8_ptr(errmsg) };
                         let msg = cstr.to_string_lossy().to_string();
                         unsafe {
                             sqlite3_free(errmsg as *mut std::ffi::c_void);
@@ -3849,7 +3860,7 @@ impl Connection {
                         // Extract the SQL string from x
                         // For SQLITE_TRACE_STMT, x points to the SQL text
                         let sql_cstr = x as *const i8;
-                        let sql_str = match std::ffi::CStr::from_ptr(sql_cstr).to_str() {
+                        let sql_str = match unsafe { cstr_from_i8_ptr(sql_cstr) }.to_str() {
                             Ok(s) => s.to_string(),
                             Err(_) => return 0, // Invalid UTF-8, skip
                         };
@@ -4033,7 +4044,7 @@ impl Connection {
                         let arg1_str = if arg1.is_null() {
                             None
                         } else {
-                            std::ffi::CStr::from_ptr(arg1)
+                            unsafe { cstr_from_i8_ptr(arg1) }
                                 .to_str()
                                 .ok()
                                 .map(|s| s.to_string())
@@ -4041,7 +4052,7 @@ impl Connection {
                         let arg2_str = if arg2.is_null() {
                             None
                         } else {
-                            std::ffi::CStr::from_ptr(arg2)
+                            unsafe { cstr_from_i8_ptr(arg2) }
                                 .to_str()
                                 .ok()
                                 .map(|s| s.to_string())
@@ -4049,7 +4060,7 @@ impl Connection {
                         let arg3_str = if arg3.is_null() {
                             None
                         } else {
-                            std::ffi::CStr::from_ptr(arg3)
+                            unsafe { cstr_from_i8_ptr(arg3) }
                                 .to_str()
                                 .ok()
                                 .map(|s| s.to_string())
@@ -4057,7 +4068,7 @@ impl Connection {
                         let arg4_str = if arg4.is_null() {
                             None
                         } else {
-                            std::ffi::CStr::from_ptr(arg4)
+                            unsafe { cstr_from_i8_ptr(arg4) }
                                 .to_str()
                                 .ok()
                                 .map(|s| s.to_string())
@@ -6278,7 +6289,7 @@ impl Connection {
 
                 // Check SQLite library version compatibility
                 let source_libversion = unsafe {
-                    std::ffi::CStr::from_ptr(sqlite3_libversion())
+                    unsafe { cstr_from_i8_ptr(sqlite3_libversion()) }
                         .to_string_lossy()
                         .to_string()
                 };
@@ -6325,7 +6336,7 @@ impl Connection {
                         if msg_ptr.is_null() {
                             "Unknown error (null error message)".to_string()
                         } else {
-                            std::ffi::CStr::from_ptr(msg_ptr)
+                            cstr_from_i8_ptr(msg_ptr)
                                 .to_string_lossy()
                                 .to_string()
                         }
