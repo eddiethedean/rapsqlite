@@ -4042,34 +4042,22 @@ impl Connection {
                         let arg1_str = if arg1.is_null() {
                             None
                         } else {
-                            cstr_from_i8_ptr(arg1)
-                                .to_str()
-                                .ok()
-                                .map(|s| s.to_string())
+                            cstr_from_i8_ptr(arg1).to_str().ok().map(|s| s.to_string())
                         };
                         let arg2_str = if arg2.is_null() {
                             None
                         } else {
-                            cstr_from_i8_ptr(arg2)
-                                .to_str()
-                                .ok()
-                                .map(|s| s.to_string())
+                            cstr_from_i8_ptr(arg2).to_str().ok().map(|s| s.to_string())
                         };
                         let arg3_str = if arg3.is_null() {
                             None
                         } else {
-                            cstr_from_i8_ptr(arg3)
-                                .to_str()
-                                .ok()
-                                .map(|s| s.to_string())
+                            cstr_from_i8_ptr(arg3).to_str().ok().map(|s| s.to_string())
                         };
                         let arg4_str = if arg4.is_null() {
                             None
                         } else {
-                            cstr_from_i8_ptr(arg4)
-                                .to_str()
-                                .ok()
-                                .map(|s| s.to_string())
+                            cstr_from_i8_ptr(arg4).to_str().ok().map(|s| s.to_string())
                         };
 
                         // Get the Python callback from the context
@@ -6334,9 +6322,7 @@ impl Connection {
                         if msg_ptr.is_null() {
                             "Unknown error (null error message)".to_string()
                         } else {
-                            cstr_from_i8_ptr(msg_ptr)
-                                .to_string_lossy()
-                                .to_string()
+                            cstr_from_i8_ptr(msg_ptr).to_string_lossy().to_string()
                         }
                     };
 
