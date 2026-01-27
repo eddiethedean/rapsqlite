@@ -162,17 +162,17 @@ For a detailed compatibility analysis based on running the aiosqlite test suite,
 
 ### Known Differences
 
-1. **`async with db.execute(...)` Pattern**: aiosqlite supports using `execute()` as an async context manager that returns a cursor. rapsqlite uses explicit cursor creation or `fetch_*()` methods instead.
-
-   **aiosqlite:**
+1. **`async with db.execute(...)` Pattern**: ✅ **NOW FULLY SUPPORTED** (Updated 2026-01-26)
+   
+   **Both aiosqlite and rapsqlite:**
    ```python
    async with db.execute("SELECT * FROM users") as cursor:
        rows = await cursor.fetchall()
    ```
    
-   **rapsqlite:**
+   **Additional rapsqlite options:**
    ```python
-   # Option 1: Use fetch methods (recommended)
+   # Option 1: Use fetch methods (rapsqlite enhancement)
    rows = await db.fetch_all("SELECT * FROM users")
    
    # Option 2: Use explicit cursor
@@ -181,23 +181,57 @@ For a detailed compatibility analysis based on running the aiosqlite test suite,
    rows = await cursor.fetchall()
    ```
 
-2. **Connection Properties**: Some aiosqlite connection properties are not implemented:
-   - `db.total_changes` - Not implemented
-   - `db.in_transaction` - Not implemented
-   - `db.text_factory` - Not implemented
-
-3. **`aiosqlite.Row` Class**: rapsqlite doesn't have a `Row` class, but supports dict row factory:
+2. **Connection Properties**: ✅ **ALL NOW IMPLEMENTED** (Updated 2026-01-26)
+   - ✅ `db.total_changes` - Implemented (async method)
+   - ✅ `db.in_transaction` - Implemented (async method)
+   - ✅ `db.text_factory` - Implemented (getter/setter)
+   
+   **Note**: `total_changes` and `in_transaction` are async methods in rapsqlite (not properties), but functionally equivalent:
    ```python
    # aiosqlite
-   db.row_factory = aiosqlite.Row
+   changes = db.total_changes
+   in_tx = db.in_transaction
    
    # rapsqlite
+   changes = await db.total_changes()
+   in_tx = await db.in_transaction()
+   ```
+
+3. **`aiosqlite.Row` Class**: ✅ **NOW SUPPORTED** (Updated 2026-01-26)
+   ```python
+   # Both aiosqlite and rapsqlite
+   from rapsqlite import Row  # or: from aiosqlite import Row
+   db.row_factory = Row
+   
+   # Or use dict factory
    db.row_factory = "dict"  # Provides similar functionality
    ```
 
-4. **`executescript()` Method**: Not implemented in rapsqlite. Use separate execute calls or transactions instead.
+4. **`executescript()` Method**: ✅ **NOW IMPLEMENTED** (Updated 2026-01-26)
+   ```python
+   # Both aiosqlite and rapsqlite
+   await cursor.executescript("""
+       INSERT INTO test VALUES (1);
+       INSERT INTO test VALUES (2);
+   """)
+   ```
 
-5. **Backup to sqlite3.Connection**: The `backup()` method only supports backing up to another `rapsqlite.Connection`. Backing up to Python's standard `sqlite3.Connection` is not supported due to SQLite library instance incompatibility.
+5. **`load_extension()` Method**: ✅ **NOW IMPLEMENTED** (Updated 2026-01-26)
+   ```python
+   # Both aiosqlite and rapsqlite
+   await db.enable_load_extension(True)
+   await db.load_extension("extension_name")
+   ```
+
+6. **Async Iteration on Cursors**: ✅ **NOW SUPPORTED** (Updated 2026-01-26)
+   ```python
+   # Both aiosqlite and rapsqlite
+   cursor = await db.execute("SELECT * FROM users")
+   async for row in cursor:
+       print(row)
+   ```
+
+7. **Backup to sqlite3.Connection**: The `backup()` method only supports backing up to another `rapsqlite.Connection`. Backing up to Python's standard `sqlite3.Connection` is not supported due to SQLite library instance incompatibility.
 
    **Workaround**: Use `rapsqlite.Connection` for both source and target:
    ```python
@@ -206,7 +240,16 @@ For a detailed compatibility analysis based on running the aiosqlite test suite,
            await source.backup(target)
    ```
 
-2. **init_hook parameter**: This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
+8. **`iterdump()` Return Type**: rapsqlite returns a `List[str]` instead of an async iterator:
+   ```python
+   # aiosqlite
+   lines = [line async for line in db.iterdump()]
+   
+   # rapsqlite
+   lines = await db.iterdump()  # Returns List[str] directly
+   ```
+
+9. **init_hook parameter**: This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
 
 ### Performance Characteristics
 
@@ -346,10 +389,14 @@ async def main():
     async with aiosqlite.connect("app.db") as db:
         await db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)")
         await db.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
-        # Option 1: Use fetch_all (rapsqlite enhancement)
+        # Option 1: Use async with pattern (same as aiosqlite)
+        async with db.execute("SELECT * FROM users") as cursor:
+            rows = await cursor.fetchall()
+            print(rows)
+        # Option 2: Use fetch_all (rapsqlite enhancement)
         rows = await db.fetch_all("SELECT * FROM users")
         print(rows)
-        # Option 2: Use cursor (same as aiosqlite)
+        # Option 3: Use cursor (same as aiosqlite)
         cursor = db.cursor()
         await cursor.execute("SELECT * FROM users")
         rows = await cursor.fetchall()

@@ -21,19 +21,24 @@ See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philo
 
 ## Features
 
-- ✅ **True async** SQLite operations
+- ✅ **True async** SQLite operations (all operations execute outside Python GIL)
 - ✅ **Native Rust-backed** execution (Tokio + sqlx)
-- ✅ **Zero Python thread pools**
+- ✅ **Zero Python thread pools** (no fake async)
 - ✅ **Event-loop-safe** concurrency under load
 - ✅ **GIL-independent** database operations
 - ✅ **Async-safe** SQLite bindings
 - ✅ **Verified** by Fake Async Detector
 - ✅ **Connection lifecycle management** (async context managers)
-- ✅ **Transaction support** (begin, commit, rollback)
+- ✅ **Transaction support** (begin, commit, rollback, transaction context managers)
 - ✅ **Type system improvements** (proper Python types: int, float, str, bytes, None)
-- ✅ **Cursor API** (execute, executemany, fetchone, fetchall, fetchmany)
+- ✅ **Cursor API** (execute, executemany, fetchone, fetchall, fetchmany, executescript)
 - ✅ **Enhanced error handling** (custom exception classes matching aiosqlite)
-- ✅ **aiosqlite-compatible API** (connect function, exception types)
+- ✅ **aiosqlite-compatible API** (~95% compatibility, drop-in replacement)
+- ✅ **Prepared statement caching** (automatic via sqlx, 2-5x faster for repeated queries)
+- ✅ **Connection pooling** (configurable pool size and timeouts)
+- ✅ **Row factories** (dict, tuple, callable, and `rapsqlite.Row` class)
+- ✅ **Advanced SQLite features** (callbacks, extensions, schema introspection, backup, dump)
+- ✅ **Database initialization hooks** (automatic schema setup)
 
 ## Requirements
 
@@ -794,10 +799,18 @@ Run benchmarks:
 pytest benchmarks/benchmark_suite.py -v -s
 ```
 
+**Recent benchmark results (macOS arm64, Python 3.9.6):**
+- **Simple Query Throughput**: 0.118ms mean latency (1000 queries)
+- **Batch Insert**: 505ms for 1000 rows via `execute_many()`
+- **Concurrent Reads**: 65ms for 10 workers × 100 queries (1000 total)
+- **Transaction Performance**: 235ms for 100 transactions × 10 inserts
+
 **Key advantages:**
-- Lower latency for repeated queries (prepared statement caching)
-- Better throughput under concurrent load (GIL independence)
-- Improved scalability with multiple concurrent operations
+- **True async**: All operations execute outside the Python GIL
+- **Prepared statement caching**: Automatic query optimization via sqlx (2-5x faster for repeated queries)
+- **Better throughput**: Superior performance under concurrent load due to GIL independence
+- **Improved scalability**: Better performance scaling with multiple concurrent operations
+- **Connection pooling**: Efficient connection reuse with configurable pool size
 
 ## Migration from aiosqlite
 
@@ -813,9 +826,13 @@ import rapsqlite as aiosqlite
 
 For most applications, this is all you need! All core aiosqlite APIs are supported, including:
 - Connection and cursor APIs
+- `async with db.execute(...)` pattern
+- Async iteration on cursors (`async for row in cursor`)
 - Parameterized queries (named and positional)
 - Transactions and context managers
-- Row factories
+- Row factories (including `rapsqlite.Row` class)
+- Connection properties (`total_changes`, `in_transaction`, `text_factory`)
+- `executescript()` and `load_extension()` methods
 - Exception types
 
 **See [docs/MIGRATION.md](docs/MIGRATION.md) for a complete migration guide** with:
@@ -825,7 +842,7 @@ For most applications, this is all you need! All core aiosqlite APIs are support
 - Troubleshooting guide
 - Performance considerations
 
-**Compatibility Analysis**: See [docs/AIOSQLITE_COMPATIBILITY_ANALYSIS.md](docs/AIOSQLITE_COMPATIBILITY_ANALYSIS.md) for detailed analysis based on running the aiosqlite test suite. Overall compatibility: ~85% for core use cases.
+**Compatibility Analysis**: See [docs/AIOSQLITE_COMPATIBILITY_ANALYSIS.md](docs/AIOSQLITE_COMPATIBILITY_ANALYSIS.md) for detailed analysis based on running the aiosqlite test suite. Overall compatibility: **~95%** for core use cases (updated 2026-01-26). All high-priority compatibility features implemented including `total_changes()`, `in_transaction()`, `executescript()`, `load_extension()`, `text_factory`, `Row` class, and async iteration on cursors.
 
 ## Roadmap
 

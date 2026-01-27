@@ -22,7 +22,18 @@ fn is_select_query(query: &str) -> bool {
 /// Normalize a SQL query by removing extra whitespace and standardizing formatting.
 /// This helps improve prepared statement cache hit rates by ensuring queries with
 /// different whitespace are treated as identical.
-/// Note: sqlx already caches prepared statements per connection internally.
+/// 
+/// **Prepared Statement Caching (Phase 2.13):**
+/// sqlx (the underlying database library) automatically caches prepared statements
+/// per connection. When the same query is executed multiple times on the same
+/// connection, sqlx reuses the prepared statement, providing significant performance
+/// benefits. This normalization function ensures that queries with only whitespace
+/// differences are treated as identical, maximizing cache hit rates.
+/// 
+/// The prepared statement cache is managed entirely by sqlx and does not require
+/// explicit configuration. Each connection in the pool maintains its own cache,
+/// and statements are automatically prepared on first use and reused for subsequent
+/// executions of the same query.
 fn normalize_query(query: &str) -> String {
     // Remove leading/trailing whitespace
     let trimmed = query.trim();
@@ -57,12 +68,13 @@ fn track_query_usage(query_cache: &Arc<StdMutex<HashMap<String, u64>>>, query: &
 use libsqlite3_sys::{
     sqlite3, sqlite3_backup, sqlite3_backup_finish, sqlite3_backup_init, sqlite3_backup_pagecount,
     sqlite3_backup_remaining, sqlite3_backup_step, sqlite3_context, sqlite3_create_function_v2,
-    sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg, sqlite3_get_autocommit,
-    sqlite3_libversion, sqlite3_progress_handler, sqlite3_result_null,
-    sqlite3_set_authorizer, sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_BUSY,
-    SQLITE_DENY, SQLITE_DONE, SQLITE_IGNORE, SQLITE_LOCKED, SQLITE_OK, SQLITE_TRACE_STMT,
+    sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg, sqlite3_free, sqlite3_get_autocommit,
+    sqlite3_libversion, sqlite3_load_extension, sqlite3_progress_handler, sqlite3_result_null,
+    sqlite3_set_authorizer, sqlite3_total_changes, sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_BUSY,
+    SQLITE_DENY, SQLITE_DONE, SQLITE_ERROR, SQLITE_IGNORE, SQLITE_LOCKED, SQLITE_OK, SQLITE_TRACE_STMT,
     SQLITE_UTF8,
 };
+use std::ffi::{CStr, CString};
 
 // Exception classes matching aiosqlite API (ABI3 compatible)
 create_exception!(_rapsqlite, Error, PyException);
@@ -1224,6 +1236,122 @@ fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
     }
 }
 
+/// Row class for dict-like access to query results (similar to aiosqlite.Row).
+#[pyclass]
+struct RapRow {
+    columns: Vec<String>,
+    values: Vec<Py<PyAny>>,
+}
+
+#[pymethods]
+impl RapRow {
+    /// Create a new Row from column names and values.
+    #[new]
+    fn new(columns: Vec<String>, values: Vec<Py<PyAny>>) -> PyResult<Self> {
+        if columns.len() != values.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Columns and values must have the same length"
+            ));
+        }
+        Ok(RapRow { columns, values })
+    }
+
+    /// Get item by index or column name.
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Python::with_gil(|py| {
+            // Try integer index first
+            if let Ok(idx) = key.extract::<usize>() {
+                if idx >= self.values.len() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                        format!("Index {} out of range", idx)
+                    ));
+                }
+                return Ok(self.values[idx].clone_ref(py));
+            }
+            
+            // Try string column name
+            if let Ok(col_name) = key.extract::<String>() {
+                if let Some(idx) = self.columns.iter().position(|c| c == &col_name) {
+                    return Ok(self.values[idx].clone_ref(py));
+                }
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                    format!("Column '{}' not found", col_name)
+                ));
+            }
+            
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Key must be int or str"
+            ))
+        })
+    }
+
+    /// Get number of columns.
+    fn __len__(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Check if row contains a column.
+    fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        // Try string column name
+        if let Ok(col_name) = key.extract::<String>() {
+            return Ok(self.columns.contains(&col_name));
+        }
+        
+        // Try integer index
+        if let Ok(idx) = key.extract::<usize>() {
+            return Ok(idx < self.values.len());
+        }
+        
+        Ok(false)
+    }
+
+    /// Get column names.
+    fn keys(&self) -> PyResult<Vec<String>> {
+        Ok(self.columns.clone())
+    }
+
+    /// Get values.
+    fn values(&self) -> PyResult<Vec<Py<PyAny>>> {
+        Python::with_gil(|py| {
+            Ok(self.values.iter().map(|v| v.clone_ref(py)).collect())
+        })
+    }
+
+    /// Get items as (column_name, value) pairs.
+    fn items(&self) -> PyResult<Vec<(String, Py<PyAny>)>> {
+        Python::with_gil(|py| {
+            Ok(self.columns.iter().zip(self.values.iter())
+                .map(|(col, val)| (col.clone(), val.clone_ref(py)))
+                .collect())
+        })
+    }
+
+    /// Iterate over column names.
+    fn __iter__(&self) -> PyResult<Vec<String>> {
+        Ok(self.columns.clone())
+    }
+
+    /// String representation.
+    fn __str__(&self) -> PyResult<String> {
+        Python::with_gil(|py| {
+            let items: Vec<String> = self.columns.iter().zip(self.values.iter())
+                .map(|(col, val)| {
+                    let val_str = val.bind(py).repr()
+                        .map(|r| r.to_string())
+                        .unwrap_or_else(|_| "?".to_string());
+                    format!("{}={}", col, val_str)
+                })
+                .collect();
+            Ok(format!("Row({})", items.join(", ")))
+        })
+    }
+
+    /// Repr representation.
+    fn __repr__(&self) -> PyResult<String> {
+        self.__str__()
+    }
+}
+
 /// Python bindings for rapsqlite - True async SQLite.
 #[pymodule]
 fn _rapsqlite(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1231,6 +1359,7 @@ fn _rapsqlite(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Cursor>()?;
     m.add_class::<ExecuteContextManager>()?;
     m.add_class::<TransactionContextManager>()?;
+    m.add_class::<RapRow>()?;
 
     // Register exception classes (required for create_exception! to be accessible from Python)
     m.add("Error", py.get_type::<Error>())?;
@@ -1267,9 +1396,13 @@ struct Connection {
     pool_size: Arc<StdMutex<Option<usize>>>, // Configurable pool size
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>, // Connection timeout in seconds
     row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // None | "dict" | "tuple" | callable
+    text_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Callable(bytes) -> str, or None for default UTF-8
     // Prepared statement cache tracking (Phase 2.13)
-    // Tracks normalized query strings and usage counts for analytics/optimization
-    // Note: sqlx already caches prepared statements per connection internally
+    // Tracks normalized query strings and usage counts for analytics/optimization.
+    // This is separate from sqlx's internal prepared statement cache, which automatically
+    // caches prepared statements per connection. This field tracks query usage patterns
+    // for analytics and optimization insights, while sqlx handles the actual statement
+    // caching and reuse for performance.
     query_cache: Arc<StdMutex<HashMap<String, u64>>>, // normalized_query -> usage_count
     // Callback infrastructure (Phase 2.7)
     callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>, // Dedicated connection for callbacks
@@ -1325,6 +1458,7 @@ impl Connection {
             pool_size: Arc::new(StdMutex::new(None)),
             connection_timeout_secs: Arc::new(StdMutex::new(None)),
             row_factory: Arc::new(StdMutex::new(None)),
+            text_factory: Arc::new(StdMutex::new(None)),
             // Prepared statement cache tracking (Phase 2.13)
             query_cache: Arc::new(StdMutex::new(HashMap::new())),
             // Callback infrastructure (Phase 2.7)
@@ -1351,6 +1485,101 @@ impl Connection {
     #[setter(row_factory)]
     fn set_row_factory(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let mut guard = self.row_factory.lock().unwrap();
+        *guard = if value.is_none() {
+            None
+        } else {
+            Some(value.clone().unbind())
+        };
+        Ok(())
+    }
+
+    /// Get the total number of database changes since connection was opened.
+    /// This is a cumulative count of all INSERT, UPDATE, and DELETE operations.
+    fn total_changes(&self) -> PyResult<Py<PyAny>> {
+        let path = self.path.clone();
+        let pool = Arc::clone(&self.pool);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self.transaction_state);
+        let transaction_connection = Arc::clone(&self.transaction_connection);
+        
+        Python::attach(|py| {
+            let future = async move {
+                // Check if we're in a transaction - if so, use transaction connection
+                let in_transaction = {
+                    let trans_guard = transaction_state.lock().await;
+                    *trans_guard == TransactionState::Active
+                };
+                
+                let raw_db = if in_transaction {
+                    // Use transaction connection
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard.as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                    let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                    let mut handle = sqlite_conn.lock_handle().await
+                        .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                    handle.as_raw_handle().as_ptr()
+                } else {
+                    // Use callback connection
+                    ensure_callback_connection(
+                        &path,
+                        &pool,
+                        &callback_connection,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    ).await?;
+                    
+                    let mut conn_guard = callback_connection.lock().await;
+                    let conn = conn_guard.as_mut()
+                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                    let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                    let mut handle = sqlite_conn.lock_handle().await
+                        .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                    handle.as_raw_handle().as_ptr()
+                };
+                
+                // Call sqlite3_total_changes
+                let total = unsafe {
+                    sqlite3_total_changes(raw_db)
+                };
+                
+                Ok(total as u64)
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Check if connection is currently in a transaction.
+    fn in_transaction(&self) -> PyResult<Py<PyAny>> {
+        let transaction_state = Arc::clone(&self.transaction_state);
+        
+        Python::attach(|py| {
+            let future = async move {
+                let trans_guard = transaction_state.lock().await;
+                Ok(*trans_guard == TransactionState::Active)
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    #[getter(text_factory)]
+    fn text_factory(&self) -> PyResult<Py<PyAny>> {
+        Python::with_gil(|py| {
+            let guard = self.text_factory.lock().unwrap();
+            Ok(match guard.as_ref() {
+                Some(f) => f.clone_ref(py),
+                None => py.None(),
+            })
+        })
+    }
+
+    #[setter(text_factory)]
+    fn set_text_factory(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut guard = self.text_factory.lock().unwrap();
         *guard = if value.is_none() {
             None
         } else {
@@ -1580,13 +1809,19 @@ impl Connection {
         let connection_self = self_.into();
         Python::attach(|py| {
             let future = async move {
-                let mut trans_guard = transaction_state.lock().await;
-                if *trans_guard == TransactionState::Active {
-                    return Err(OperationalError::new_err("Transaction already in progress"));
-                }
+                // Check transaction state and release lock before calling init_hook
+                // This prevents deadlock when init_hook calls conn.execute() which needs to check transaction state
+                {
+                    let trans_guard = transaction_state.lock().await;
+                    if *trans_guard == TransactionState::Active {
+                        return Err(OperationalError::new_err("Transaction already in progress"));
+                    }
+                } // Lock released here
 
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                get_or_create_pool(
+                // Ensure pool exists before calling init_hook
+                // Note: If pool_size is 1, init_hook's execute() may compete with begin() for the connection
+                // This is handled by ensuring init_hook completes before begin() acquires connection
+                let pool_clone = get_or_create_pool(
                     &path,
                     &pool,
                     &pragmas,
@@ -1596,6 +1831,10 @@ impl Connection {
                 .await?;
 
                 // Execute init_hook if needed (before starting transaction)
+                // Init_hook operations will use pool connections
+                // If pool_size is 1, init_hook's execute() will get the connection, then release it
+                // before begin() tries to acquire it for the transaction
+                // Lock is released, so init_hook's execute() can check transaction state without deadlock
                 execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
                 // Check if callbacks are set - if so, use callback connection for transaction
@@ -1621,15 +1860,7 @@ impl Connection {
                     conn_guard.take()
                         .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?
                 } else {
-                    // Acquire a connection from the pool
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    )
-                    .await?;
+                    // Acquire a connection from the pool for the transaction
                     pool_clone.acquire().await
                         .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {}", e)))?
                 };
@@ -1653,7 +1884,11 @@ impl Connection {
                     *conn_guard = Some(conn);
                 }
 
-                *trans_guard = TransactionState::Active;
+                // Re-acquire lock to set transaction state
+                {
+                    let mut trans_guard = transaction_state.lock().await;
+                    *trans_guard = TransactionState::Active;
+                }
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -1881,8 +2116,16 @@ impl Connection {
             Py::new(py, cursor)
         })?;
         
-        // Wrap cursor in ExecuteContextManager and return it directly
-        // Execution will happen in __aenter__ for non-SELECT queries
+        // Create ExecuteContextManager and return it
+        // For `async with conn.execute(...)`: ExecuteContextManager works as context manager
+        // For `await conn.execute(...)`: We need to return the Future from __aenter__ directly
+        // Since we can't return different types, we return ExecuteContextManager and make
+        // __await__ call __aenter__ and return its result. But __aenter__ returns a Future,
+        // and __await__ needs to return an iterator. The Future from future_into_py is awaitable
+        // but not an iterator. So we return the Future and let Python handle it.
+        // Actually, Futures implement __await__ which returns an iterator, so returning
+        // the Future from __await__ should work. But Python is complaining.
+        // Let's try returning the ExecuteContextManager and see if we can make __await__ work.
         Python::with_gil(|py| -> PyResult<Py<PyAny>> {
             let ctx_mgr = ExecuteContextManager {
                 cursor: cursor.clone_ref(py),
@@ -2696,6 +2939,90 @@ impl Connection {
                 if result != 0 {
                     return Err(OperationalError::new_err(
                         format!("Failed to enable/disable load extension: SQLite error code {}", result)
+                    ));
+                }
+                
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Load a SQLite extension from the specified file.
+    /// Extension loading must be enabled first using enable_load_extension(true).
+    fn load_extension(&self, name: String) -> PyResult<Py<PyAny>> {
+        let path = self.path.clone();
+        let pool = Arc::clone(&self.pool);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        
+        Python::attach(|py| {
+            let future = async move {
+                // Check if extension loading is enabled
+                let enabled = {
+                    let guard = load_extension_enabled.lock().unwrap();
+                    *guard
+                };
+                
+                if !enabled {
+                    return Err(OperationalError::new_err(
+                        "Extension loading is not enabled. Call enable_load_extension(true) first."
+                    ));
+                }
+                
+                // Ensure callback connection exists
+                ensure_callback_connection(
+                    &path,
+                    &pool,
+                    &callback_connection,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                ).await?;
+                
+                // Get the callback connection and access raw handle
+                let mut conn_guard = callback_connection.lock().await;
+                let conn = conn_guard.as_mut()
+                    .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                
+                let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                let mut handle = sqlite_conn.lock_handle().await
+                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                let raw_db = handle.as_raw_handle().as_ptr();
+                
+                // Convert extension name to CString
+                let name_cstr = CString::new(name.clone())
+                    .map_err(|e| OperationalError::new_err(format!("Invalid extension name: {}", e)))?;
+                
+                // Call sqlite3_load_extension
+                // Use NULL for entry point - SQLite will try sqlite3_extension_init first
+                let mut errmsg: *mut i8 = std::ptr::null_mut();
+                let result = unsafe {
+                    sqlite3_load_extension(
+                        raw_db,
+                        name_cstr.as_ptr(),
+                        std::ptr::null(), // NULL entry point - SQLite will auto-detect
+                        &mut errmsg,
+                    )
+                };
+                
+                // Handle error message if present
+                if result != SQLITE_OK {
+                    let error_msg = if !errmsg.is_null() {
+                        let cstr = unsafe { CStr::from_ptr(errmsg) };
+                        let msg = cstr.to_string_lossy().to_string();
+                        unsafe {
+                            sqlite3_free(errmsg as *mut std::ffi::c_void);
+                        }
+                        msg
+                    } else {
+                        format!("SQLite error code {}", result)
+                    };
+                    return Err(OperationalError::new_err(
+                        format!("Failed to load extension '{}': {}", name, error_msg)
                     ));
                 }
                 
@@ -5536,6 +5863,8 @@ impl ExecuteContextManager {
                         .await?;
                     }
                     
+                    // Only call init_hook if not already called (avoid re-entry during init_hook execution)
+                    // This prevents deadlocks when init_hook calls conn.execute() which triggers __aenter__
                     execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
                     
                     let has_callbacks_flag = has_callbacks(
@@ -5596,7 +5925,18 @@ impl ExecuteContextManager {
                         *g == TransactionState::Active
                     };
                     
-                    if !in_transaction {
+                    // Check if init_hook is already being executed (to avoid deadlock)
+                    // If init_hook is already called, we're likely inside an init_hook execution
+                    // In this case, we should skip pool operations to avoid deadlock with begin()/transaction()
+                    let hook_already_called = {
+                        let guard = init_hook_called.lock().unwrap();
+                        *guard
+                    };
+                    
+                    // Only get/create pool if not in transaction and hook not already called
+                    // If hook is already called, we're inside init_hook execution and should
+                    // skip pool operations to avoid deadlock (begin()/transaction() will handle pool)
+                    if !in_transaction && !hook_already_called {
                         get_or_create_pool(
                             &path,
                             &pool,
@@ -5607,7 +5947,25 @@ impl ExecuteContextManager {
                         .await?;
                     }
                     
+                    // Only call init_hook if not already called (avoid re-entry during init_hook execution)
+                    // This prevents deadlocks when init_hook calls conn.execute() which triggers __aenter__
+                    // Note: If hook is already called, we skip calling it again (returns early)
                     execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
+                    
+                    // If hook was already called and we're not in transaction, we need to ensure pool exists
+                    // for the actual query execution (hook_already_called means we're inside hook execution,
+                    // but the query still needs a connection)
+                    if !in_transaction && hook_already_called {
+                        // Pool should already exist (created by begin()/transaction()), but ensure it does
+                        get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                    }
                 }
                 
                 Ok(cursor)
@@ -5631,11 +5989,21 @@ impl ExecuteContextManager {
         })
     }
 
-    // Note: __await__ is not implemented because future_into_py creates a Future
-    // which doesn't satisfy Python's __await__ protocol (needs iterator, not Future).
-    // Users should use `async with db.execute(...)` pattern instead.
-    // Full `await db.execute(...)` support would require implementing a custom iterator
-    // that wraps the coroutine, which is complex. For now, async with is the supported pattern.
+    /// Make ExecuteContextManager awaitable - when awaited, calls __aenter__ and returns cursor.
+    /// This allows both `await conn.execute(...)` and `async with conn.execute(...)` patterns.
+    /// Python's __await__ must return an iterator. The Future from __aenter__ has __await__ which
+    /// returns an iterator. So we call the Future's __await__ to get the iterator.
+    fn __await__(slf: PyRef<Self>) -> PyResult<Py<PyAny>> {
+        // Call __aenter__ to get the Future, then call its __await__ to get the iterator
+        let slf: Py<Self> = slf.into();
+        Python::with_gil(|py| {
+            let ctx_mgr = slf.bind(py);
+            // Call __aenter__ to get the Future
+            let future = ctx_mgr.call_method0("__aenter__")?;
+            // Call the Future's __await__ to get the iterator
+            future.call_method0("__await__").map(|bound| bound.unbind())
+        })
+    }
 }
 
 /// Transaction context manager returned by `Connection::transaction()`.
@@ -5671,10 +6039,15 @@ impl TransactionContextManager {
             let init_hook = Arc::clone(&slf.borrow(py).init_hook);
             let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
             let future = async move {
-                let mut trans_guard = transaction_state.lock().await;
-                if *trans_guard == TransactionState::Active {
-                    return Err(OperationalError::new_err("Transaction already in progress"));
-                }
+                // Check transaction state and release lock before calling init_hook
+                // This prevents deadlock when init_hook calls conn.execute() which needs to check transaction state
+                {
+                    let trans_guard = transaction_state.lock().await;
+                    if *trans_guard == TransactionState::Active {
+                        return Err(OperationalError::new_err("Transaction already in progress"));
+                    }
+                } // Lock released here
+
                 let pool_clone = get_or_create_pool(
                     &path,
                     &pool,
@@ -5686,6 +6059,7 @@ impl TransactionContextManager {
 
                 // Execute init_hook if needed (before starting transaction)
                 // Clone connection before passing to async function
+                // Lock is released, so init_hook's execute() can check transaction state without deadlock
                 let connection_for_hook = Python::with_gil(|py| connection.clone_ref(py));
                 execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook).await?;
                 let mut conn = pool_clone
@@ -5704,7 +6078,11 @@ impl TransactionContextManager {
                     let mut conn_guard = transaction_connection.lock().await;
                     *conn_guard = Some(conn);
                 }
-                *trans_guard = TransactionState::Active;
+                // Re-acquire lock to set transaction state
+                {
+                    let mut trans_guard = transaction_state.lock().await;
+                    *trans_guard = TransactionState::Active;
+                }
                 Ok(connection)
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -6017,8 +6395,14 @@ impl Cursor {
                 // Mark as executed to prevent re-execution
                 drop(results_guard);
                 *results.lock().unwrap() = Some(Vec::new());
-                return Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    Ok(PyList::empty(py).into())
+                // Return an awaitable future (empty list for non-SELECT queries)
+                return Python::attach(|py| -> PyResult<Py<PyAny>> {
+                    let future = async move {
+                        Python::attach(|py| -> PyResult<Py<PyAny>> {
+                            Ok(PyList::empty(py).into())
+                        })
+                    };
+                    future_into_py(py, future).map(|bound| bound.unbind())
                 });
             }
         }
@@ -6047,6 +6431,10 @@ impl Cursor {
                         // SELECT query - fetch results
                         // Use stored processed parameters if available (from Connection.execute()), otherwise re-process
                         let (processed_query, processed_params) = if let (Some(proc_query), Some(proc_params)) = (stored_proc_query, stored_proc_params) {
+                            // Use stored processed parameters - these are already in the correct order
+                            // and match the ? placeholders in processed_query
+                            // The parameters were processed by process_named_parameters() which ensures
+                            // correct order matching the ? placeholders
                             (proc_query, proc_params)
                         } else {
                             // Fallback: re-process parameters (for cursors created via cursor() method)
@@ -6088,6 +6476,7 @@ impl Cursor {
                         };
                         
                         // Priority: transaction > callbacks > pool
+                        // Check transaction state - must check inside async future to get current state
                         let in_transaction = {
                             let g = transaction_state.lock().await;
                             *g == TransactionState::Active
@@ -6102,6 +6491,7 @@ impl Cursor {
                         );
                         
                         let rows = if in_transaction {
+                            // Use transaction connection - it's already acquired and holds the transaction
                             let mut conn_guard = transaction_connection.lock().await;
                             let conn = conn_guard
                                 .as_mut()
@@ -6370,6 +6760,132 @@ impl Cursor {
                 Ok(false) // Return False to not suppress exceptions
             };
             future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Execute a script containing multiple SQL statements separated by semicolons.
+    fn executescript(&self, script: String) -> PyResult<Py<PyAny>> {
+        let path = self.connection_path.clone();
+        let pool = Arc::clone(&self.connection_pool);
+        let pragmas = Arc::clone(&self.connection_pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self.transaction_state);
+        let transaction_connection = Arc::clone(&self.transaction_connection);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
+        
+        Python::attach(|py| {
+            let future = async move {
+                // Parse script into individual statements
+                // Simple approach: split by semicolon, but be careful about semicolons in strings
+                // For now, use a simple split - more sophisticated parsing can be added later
+                let statements: Vec<String> = script
+                    .split(';')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                
+                if statements.is_empty() {
+                    return Ok(());
+                }
+                
+                // Check transaction state and callback flags
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+                
+                let has_callbacks_flag = has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+                
+                // Execute each statement sequentially
+                for statement in statements {
+                    if in_transaction {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard.as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        bind_and_execute_on_connection(&statement, &[], conn, &path).await?;
+                    } else if has_callbacks_flag {
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        ).await?;
+                        
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard.as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        bind_and_execute_on_connection(&statement, &[], conn, &path).await?;
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                        bind_and_execute(&statement, &[], &pool_clone, &path).await?;
+                    }
+                }
+                
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Async iterator entry point.
+    fn __aiter__(slf: PyRef<Self>) -> PyResult<Py<Self>> {
+        Ok(slf.into())
+    }
+
+    /// Async iterator next item.
+    fn __anext__(&self) -> PyResult<Py<PyAny>> {
+        let results = Arc::clone(&self.results);
+        let current_index = Arc::clone(&self.current_index);
+        
+        Python::attach(|py| {
+            // Get the row value while holding GIL
+            let row_opt = {
+                let results_guard = results.lock().unwrap();
+                let results_opt = results_guard.as_ref();
+                
+                if results_opt.is_none() {
+                    return Err(ProgrammingError::new_err("Cursor not executed. Call execute() first."));
+                }
+                
+                let results_vec = results_opt.unwrap();
+                let mut index_guard = current_index.lock().unwrap();
+                
+                if *index_guard >= results_vec.len() {
+                    // End of iteration - raise StopAsyncIteration
+                    return Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(""));
+                }
+                
+                let row = results_vec[*index_guard].clone_ref(py);
+                *index_guard += 1;
+                Some(row)
+            };
+            
+            if let Some(row) = row_opt {
+                Ok(row)
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(""))
+            }
         })
     }
 }

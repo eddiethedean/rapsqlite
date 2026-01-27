@@ -56,7 +56,10 @@ try:
         OperationalError,
         ProgrammingError,
         IntegrityError,
+        RapRow,
     )  # type: ignore[import-not-found]
+    # Export RapRow as Row for aiosqlite compatibility
+    Row = RapRow
 except ImportError:
     try:
         from rapsqlite._rapsqlite import (
@@ -68,7 +71,10 @@ except ImportError:
             OperationalError,
             ProgrammingError,
             IntegrityError,
+            RapRow,
         )
+        # Export RapRow as Row for aiosqlite compatibility
+        Row = RapRow
     except ImportError:
         raise ImportError(
             "Could not import _rapsqlite. Make sure rapsqlite is built with maturin."
@@ -78,6 +84,7 @@ __version__: str = "0.2.0"
 __all__: List[str] = [
     "Connection",
     "Cursor",
+    "Row",
     "connect",
     "Error",
     "Warning",

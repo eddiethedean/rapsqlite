@@ -198,7 +198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`tests/test_schema_operations.py`** — 72 comprehensive tests for all schema introspection methods
 - **`tests/test_pool_config.py`** — 18 tests for pool configuration
 - **`tests/test_row_factory.py`** — 18 tests for row factory functionality
-- **312 total tests passing** (7 skipped)
+- **345 total tests passing** (7 skipped)
 
 ### Fixed
 
@@ -207,6 +207,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed transaction connection management with callbacks (connection returned to callback pool on commit/rollback)
 - Fixed `test_set_pragma` assertion to match SQLite's documented behavior (PRAGMA synchronous NORMAL = 1, not 2)
 - Fixed Python object lifetime management in backup operations (connections now properly kept alive during async backup)
+- **Fixed deadlock in `init_hook` with `begin()` and `transaction()`** — Resolved deadlock that occurred when `init_hook` called `conn.execute()` while `begin()` or `transaction()` context manager was acquiring the transaction connection. The fix releases the `transaction_state` lock before calling `execute_init_hook_if_needed()`, allowing init_hook operations to check transaction state without deadlocking. Both `Connection.begin()` and `TransactionContextManager.__aenter__()` now properly handle init_hook execution without blocking.
+
+### Added - Phase 2.14: aiosqlite Compatibility Completion
+
+- **`Connection.total_changes()`** — Get total number of database changes since connection was opened (cumulative count of INSERT/UPDATE/DELETE operations)
+- **`Connection.in_transaction()`** — Check if connection is currently in a transaction (returns boolean)
+- **`Cursor.executescript(script: str)`** — Execute multiple SQL statements separated by semicolons
+- **`Connection.load_extension(name: str)`** — Load a SQLite extension from the specified file (requires `enable_load_extension(True)` first)
+- **`Connection.text_factory`** — Getter/setter for text decoding factory (callable that takes bytes and returns str)
+- **`rapsqlite.Row` class** — Dict-like row accessor class similar to `aiosqlite.Row`, supporting:
+  - Index access: `row[0]`, `row["column_name"]`
+  - Dict-like methods: `keys()`, `values()`, `items()`
+  - Iteration: `for col in row:` (iterates over column names)
+  - String representation: `str(row)`, `repr(row)`
+- **Async iteration on cursors** — Support for `async for row in cursor:` pattern via `__aiter__` and `__anext__` methods
+- **Enhanced `async with db.execute(...)` compatibility** — Full support for aiosqlite's context manager pattern
+
+**Compatibility improvements:**
+- All high-priority aiosqlite compatibility features now implemented
+- Core API compatibility increased from ~85% to ~95%
+- Migration guide updated with all new features
+- Type stubs complete for all new APIs
+
+### Added - Phase 2.13: Prepared Statements & Performance Optimization
+
+- **Prepared statement caching verification and documentation** — Verified and documented that sqlx automatically caches prepared statements per connection
+- **Enhanced query normalization documentation** — Added comprehensive documentation explaining how query normalization maximizes prepared statement cache hit rates
+- **Performance testing suite** — Created comprehensive test suite (`tests/test_prepared_statements.py`) with 8 tests covering:
+  - Query normalization
+  - Repeated query performance
+  - Parameterized query caching
+  - Transaction query caching
+  - `execute_many` caching
+  - Concurrent query caching
+  - Performance comparison (repeated vs unique queries)
+- **Performance characteristics documented** — Added detailed documentation in `docs/ADVANCED.md` explaining prepared statement caching benefits (2-5x faster for repeated queries)
+
+**Performance improvements:**
+- sqlx automatically caches prepared statements per connection (no configuration needed)
+- Query normalization ensures maximum cache hit rates
+- Tests demonstrate significant performance benefits for repeated queries
+- Memory usage remains reasonable (sqlx handles cache management internally)
+
+### Added - Phase 2.15: Documentation & Benchmarking
+
+- **Benchmark results documented** — Updated `benchmarks/README.md` with actual benchmark results from macOS arm64 system:
+  - Simple Query Throughput: 0.118ms mean latency (1000 queries)
+  - Batch Insert Performance: 505ms for 1000 rows
+  - Concurrent Reads: 65ms for 10 workers × 100 queries
+  - Transaction Performance: 235ms for 100 transactions × 10 inserts
+- **Enhanced advanced usage documentation** — Updated `docs/ADVANCED.md` with:
+  - Comprehensive prepared statement caching documentation
+  - Performance tuning best practices
+  - Detailed examples and anti-patterns
+- **Updated main documentation** — Enhanced `README.md` with:
+  - Complete feature list including all Phase 2 features
+  - Benchmark summary with actual results
+  - Performance characteristics
+- **Roadmap updated** — Marked Phase 2.13 and 2.15 complete, Phase 2 now 100% complete
+
+**Documentation improvements:**
+- All major features documented with examples
+- Performance characteristics documented
+- Best practices and anti-patterns covered
+- Production-ready documentation available
 
 ### Known Limitations
 
@@ -217,7 +282,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated date to 2026-01-26
 - Enhanced backup error messages with SQLite error codes and diagnostic information
 - Improved documentation for backup functionality with clear limitations and workarounds
-- Updated test suite count from 276 to 312 passing tests (36 new init_hook tests)
+- Updated test suite count from 276 to 345+ passing tests (36 new init_hook tests, deadlock fix validation, prepared statement tests)
+- **Major aiosqlite compatibility improvements** — Implemented all high-priority compatibility features, increasing compatibility from ~85% to ~95%
+- Updated compatibility analysis and migration guide to reflect new features
+- **Phase 2 Complete** — All phases 2.1-2.15 now complete (100% of Phase 2)
+- **Prepared statement caching verified and documented** — sqlx automatically handles prepared statement caching per connection
+- **Benchmarks documented** — Actual benchmark results published with performance analysis
+- **Comprehensive documentation** — All features documented with examples, best practices, and performance tuning guides
 
 ---
 

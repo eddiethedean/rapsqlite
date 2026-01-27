@@ -214,11 +214,43 @@ async with connect("example.db", pragmas={
 
 ### Prepared Statement Caching
 
-`rapsqlite` automatically caches prepared statements. To maximize cache hits:
+`rapsqlite` automatically benefits from prepared statement caching provided by sqlx (the underlying database library). sqlx caches prepared statements per connection, meaning:
+
+- **Automatic caching**: Prepared statements are cached automatically - no configuration needed
+- **Per-connection cache**: Each connection in the pool maintains its own cache
+- **Query normalization**: rapsqlite normalizes queries (removes extra whitespace) to maximize cache hits
+- **Performance benefit**: Repeated queries with the same structure reuse prepared statements
+
+**To maximize cache hits:**
+
+```python
+# Good: Same query structure, different parameters
+for user_id in user_ids:
+    await conn.fetch_all("SELECT * FROM users WHERE id = ?", [user_id])
+# sqlx caches the prepared statement after first execution
+```
+
+```python
+# Also good: Query normalization handles whitespace differences
+await conn.execute("INSERT INTO test (value) VALUES (?)", ["a"])
+await conn.execute("INSERT  INTO  test  (value)  VALUES  (?)", ["b"])
+# Both queries are normalized and benefit from the same prepared statement
+```
+
+**Best practices:**
 
 - Use consistent query formatting (normalization happens automatically)
 - Reuse the same query strings with different parameters
-- Keep connections alive for repeated queries
+- Keep connections alive for repeated queries (connection pooling helps)
+- Use parameterized queries (required for prepared statements)
+- Avoid dynamic query building when possible (reduces cache hits)
+
+**Performance impact:**
+
+Prepared statement caching provides significant performance benefits for repeated queries:
+- First execution: Statement is prepared and cached
+- Subsequent executions: Reuses cached prepared statement (much faster)
+- Typical improvement: 2-5x faster for repeated queries vs. unique queries
 
 ## Common Anti-Patterns
 

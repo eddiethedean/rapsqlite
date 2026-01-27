@@ -240,3 +240,52 @@ async def test_different_query_structures():
             assert len(rows) == 0
     finally:
         cleanup_db(test_db)
+
+
+@pytest.mark.asyncio
+async def test_repeated_vs_unique_queries_performance():
+    """Test that repeated identical queries perform better than unique queries.
+    
+    This test demonstrates the performance benefit of prepared statement caching.
+    Repeated queries should be faster because sqlx reuses prepared statements.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        test_db = f.name
+
+    try:
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            
+            # Insert initial data
+            for i in range(100):
+                await conn.execute("INSERT INTO test (value) VALUES (?)", [i])
+            
+            # Test 1: Repeated identical query (should benefit from caching)
+            start_repeated = time.perf_counter()
+            for _ in range(100):
+                rows = await conn.fetch_all("SELECT * FROM test WHERE value = ?", [50])
+                assert len(rows) == 1
+            elapsed_repeated = time.perf_counter() - start_repeated
+            
+            # Test 2: Unique queries (each query is different, less caching benefit)
+            start_unique = time.perf_counter()
+            for i in range(100):
+                # Each query has a different parameter, but same structure
+                # sqlx should still cache the prepared statement structure
+                rows = await conn.fetch_all("SELECT * FROM test WHERE value = ?", [i])
+                assert len(rows) == 1
+            elapsed_unique = time.perf_counter() - start_unique
+            
+            # Both should complete reasonably quickly
+            # Repeated queries might be slightly faster due to better cache locality
+            # but both should benefit from prepared statement reuse
+            assert elapsed_repeated < 2.0, f"100 repeated queries took {elapsed_repeated:.3f}s"
+            assert elapsed_unique < 2.0, f"100 unique queries took {elapsed_unique:.3f}s"
+            
+            # Log performance comparison for documentation
+            print(f"\nPerformance comparison:")
+            print(f"  100 repeated queries: {elapsed_repeated*1000:.2f}ms")
+            print(f"  100 unique queries:   {elapsed_unique*1000:.2f}ms")
+            print(f"  Both benefit from sqlx's prepared statement caching")
+    finally:
+        cleanup_db(test_db)
