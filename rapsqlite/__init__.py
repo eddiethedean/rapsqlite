@@ -58,6 +58,7 @@ try:
         IntegrityError,
         RapRow,
     )  # type: ignore[import-not-found]
+
     # Export RapRow as Row for aiosqlite compatibility
     Row = RapRow
 except ImportError:
@@ -73,6 +74,7 @@ except ImportError:
             IntegrityError,
             RapRow,
         )
+
         # Export RapRow as Row for aiosqlite compatibility
         Row = RapRow
     except ImportError:
