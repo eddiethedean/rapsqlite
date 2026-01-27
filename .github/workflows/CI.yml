@@ -74,11 +74,11 @@ jobs:
       shell: bash
       run: |
         # Change to a temp directory to avoid importing from source
-        # On Windows, don't change directory to avoid pytest-xdist path resolution issues
-        # Instead, we rely on the installed package being in the Python path
+        # On Windows, run from workspace directory using relative paths for pytest-xdist compatibility
         if [ "${{ runner.os }}" == "Windows" ]; then
-          # On Windows, run from workspace but ensure we use installed package
-          python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
+          # On Windows, cd to workspace and use relative path to tests
+          cd ${{ github.workspace }}
+          python -m pytest tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:coverage.xml -n auto
         else
           cd /tmp
           python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
