@@ -1,0 +1,441 @@
+=== Reproducing CI failure in Docker (Ubuntu + Python 3.11) ===
+
+Installing system dependencies...
+Installing Rust...
+Installing maturin...
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv
+
+[notice] A new release of pip is available: 24.0 -> 25.3
+[notice] To update, run: pip install --upgrade pip
+Building package...
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded atoi v2.0.0
+  Downloaded block-buffer v0.10.4
+  Downloaded crypto-common v0.1.7
+  Downloaded futures-core v0.3.31
+  Downloaded crc-catalog v2.4.0
+  Downloaded hex v0.4.3
+  Downloaded heck v0.5.0
+  Downloaded errno v0.3.14
+  Downloaded futures-macro v0.3.31
+  Downloaded cpufeatures v0.2.17
+  Downloaded cfg-if v1.0.4
+  Downloaded form_urlencoded v1.2.2
+  Downloaded crc v3.4.0
+  Downloaded sqlx-macros v0.8.6
+  Downloaded parking v2.2.1
+  Downloaded equivalent v1.0.2
+  Downloaded crossbeam-queue v0.3.12
+  Downloaded windows-targets v0.53.5
+  Downloaded futures-task v0.3.31
+  Downloaded generic-array v0.14.7
+  Downloaded memoffset v0.9.1
+  Downloaded scopeguard v1.2.0
+  Downloaded potential_utf v0.1.4
+  Downloaded percent-encoding v2.3.2
+  Downloaded pyo3-macros v0.27.2
+  Downloaded serde_urlencoded v0.7.1
+  Downloaded itoa v1.0.17
+  Downloaded zerofrom-derive v0.1.6
+  Downloaded windows-link v0.2.1
+  Downloaded utf8_iter v1.0.4
+  Downloaded yoke-derive v0.8.1
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded zerofrom v0.1.6
+  Downloaded idna_adapter v1.2.1
+  Downloaded pin-utils v0.1.0
+  Downloaded writeable v0.6.2
+  Downloaded quote v1.0.43
+  Downloaded futures-executor v0.3.31
+  Downloaded either v1.15.0
+  Downloaded displaydoc v0.2.5
+  Downloaded foldhash v0.1.5
+  Downloaded digest v0.10.7
+  Downloaded version_check v0.9.5
+  Downloaded unindent v0.2.4
+  Downloaded futures-channel v0.3.31
+  Downloaded slab v0.4.11
+  Downloaded lock_api v0.4.14
+  Downloaded wasi v0.11.1+wasi-snapshot-preview1
+  Downloaded zmij v1.0.12
+  Downloaded thiserror v2.0.17
+  Downloaded target-lexicon v0.13.4
+  Downloaded synstructure v0.13.2
+  Downloaded shlex v1.3.0
+  Downloaded redox_syscall v0.5.18
+  Downloaded tracing-attributes v0.1.31
+  Downloaded unicode-ident v1.0.22
+  Downloaded signal-hook-registry v1.4.8
+  Downloaded futures-io v0.3.31
+  Downloaded concurrent-queue v2.5.0
+  Downloaded tinystr v0.8.2
+  Downloaded futures-sink v0.3.31
+  Downloaded zerovec-derive v0.11.2
+  Downloaded yoke v0.8.1
+  Downloaded tokio-macros v2.6.0
+  Downloaded thiserror-impl v2.0.17
+  Downloaded dotenvy v0.15.7
+  Downloaded indoc v2.0.7
+  Downloaded tokio-stream v0.1.18
+  Downloaded pin-project-lite v0.2.16
+  Downloaded sqlx-macros-core v0.8.6
+  Downloaded autocfg v1.5.0
+  Downloaded rustversion v1.0.22
+  Downloaded pkg-config v0.3.32
+  Downloaded tracing-core v0.1.36
+  Downloaded sqlx-sqlite v0.8.6
+  Downloaded typenum v1.19.0
+  Downloaded zerotrie v0.2.3
+  Downloaded smallvec v1.15.1
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded bitflags v2.10.0
+  Downloaded sha2 v0.10.9
+  Downloaded event-listener v5.4.1
+  Downloaded parking_lot v0.12.5
+  Downloaded pyo3-build-config v0.27.2
+  Downloaded litemap v0.8.1
+  Downloaded hashlink v0.10.0
+  Downloaded find-msvc-tools v0.1.7
+  Downloaded futures v0.3.31
+  Downloaded url v2.5.8
+  Downloaded spin v0.9.8
+  Downloaded socket2 v0.6.1
+  Downloaded num-traits v0.2.19
+  Downloaded parking_lot_core v0.9.12
+  Downloaded ryu v1.0.22
+  Downloaded serde_core v1.0.228
+  Downloaded once_cell v1.21.3
+  Downloaded log v0.4.29
+  Downloaded serde_derive v1.0.228
+  Downloaded icu_properties v2.1.2
+  Downloaded flume v0.11.1
+  Downloaded proc-macro2 v1.0.105
+  Downloaded pyo3-async-runtimes v0.27.0
+  Downloaded allocator-api2 v0.2.21
+  Downloaded bytes v1.11.0
+  Downloaded zerovec v0.11.5
+  Downloaded icu_locale_core v2.1.1
+  Downloaded icu_provider v2.1.1
+  Downloaded base64 v0.22.1
+  Downloaded icu_normalizer_data v2.1.1
+  Downloaded icu_normalizer v2.1.1
+  Downloaded futures-intrusive v0.5.0
+  Downloaded memchr v2.7.6
+  Downloaded pyo3-ffi v0.27.2
+  Downloaded icu_collections v2.1.1
+  Downloaded serde v1.0.228
+  Downloaded pyo3-macros-backend v0.27.2
+  Downloaded indexmap v2.13.0
+  Downloaded mio v1.1.1
+  Downloaded cc v1.2.52
+  Downloaded sqlx-core v0.8.6
+  Downloaded hashbrown v0.16.1
+  Downloaded hashbrown v0.15.5
+  Downloaded idna v1.1.0
+  Downloaded vcpkg v0.2.15
+  Downloaded serde_json v1.0.149
+  Downloaded sqlx v0.8.6
+  Downloaded portable-atomic v1.13.0
+  Downloaded icu_properties_data v2.1.2
+  Downloaded futures-util v0.3.31
+  Downloaded syn v2.0.114
+  Downloaded libc v0.2.180
+  Downloaded pyo3 v0.27.2
+  Downloaded tracing v0.1.44
+  Downloaded libsqlite3-sys v0.30.1
+  Downloaded windows_aarch64_gnullvm v0.53.1
+  Downloaded windows_x86_64_gnullvm v0.53.1
+  Downloaded windows_x86_64_msvc v0.53.1
+  Downloaded windows_i686_gnullvm v0.53.1
+  Downloaded windows_aarch64_msvc v0.53.1
+  Downloaded tokio v1.49.0
+  Downloaded windows_x86_64_gnu v0.53.1
+  Downloaded windows_i686_msvc v0.53.1
+  Downloaded windows_i686_gnu v0.53.1
+  Downloaded windows-sys v0.61.2
+  Downloaded windows-sys v0.60.2
+📦 Including license file `LICENSE`
+🍹 Building a mixed python/rust project
+🔗 Found pyo3 bindings
+🐍 Found CPython 3.11 at /usr/local/bin/python3
+📡 Using build options features from pyproject.toml
+   Compiling proc-macro2 v1.0.105
+   Compiling quote v1.0.43
+   Compiling libc v0.2.180
+   Compiling target-lexicon v0.13.4
+   Compiling typenum v1.19.0
+   Compiling parking_lot_core v0.9.12
+   Compiling icu_properties_data v2.1.2
+   Compiling generic-array v0.14.7
+   Compiling icu_normalizer_data v2.1.1
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling thiserror v2.0.17
+   Compiling num-traits v0.2.19
+   Compiling memoffset v0.9.1
+   Compiling libsqlite3-sys v0.30.1
+   Compiling pyo3-build-config v0.27.2
+   Compiling concurrent-queue v2.5.0
+   Compiling syn v2.0.114
+   Compiling errno v0.3.14
+   Compiling mio v1.1.1
+   Compiling socket2 v0.6.1
+   Compiling signal-hook-registry v1.4.8
+   Compiling block-buffer v0.10.4
+   Compiling parking_lot v0.12.5
+   Compiling crypto-common v0.1.7
+   Compiling cpufeatures v0.2.17
+   Compiling digest v0.10.7
+   Compiling event-listener v5.4.1
+   Compiling sha2 v0.10.9
+   Compiling futures-intrusive v0.5.0
+   Compiling crossbeam-queue v0.3.12
+   Compiling atoi v2.0.0
+   Compiling pyo3-ffi v0.27.2
+   Compiling pyo3-macros-backend v0.27.2
+   Compiling pyo3 v0.27.2
+   Compiling synstructure v0.13.2
+   Compiling zerofrom-derive v0.1.6
+   Compiling yoke-derive v0.8.1
+   Compiling zerovec-derive v0.11.2
+   Compiling displaydoc v0.2.5
+   Compiling futures-macro v0.3.31
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.6.0
+   Compiling thiserror-impl v2.0.17
+   Compiling futures-util v0.3.31
+   Compiling tokio v1.49.0
+   Compiling tracing-attributes v0.1.31
+   Compiling pyo3-macros v0.27.2
+   Compiling zerofrom v0.1.6
+   Compiling yoke v0.8.1
+   Compiling zerovec v0.11.5
+   Compiling zerotrie v0.2.3
+   Compiling tinystr v0.8.2
+   Compiling potential_utf v0.1.4
+   Compiling icu_collections v2.1.1
+   Compiling icu_locale_core v2.1.1
+   Compiling futures-executor v0.3.31
+   Compiling futures v0.3.31
+   Compiling icu_provider v2.1.1
+   Compiling icu_properties v2.1.2
+   Compiling icu_normalizer v2.1.1
+   Compiling tracing v0.1.44
+   Compiling either v1.15.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling idna_adapter v1.2.1
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling tokio-stream v0.1.18
+   Compiling sqlx-core v0.8.6
+   Compiling pyo3-async-runtimes v0.27.0
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling rapsqlite v0.2.0 (/workspace)
+error[E0308]: mismatched types
+    --> src/lib.rs:3416:25
+     |
+3412 |                     sqlite3_load_extension(
+     |                     ---------------------- arguments to this function are incorrect
+...
+3416 |                         &mut errmsg,
+     |                         ^^^^^^^^^^^ expected `*mut *mut u8`, found `&mut *mut i8`
+     |
+     = note:    expected raw pointer `*mut *mut u8`
+             found mutable reference `&mut *mut i8`
+note: function defined here
+    --> /workspace/target/release/build/libsqlite3-sys-0b2a9f4ae50d3a95/out/bindgen.rs:1805:12
+     |
+1805 |     pub fn sqlite3_load_extension(
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/lib.rs:3423:60
+     |
+3423 |                         let cstr = unsafe { CStr::from_ptr(errmsg) };
+     |                                             -------------- ^^^^^^ expected `*const u8`, found `*mut i8`
+     |                                             |
+     |                                             arguments to this function are incorrect
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*mut i8`
+note: associated function defined here
+    --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/core/src/ffi/c_str.rs:253:25
+
+error[E0308]: mismatched types
+    --> src/lib.rs:3609:49
+     |
+3607 | ...                   libsqlite3_sys::sqlite3_result_error(
+     |                       ------------------------------------ arguments to this function are incorrect
+3608 | ...                       ctx,
+3609 | ...                       error_msg.as_ptr() as *const i8,
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*const u8`, found `*const i8`
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: function defined here
+    --> /workspace/target/release/build/libsqlite3-sys-0b2a9f4ae50d3a95/out/bindgen.rs:1576:12
+     |
+1576 |     pub fn sqlite3_result_error(
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/lib.rs:3673:53
+     |
+3671 | ...                   libsqlite3_sys::sqlite3_result_error(
+     |                       ------------------------------------ arguments to this function are incorrect
+3672 | ...                       ctx,
+3673 | ...                       error_msg.as_ptr() as *const i8,
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*const u8`, found `*const i8`
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: function defined here
+    --> /workspace/target/release/build/libsqlite3-sys-0b2a9f4ae50d3a95/out/bindgen.rs:1576:12
+     |
+1576 |     pub fn sqlite3_result_error(
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/lib.rs:3702:57
+     |
+3700 | ...                   libsqlite3_sys::sqlite3_result_error(
+     |                       ------------------------------------ arguments to this function are incorrect
+3701 | ...                       ctx,
+3702 | ...                       error_msg.as_ptr() as *const i8,
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*const u8`, found `*const i8`
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: function defined here
+    --> /workspace/target/release/build/libsqlite3-sys-0b2a9f4ae50d3a95/out/bindgen.rs:1576:12
+     |
+1576 |     pub fn sqlite3_result_error(
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/lib.rs:3722:53
+     |
+3720 | ...                   libsqlite3_sys::sqlite3_result_error(
+     |                       ------------------------------------ arguments to this function are incorrect
+3721 | ...                       ctx,
+3722 | ...                       error_msg.as_ptr() as *const i8,
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*const u8`, found `*const i8`
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: function defined here
+    --> /workspace/target/release/build/libsqlite3-sys-0b2a9f4ae50d3a95/out/bindgen.rs:1576:12
+     |
+1576 |     pub fn sqlite3_result_error(
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/lib.rs:3733:45
+     |
+3731 | ...                   libsqlite3_sys::sqlite3_result_error(
+     |                       ------------------------------------ arguments to this function are incorrect
+3732 | ...                       ctx,
+3733 | ...                       error_msg.as_ptr() as *const i8,
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*const u8`, found `*const i8`
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: function defined here
+    --> /workspace/target/release/build/libsqlite3-sys-0b2a9f4ae50d3a95/out/bindgen.rs:1576:12
+     |
+1576 |     pub fn sqlite3_result_error(
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/lib.rs:3852:70
+     |
+3852 |                         let sql_str = match std::ffi::CStr::from_ptr(sql_cstr).to_str() {
+     |                                             ------------------------ ^^^^^^^^ expected `*const u8`, found `*const i8`
+     |                                             |
+     |                                             arguments to this function are incorrect
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: associated function defined here
+    --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/core/src/ffi/c_str.rs:253:25
+
+error[E0308]: mismatched types
+    --> src/lib.rs:4133:34
+     |
+4133 | ...                   Some(authorizer_trampoline)
+     |                       ---- ^^^^^^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
+     |                       |
+     |                       arguments to this enum variant are incorrect
+     |
+     = note: expected fn pointer `unsafe extern "C" fn(_, _, *const u8, *const u8, *const u8, *const u8) -> _`
+                   found fn item `extern "C" fn(_, _, *const i8, *const i8, *const i8, *const i8) -> _ {authorizer_trampoline}`
+help: the type constructed contains `extern "C" fn(*mut c_void, i32, *const i8, *const i8, *const i8, *const i8) -> i32 {authorizer_trampoline}` due to the type of the argument passed
+    --> src/lib.rs:4133:29
+     |
+4133 | ...                   Some(authorizer_trampoline)
+     |                       ^^^^^---------------------^
+     |                            |
+     |                            this argument influences the type of `Some`
+note: tuple variant defined here
+    --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/core/src/option.rs:608:5
+
+error[E0308]: mismatched types
+    --> src/lib.rs:4036:54
+     |
+4036 | ...                   std::ffi::CStr::from_ptr(arg1)
+     |                       ------------------------ ^^^^ expected `*const u8`, found `*const i8`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: associated function defined here
+    --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/core/src/ffi/c_str.rs:253:25
+
+error[E0308]: mismatched types
+    --> src/lib.rs:4044:54
+     |
+4044 | ...                   std::ffi::CStr::from_ptr(arg2)
+     |                       ------------------------ ^^^^ expected `*const u8`, found `*const i8`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: associated function defined here
+    --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/core/src/ffi/c_str.rs:253:25
+
+error[E0308]: mismatched types
+    --> src/lib.rs:4052:54
+     |
+4052 | ...                   std::ffi::CStr::from_ptr(arg3)
+     |                       ------------------------ ^^^^ expected `*const u8`, found `*const i8`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: associated function defined here
+    --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/core/src/ffi/c_str.rs:253:25
+
+error[E0308]: mismatched types
+    --> src/lib.rs:4060:54
+     |
+4060 | ...                   std::ffi::CStr::from_ptr(arg4)
+     |                       ------------------------ ^^^^ expected `*const u8`, found `*const i8`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+     = note: expected raw pointer `*const u8`
+                found raw pointer `*const i8`
+note: associated function defined here
+    --> /rustc/254b59607d4417e9dffbc307138ae5c86280fe4c/library/core/src/ffi/c_str.rs:253:25
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `rapsqlite` (lib) due to 13 previous errors
+💥 maturin failed
+  Caused by: Failed to build a native library through cargo
+  Caused by: Cargo build finished with "exit status: 101": `env -u CARGO PYO3_BUILD_EXTENSION_MODULE="1" PYO3_ENVIRONMENT_SIGNATURE="cpython-3.11-64bit" PYO3_PYTHON="/usr/local/bin/python3" PYTHON_SYS_EXECUTABLE="/usr/local/bin/python3" "cargo" "rustc" "--profile" "release" "--features" "pyo3/extension-module" "--message-format" "json-render-diagnostics" "--manifest-path" "/workspace/Cargo.toml" "--lib" "--crate-type" "cdylib"`

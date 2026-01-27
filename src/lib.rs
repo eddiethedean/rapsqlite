@@ -84,11 +84,9 @@ use std::ffi::{CStr, CString};
 // The signature of CStr::from_ptr varies by Rust version and platform
 #[inline]
 unsafe fn cstr_from_i8_ptr(ptr: *const i8) -> &'static CStr {
-    // On some platforms/versions, CStr::from_ptr expects *const i8 (which is what we have)
-    // On others, it expects *const u8. We use a transmute to work around this.
-    // This is safe because both i8 and u8 have the same size and alignment,
-    // and we're just reading the same memory bytes.
-    CStr::from_ptr(std::mem::transmute(ptr))
+    // In Rust 1.93.0+, CStr::from_ptr accepts *const i8 directly
+    // This helper provides a consistent interface across Rust versions
+    CStr::from_ptr(ptr)
 }
 
 // Exception classes matching aiosqlite API (ABI3 compatible)
@@ -3860,7 +3858,7 @@ impl Connection {
                         // Extract the SQL string from x
                         // For SQLITE_TRACE_STMT, x points to the SQL text
                         let sql_cstr = x as *const i8;
-                        let sql_str = match unsafe { cstr_from_i8_ptr(sql_cstr) }.to_str() {
+                        let sql_str = match cstr_from_i8_ptr(sql_cstr).to_str() {
                             Ok(s) => s.to_string(),
                             Err(_) => return 0, // Invalid UTF-8, skip
                         };
@@ -4044,7 +4042,7 @@ impl Connection {
                         let arg1_str = if arg1.is_null() {
                             None
                         } else {
-                            unsafe { cstr_from_i8_ptr(arg1) }
+                            cstr_from_i8_ptr(arg1)
                                 .to_str()
                                 .ok()
                                 .map(|s| s.to_string())
@@ -4052,7 +4050,7 @@ impl Connection {
                         let arg2_str = if arg2.is_null() {
                             None
                         } else {
-                            unsafe { cstr_from_i8_ptr(arg2) }
+                            cstr_from_i8_ptr(arg2)
                                 .to_str()
                                 .ok()
                                 .map(|s| s.to_string())
@@ -4060,7 +4058,7 @@ impl Connection {
                         let arg3_str = if arg3.is_null() {
                             None
                         } else {
-                            unsafe { cstr_from_i8_ptr(arg3) }
+                            cstr_from_i8_ptr(arg3)
                                 .to_str()
                                 .ok()
                                 .map(|s| s.to_string())
@@ -4068,7 +4066,7 @@ impl Connection {
                         let arg4_str = if arg4.is_null() {
                             None
                         } else {
-                            unsafe { cstr_from_i8_ptr(arg4) }
+                            cstr_from_i8_ptr(arg4)
                                 .to_str()
                                 .ok()
                                 .map(|s| s.to_string())
@@ -6289,7 +6287,7 @@ impl Connection {
 
                 // Check SQLite library version compatibility
                 let source_libversion = unsafe {
-                    unsafe { cstr_from_i8_ptr(sqlite3_libversion()) }
+                    cstr_from_i8_ptr(sqlite3_libversion())
                         .to_string_lossy()
                         .to_string()
                 };
