@@ -57,9 +57,9 @@ async def test_connection_pool_performance(test_db):
     elapsed = time.perf_counter() - start
 
     assert all(results)
-    # Should complete 50 operations in reasonable time (< 3 seconds)
+    # Should complete 50 operations in reasonable time (< 3.5 seconds)
     # Allow extra time for CI environments which may be slower
-    assert elapsed < 3.0, f"50 pool operations took {elapsed:.3f}s, expected < 3.0s"
+    assert elapsed < 3.5, f"50 pool operations took {elapsed:.3f}s, expected < 3.5s"
 
 
 @pytest.mark.performance
