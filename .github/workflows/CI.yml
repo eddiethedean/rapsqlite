@@ -64,7 +64,9 @@ jobs:
 
     - name: Run tests
       shell: bash
-      run: python -m pytest tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml -n auto
+      run: |
+        cd /tmp
+        python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml -n auto
 
     - name: Upload coverage to Codecov
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
