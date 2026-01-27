@@ -74,14 +74,15 @@ jobs:
       shell: bash
       run: |
         # Change to a temp directory to avoid importing from source
-        # On Windows, create temp dir in workspace to avoid cross-drive path issues with pytest-xdist
+        # On Windows, don't change directory to avoid pytest-xdist path resolution issues
+        # Instead, we rely on the installed package being in the Python path
         if [ "${{ runner.os }}" == "Windows" ]; then
-          mkdir -p ${{ github.workspace }}/.test-temp
-          cd ${{ github.workspace }}/.test-temp
+          # On Windows, run from workspace but ensure we use installed package
+          python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
         else
           cd /tmp
+          python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
         fi
-        python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
 
     - name: Upload coverage to Codecov
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
