@@ -344,7 +344,7 @@ fn row_to_py_list<'py>(
 }
 
 /// Convert a SQLite row to Python using row_factory. factory None => list;
-/// "dict" => dict (column names as keys); "tuple" => tuple; else callable(row) => result.
+/// "dict" => dict (column names as keys); "tuple" => tuple; Row class => RapRow instance; else callable(row) => result.
 fn row_to_py_with_factory<'py>(
     py: Python<'py>,
     row: &sqlx::sqlite::SqliteRow,
@@ -381,6 +381,30 @@ fn row_to_py_with_factory<'py>(
             _ => default(),
         };
     }
+    
+    // Check if factory is the RapRow class (Row class from Python)
+    // Try to get RapRow class from the module and compare types
+    if let Ok(rapsqlite_mod) = py.import("rapsqlite._rapsqlite") {
+        if let Ok(raprow_class) = rapsqlite_mod.getattr("RapRow") {
+            // Check if f is the same type as RapRow class by comparing type objects
+            let f_type = f.get_type();
+            let raprow_type = raprow_class.get_type();
+            if f_type.is(raprow_type) {
+                // Create RapRow with columns and values
+                let mut columns = Vec::new();
+                let mut values = Vec::new();
+                for i in 0..row.len() {
+                    columns.push(row.columns()[i].name().to_string());
+                    let val = sqlite_value_to_py(py, row, i)?;
+                    values.push(val);
+                }
+                let raprow = raprow_class.call1((columns, values))?;
+                return Ok(raprow.into_any());
+            }
+        }
+    }
+    
+    // Fallback: treat as callable
     let list = row_to_py_list(py, row)?;
     let result = f.call1((list,))?;
     Ok(result)
@@ -1041,9 +1065,9 @@ async fn get_or_create_pool(
             *g
         };
         let mut opts = SqlitePoolOptions::new().max_connections(max_conn);
-        if let Some(secs) = timeout_secs {
-            opts = opts.acquire_timeout(Duration::from_secs(secs));
-        }
+        // Set default timeout of 30 seconds if not specified
+        let timeout = timeout_secs.unwrap_or(30);
+        opts = opts.acquire_timeout(Duration::from_secs(timeout));
         let new_pool = opts
             .connect(&format!("sqlite:{}", path))
             .await
@@ -1546,6 +1570,11 @@ impl Connection {
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
         
         Python::attach(|py| {
             let future = async move {
@@ -1565,26 +1594,63 @@ impl Connection {
                         .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
                     handle.as_raw_handle().as_ptr()
                 } else {
-                    // Use callback connection
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    ).await?;
+                    // Check if callbacks are set - if not, use pool directly (temporary connection)
+                    let has_callbacks_flag = has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
                     
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut()
-                        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-                    let sqlite_conn: &mut SqliteConnection = &mut **conn;
-                    let mut handle = sqlite_conn.lock_handle().await
-                        .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
-                    handle.as_raw_handle().as_ptr()
+                    if has_callbacks_flag {
+                        // Use callback connection (needed for callbacks)
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        ).await?;
+                        
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard.as_mut()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                        let mut handle = sqlite_conn.lock_handle().await
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                        handle.as_raw_handle().as_ptr()
+                    } else {
+                        // No callbacks - use pool directly with temporary connection
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        ).await?;
+                        let mut temp_conn = pool_clone.acquire().await
+                            .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {}", e)))?;
+                        let sqlite_conn: &mut SqliteConnection = &mut *temp_conn;
+                        let mut handle = sqlite_conn.lock_handle().await
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                        let handle_ptr = handle.as_raw_handle().as_ptr();
+                        
+                        // Call sqlite3_total_changes while connection is alive
+                        let total = unsafe {
+                            sqlite3_total_changes(handle_ptr)
+                        };
+                        
+                        // Connection will be released when temp_conn is dropped
+                        drop(handle);
+                        drop(temp_conn);
+                        
+                        return Ok(total as u64);
+                    }
                 };
                 
-                // Call sqlite3_total_changes
+                // Call sqlite3_total_changes (for transaction or callback connection paths)
                 let total = unsafe {
                     sqlite3_total_changes(raw_db)
                 };

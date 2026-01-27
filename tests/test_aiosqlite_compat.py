@@ -1205,14 +1205,14 @@ async def test_backup_with_pages_and_progress(test_db):
 
     target_conn = rapsqlite.Connection(target_path)
 
-    # Perform backup
+    # Perform backup (source still has 10 rows)
     await source_conn.backup(target_conn)
 
-    # Verify data in target
+    # Verify data in target (should have all 10 rows from source)
     rows = await target_conn.fetch_all("SELECT * FROM test ORDER BY id")
-    assert len(rows) == 2
-    assert rows[0][1] == "test1"
-    assert rows[1][1] == "test2"
+    assert len(rows) == 10
+    assert rows[0][1] == "name_0"
+    assert rows[9][1] == "name_9"
 
     await source_conn.close()
     await target_conn.close()
