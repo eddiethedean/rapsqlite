@@ -72,12 +72,12 @@ jobs:
 
     - name: Run tests
       shell: bash
+      working-directory: ${{ github.workspace }}
       run: |
         # Change to a temp directory to avoid importing from source
-        # On Windows, run from workspace directory using relative paths for pytest-xdist compatibility
+        # On Windows, use working-directory instead of cd to avoid path issues
         if [ "${{ runner.os }}" == "Windows" ]; then
-          # On Windows, cd to workspace and use relative path to tests
-          cd ${{ github.workspace }}
+          # On Windows, run from workspace (set via working-directory) using relative paths
           python -m pytest tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:coverage.xml -n auto
         else
           cd /tmp
