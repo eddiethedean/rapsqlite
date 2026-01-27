@@ -51,7 +51,7 @@ jobs:
       run: |
         python --version
         python -m pip install target/wheels/rapsqlite-*.whl --force-reinstall || echo "Wheel installation failed or no wheels found"
-        python -c "import rapsqlite; print(f'Successfully imported rapsqlite version {rapsqlite.__version__}')" || (echo "Import failed, checking installed packages:" && python -m pip list | grep rapsqlite && exit 1)
+        cd /tmp && python -c "import rapsqlite; print(f'Successfully imported rapsqlite version {rapsqlite.__version__}')" || (echo "Import failed, checking installed packages:" && python -m pip list | grep rapsqlite && exit 1)
 
     - name: Install test dependencies
       shell: bash
