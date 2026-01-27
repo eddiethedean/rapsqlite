@@ -51,7 +51,11 @@ jobs:
       run: |
         python --version
         python -m pip install target/wheels/rapsqlite-*.whl --force-reinstall || echo "Wheel installation failed or no wheels found"
-        cd /tmp && python -c "import rapsqlite; print(f'Successfully imported rapsqlite version {rapsqlite.__version__}')" || (echo "Import failed, checking installed packages:" && python -m pip list | grep rapsqlite && exit 1)
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          cd $TEMP && python -c "import rapsqlite; print(f'Successfully imported rapsqlite version {rapsqlite.__version__}')" || (echo "Import failed, checking installed packages:" && python -m pip list | grep rapsqlite && exit 1)
+        else
+          cd /tmp && python -c "import rapsqlite; print(f'Successfully imported rapsqlite version {rapsqlite.__version__}')" || (echo "Import failed, checking installed packages:" && python -m pip list | grep rapsqlite && exit 1)
+        fi
 
     - name: Install test dependencies
       shell: bash
@@ -60,12 +64,20 @@ jobs:
     - name: Test package import
       shell: bash
       run: |
-        cd /tmp && python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          cd $TEMP && python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
+        else
+          cd /tmp && python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
+        fi
 
     - name: Run tests
       shell: bash
       run: |
-        cd /tmp
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          cd $TEMP
+        else
+          cd /tmp
+        fi
         python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
 
     - name: Upload coverage to Codecov
