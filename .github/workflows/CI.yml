@@ -74,12 +74,13 @@ jobs:
       shell: bash
       run: |
         # Change to a temp directory to avoid importing from source
-        # On Windows, convert backslashes to forward slashes for bash compatibility
+        # On Windows, use temp directory and absolute paths to avoid source import issues
         if [ "${{ runner.os }}" == "Windows" ]; then
-          # On Windows, convert workspace path and cd to it, then use relative paths
+          # On Windows, cd to temp and use absolute path to tests
+          # Convert workspace path to forward slashes for bash compatibility
           WORKSPACE=$(echo "${{ github.workspace }}" | sed 's|\\|/|g')
-          cd "$WORKSPACE"
-          python -m pytest tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:coverage.xml -n auto
+          cd "$TEMP" || cd "$TMP"
+          python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" -n auto
         else
           cd /tmp
           python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
