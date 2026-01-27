@@ -19,7 +19,7 @@ async def test_high_concurrency_operations(test_db):
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
 
     async def operation_worker(worker_id: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]  # type: ignore[attr-defined]
             # Read operation
             rows = await db.fetch_all("SELECT 1")
             assert len(rows) == 1
@@ -41,7 +41,7 @@ async def test_many_small_operations(test_db):
 
     # Many small operations
     for i in range(1000):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             await db.execute("INSERT INTO t (value) VALUES (?)", [i])
 
     # Verify all inserted
@@ -79,7 +79,7 @@ async def test_connection_pool_heavy_load(test_db):
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
 
     async def pool_worker(worker_id: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             db.pool_size = 5
             await db.execute("INSERT INTO t (value) VALUES (?)", [worker_id])
             # Small delay to simulate work
@@ -110,7 +110,7 @@ async def test_memory_leak_detection(test_db):
     initial_objects = len(gc.get_objects())
 
     for i in range(1000):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             await db.execute("INSERT INTO t (value) VALUES (?)", [f"value_{i}"])
             rows = await db.fetch_all("SELECT * FROM t WHERE id = ?", [i + 1])
             assert len(rows) == 1
@@ -185,7 +185,7 @@ async def test_concurrent_connections_stress(test_db):
 
     async def stress_worker(worker_id: int):
         # Each worker creates its own connection
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             for i in range(10):
                 await db.execute(
                     "INSERT INTO t (value) VALUES (?)", [worker_id * 10 + i]

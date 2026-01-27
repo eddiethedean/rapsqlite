@@ -327,7 +327,7 @@ async def test_concurrent_operations():
             )
 
         async def insert_value(i: int):
-            async with aiosqlite.connect(test_db) as conn:
+            async with aiosqlite.connect(test_db) as conn:  # type: ignore[attr-defined]
                 await conn.execute("INSERT INTO test (value) VALUES (?)", [i])
 
         # Insert values concurrently

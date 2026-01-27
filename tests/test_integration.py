@@ -16,7 +16,7 @@ async def test_web_framework_pattern(test_db):
 
     # Simulate FastAPI/aiohttp pattern
     async def handle_request():
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             await db.execute(
                 "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)"
             )
@@ -91,7 +91,7 @@ async def test_transaction_rollback_pattern(test_db):
 
     # Simulate transfer with rollback on error
     async def transfer_money(from_id: int, to_id: int, amount: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             try:
                 async with db.transaction():
                     # Check balance
@@ -135,7 +135,7 @@ async def test_connection_pooling_pattern(test_db):
 
     # Simulate high-throughput logging
     async def log_message(message: str):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             db.pool_size = 10
             import time
 

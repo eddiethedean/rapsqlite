@@ -22,7 +22,7 @@ async def test_concurrent_reads(test_db):
 
     # Create multiple connections for concurrent reads
     async def read_worker(worker_id: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             rows = await db.fetch_all("SELECT * FROM t")
             assert len(rows) == 10
             return worker_id
@@ -43,7 +43,7 @@ async def test_concurrent_writes_sequential(test_db):
     # SQLite doesn't support true concurrent writes, but we can test
     # that operations complete successfully when done sequentially
     async def write_worker(value: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             await db.execute("INSERT INTO t (value) VALUES (?)", [value])
             return value
 
@@ -68,7 +68,7 @@ async def test_concurrent_transactions(test_db):
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
 
     async def transaction_worker(worker_id: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             async with db.transaction():
                 await db.execute("INSERT INTO t (value) VALUES (?)", [worker_id])
                 # Verify insert
@@ -99,7 +99,7 @@ async def test_concurrent_pool_operations(test_db):
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
 
     async def pool_worker(worker_id: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             db.pool_size = 5
             await db.execute("INSERT INTO t (value) VALUES (?)", [worker_id])
             rows = await db.fetch_all(
@@ -123,7 +123,7 @@ async def test_race_condition_connection_acquisition(test_db):
 
     # Create multiple connections trying to use the pool
     async def acquire_worker(worker_id: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             db.pool_size = 2
             db.connection_timeout = 5
             # Try to execute operation
@@ -185,7 +185,7 @@ async def test_concurrent_fetch_operations(test_db):
             await db.execute("INSERT INTO t (value) VALUES (?)", [i])
 
     async def fetch_worker(worker_id: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             rows = await db.fetch_all("SELECT * FROM t WHERE value = ?", [worker_id])
             return len(rows)
 
@@ -202,7 +202,7 @@ async def test_concurrent_execute_many(test_db):
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
 
     async def execute_many_worker(worker_id: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             params = [[worker_id * 10 + i] for i in range(10)]
             await db.execute_many("INSERT INTO t (value) VALUES (?)", params)
             return worker_id

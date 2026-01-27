@@ -200,7 +200,7 @@ async def test_concurrent_query_caching():
         import asyncio
 
         async def query_worker(conn_id: int):
-            async with connect(test_db) as conn:
+            async with connect(test_db) as conn:  # type: ignore[attr-defined]
                 # Each connection should cache prepared statements independently
                 for i in range(10):
                     rows = await conn.fetch_all(

@@ -13,6 +13,10 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+// Type aliases for complex types to reduce clippy warnings
+type UserFunctions = Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>>;
+type ProgressHandler = Arc<StdMutex<Option<(i32, Py<PyAny>)>>>;
+
 /// Detect if a query is a SELECT query (for determining execution strategy).
 fn is_select_query(query: &str) -> bool {
     let trimmed = query.trim().to_uppercase();
@@ -108,9 +112,8 @@ fn parse_connection_string(uri: &str) -> PyResult<(String, Vec<(String, String)>
     }
     
     // Check if it's a URI (starts with file:)
-    if uri.starts_with("file:") {
+    if let Some(uri_part) = uri.strip_prefix("file:") {
         // Parse URI: file:path?param=value&param2=value2
-        let uri_part = &uri[5..]; // Skip "file:"
         let (path_part, query_part) = if let Some(pos) = uri_part.find('?') {
             (uri_part[..pos].to_string(), Some(&uri_part[pos + 1..]))
         } else {
@@ -172,10 +175,10 @@ unsafe fn sqlite_c_value_to_py<'py>(
             if text_ptr.is_null() {
                 Ok(py.None())
             } else {
-                let text_slice = std::slice::from_raw_parts(text_ptr as *const u8, text_len);
+                let text_slice = std::slice::from_raw_parts(text_ptr, text_len);
                 let text_str = std::str::from_utf8(text_slice)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("Invalid UTF-8 in SQLite text value: {}", e)
+                        format!("Invalid UTF-8 in SQLite text value: {e}")
                     ))?;
                 Ok(PyString::new(py, text_str).into())
             }
@@ -224,7 +227,7 @@ unsafe fn py_to_sqlite_c_result(
     if let Ok(str_val) = result.extract::<String>() {
         let c_str = std::ffi::CString::new(str_val)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("String contains null byte: {}", e)
+                format!("String contains null byte: {e}")
             ))?;
         let ptr = c_str.as_ptr();
         let len = c_str.as_bytes().len() as i32;
@@ -260,7 +263,7 @@ unsafe fn py_to_sqlite_c_result(
         let str_val = py_str.to_str()?;
         let c_str = std::ffi::CString::new(str_val)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("String contains null byte: {}", e)
+                format!("String contains null byte: {e}")
             ))?;
         let ptr = c_str.as_ptr();
         let len = c_str.as_bytes().len() as i32;
@@ -558,7 +561,7 @@ fn process_named_parameters(
             processed_query.replace_range(start..end, "?");
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
-                format!("Missing parameter: {}", name),
+                format!("Missing parameter: {name}"),
             ));
         }
     }
@@ -686,7 +689,7 @@ async fn bind_query_multiple_on_connection(
     
     if params.len() > 16 {
         return Err(sqlx::Error::Protocol(
-            format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+            format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len())
         ));
     }
     
@@ -727,7 +730,7 @@ async fn bind_query_multiple(
     
     if params.len() > 16 {
         return Err(sqlx::Error::Protocol(
-            format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+            format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len())
         ));
     }
     
@@ -772,7 +775,7 @@ async fn bind_and_fetch_all(
     if params.len() > 16 {
         return Err(map_sqlx_error(
             sqlx::Error::Protocol(
-                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len())
             ),
             path,
             query,
@@ -822,7 +825,7 @@ async fn bind_and_fetch_one(
     if params.len() > 16 {
         return Err(map_sqlx_error(
             sqlx::Error::Protocol(
-                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len())
             ),
             path,
             query,
@@ -872,7 +875,7 @@ async fn bind_and_fetch_optional(
     if params.len() > 16 {
         return Err(map_sqlx_error(
             sqlx::Error::Protocol(
-                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len())
             ),
             path,
             query,
@@ -921,7 +924,7 @@ async fn bind_and_fetch_all_on_connection(
     if params.len() > 16 {
         return Err(map_sqlx_error(
             sqlx::Error::Protocol(
-                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len())
             ),
             path,
             query,
@@ -968,7 +971,7 @@ async fn bind_and_fetch_one_on_connection(
     if params.len() > 16 {
         return Err(map_sqlx_error(
             sqlx::Error::Protocol(
-                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len())
             ),
             path,
             query,
@@ -1015,7 +1018,7 @@ async fn bind_and_fetch_optional_on_connection(
     if params.len() > 16 {
         return Err(map_sqlx_error(
             sqlx::Error::Protocol(
-                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len()).into()
+                format!("Too many parameters ({}). Currently supporting up to 16 parameters.", params.len())
             ),
             path,
             query,
@@ -1069,12 +1072,11 @@ async fn get_or_create_pool(
         let timeout = timeout_secs.unwrap_or(30);
         opts = opts.acquire_timeout(Duration::from_secs(timeout));
         let new_pool = opts
-            .connect(&format!("sqlite:{}", path))
+            .connect(&format!("sqlite:{path}"))
             .await
             .map_err(|e| {
                 OperationalError::new_err(format!(
-                    "Failed to connect to database at {}: {e}",
-                    path
+                    "Failed to connect to database at {path}: {e}"
                 ))
             })?;
         
@@ -1085,7 +1087,7 @@ async fn get_or_create_pool(
         };
         
         for (name, value) in pragmas_list {
-            let pragma_query = format!("PRAGMA {} = {}", name, value);
+            let pragma_query = format!("PRAGMA {name} = {value}");
             sqlx::query(&pragma_query)
                 .execute(&new_pool)
                 .await
@@ -1117,7 +1119,7 @@ async fn ensure_callback_connection(
         
         // Acquire a connection from the pool
         let pool_conn = pool_clone.acquire().await
-            .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection for callbacks: {}", e)))?;
+            .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection for callbacks: {e}")))?;
         
         *callback_guard = Some(pool_conn);
     }
@@ -1167,16 +1169,16 @@ async fn execute_init_hook_if_needed(
             
             // Call the hook with Connection as argument
             let coro = hook_bound.call1((conn_bound,))
-                .map_err(|e| OperationalError::new_err(format!("Failed to call init_hook: {}", e)))?;
+                .map_err(|e| OperationalError::new_err(format!("Failed to call init_hook: {e}")))?;
             
             // Convert Python coroutine to Rust future (into_future expects Bound)
             into_future(coro)
-                .map_err(|e| OperationalError::new_err(format!("Failed to convert init_hook coroutine to future: {}", e)))
+                .map_err(|e| OperationalError::new_err(format!("Failed to convert init_hook coroutine to future: {e}")))
         })?;
         
         // Await the future
         coro_future.await
-            .map_err(|e| OperationalError::new_err(format!("init_hook raised an exception: {}", e)))?;
+            .map_err(|e| OperationalError::new_err(format!("init_hook raised an exception: {e}")))?;
     }
     
     Ok(())
@@ -1185,10 +1187,10 @@ async fn execute_init_hook_if_needed(
 /// Check if any callbacks are currently set.
 fn has_callbacks(
     load_extension_enabled: &Arc<StdMutex<bool>>,
-    user_functions: &Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>>,
+    user_functions: &UserFunctions,
     trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
     authorizer_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
-    progress_handler: &Arc<StdMutex<Option<(i32, Py<PyAny>)>>>,
+    progress_handler: &ProgressHandler,
 ) -> bool {
     let load_ext = *load_extension_enabled.lock().unwrap();
     let has_functions = !user_functions.lock().unwrap().is_empty();
@@ -1201,14 +1203,12 @@ fn has_callbacks(
 
 /// Helper to determine which connection to use for operations.
 /// Returns:
-
 /// Map sqlx error to appropriate Python exception.
 fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
     use sqlx::Error as SqlxError;
 
     let error_msg = format!(
-        "Failed to execute query on database {}: {e}\nQuery: {}",
-        path, query
+        "Failed to execute query on database {path}: {e}\nQuery: {query}"
     );
 
     match e {
@@ -1262,7 +1262,7 @@ impl RapRow {
         if let Ok(idx) = key.extract::<usize>() {
             if idx >= self.values.len() {
                 return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                    format!("Index {} out of range", idx)
+                    format!("Index {idx} out of range")
                 ));
             }
             return Ok(self.values[idx].clone_ref(py));
@@ -1274,7 +1274,7 @@ impl RapRow {
                 return Ok(self.values[idx].clone_ref(py));
             }
             return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
-                format!("Column '{}' not found", col_name)
+                format!("Column '{col_name}' not found")
             ));
         }
         
@@ -1332,7 +1332,7 @@ impl RapRow {
                 let val_str = val.bind(py).repr()
                     .map(|r| r.to_string())
                     .unwrap_or_else(|_| "?".to_string());
-                format!("{}={}", col, val_str)
+                format!("{col}={val_str}")
             })
             .collect();
         Ok(format!("Row({})", items.join(", ")))
@@ -1399,10 +1399,10 @@ struct Connection {
     // Callback infrastructure (Phase 2.7)
     callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>, // Dedicated connection for callbacks
     load_extension_enabled: Arc<StdMutex<bool>>, // Track load_extension state
-    user_functions: Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>>, // name -> (nargs, callback)
+    user_functions: UserFunctions, // name -> (nargs, callback)
     trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Trace callback
     authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Authorizer callback
-    progress_handler: Arc<StdMutex<Option<(i32, Py<PyAny>)>>>, // (n, callback)
+    progress_handler: ProgressHandler, // (n, callback)
 }
 
 #[pymethods]
@@ -1589,9 +1589,9 @@ impl Connection {
                     let mut conn_guard = transaction_connection.lock().await;
                     let conn = conn_guard.as_mut()
                         .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
-                    let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                    let sqlite_conn: &mut SqliteConnection = &mut *conn;
                     let mut handle = sqlite_conn.lock_handle().await
-                        .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                        .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
                     handle.as_raw_handle().as_ptr()
                 } else {
                     // Check if callbacks are set - if not, use pool directly (temporary connection)
@@ -1617,9 +1617,9 @@ impl Connection {
                         let mut conn_guard = callback_connection.lock().await;
                         let conn = conn_guard.as_mut()
                             .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-                        let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                        let sqlite_conn: &mut SqliteConnection = &mut *conn;
                         let mut handle = sqlite_conn.lock_handle().await
-                            .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
                         handle.as_raw_handle().as_ptr()
                     } else {
                         // No callbacks - use pool directly with temporary connection
@@ -1631,10 +1631,10 @@ impl Connection {
                             &connection_timeout_secs,
                         ).await?;
                         let mut temp_conn = pool_clone.acquire().await
-                            .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {}", e)))?;
-                        let sqlite_conn: &mut SqliteConnection = &mut *temp_conn;
+                            .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {e}")))?;
+                        let sqlite_conn: &mut SqliteConnection = &mut temp_conn;
                         let mut handle = sqlite_conn.lock_handle().await
-                            .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
                         let handle_ptr = handle.as_raw_handle().as_ptr();
                         
                         // Call sqlite3_total_changes while connection is alive
@@ -1993,7 +1993,7 @@ impl Connection {
                 } else {
                     // Acquire a connection from the pool for the transaction
                     pool_clone.acquire().await
-                        .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {}", e)))?
+                        .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {e}")))?
                 };
 
                 // Set PRAGMA busy_timeout on this connection to handle lock contention
@@ -2252,11 +2252,7 @@ impl Connection {
         let is_select = is_select_query(&processed_query);
         
         // Store original parameters for cursor (preserve original format)
-        let params_for_cursor = if let Some(params) = parameters {
-            Some(params.clone().unbind())
-        } else {
-            None
-        };
+        let params_for_cursor = parameters.map(|params| params.clone().unbind());
         
         // Clone necessary fields for cursor creation (will be used in async future)
         // Note: These are currently unused but kept for potential future use
@@ -2386,7 +2382,7 @@ impl Connection {
                 let mut params_vec = Vec::new();
                 for param in param_set {
                     let bound_param = param.bind(py);
-                    let sqlx_param = SqliteParam::from_py(&bound_param)?;
+                    let sqlx_param = SqliteParam::from_py(bound_param)?;
                     params_vec.push(sqlx_param);
                 }
                 result.push(params_vec);
@@ -3176,7 +3172,7 @@ impl Connection {
             }
         }
         
-        let pragma_query = format!("PRAGMA {} = {}", name, pragma_value);
+        let pragma_query = format!("PRAGMA {name} = {pragma_value}");
         
         Python::attach(|py| {
             let future = async move {
@@ -3239,9 +3235,9 @@ impl Connection {
                 // Access raw sqlite3* handle via PoolConnection's Deref to SqliteConnection
                 // PoolConnection<Sqlite> derefs to SqliteConnection, so we can use &mut *conn
                 // Then call lock_handle() to get LockedSqliteHandle, then as_raw_handle() for NonNull<sqlite3>
-                let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                let sqlite_conn: &mut SqliteConnection = conn;
                 let mut handle = sqlite_conn.lock_handle().await
-                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
                 let raw_db = handle.as_raw_handle().as_ptr();
                 
                 // Call the C API
@@ -3252,7 +3248,7 @@ impl Connection {
                 
                 if result != 0 {
                     return Err(OperationalError::new_err(
-                        format!("Failed to enable/disable load extension: SQLite error code {}", result)
+                        format!("Failed to enable/disable load extension: SQLite error code {result}")
                     ));
                 }
                 
@@ -3302,14 +3298,14 @@ impl Connection {
                 let conn = conn_guard.as_mut()
                     .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                 
-                let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                let sqlite_conn: &mut SqliteConnection = conn;
                 let mut handle = sqlite_conn.lock_handle().await
-                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
                 let raw_db = handle.as_raw_handle().as_ptr();
                 
                 // Convert extension name to CString
                 let name_cstr = CString::new(name.clone())
-                    .map_err(|e| OperationalError::new_err(format!("Invalid extension name: {}", e)))?;
+                    .map_err(|e| OperationalError::new_err(format!("Invalid extension name: {e}")))?;
                 
                 // Call sqlite3_load_extension
                 // Use NULL for entry point - SQLite will try sqlite3_extension_init first
@@ -3333,10 +3329,10 @@ impl Connection {
                         }
                         msg
                     } else {
-                        format!("SQLite error code {}", result)
+                        format!("SQLite error code {result}")
                     };
                     return Err(OperationalError::new_err(
-                        format!("Failed to load extension '{}': {}", name, error_msg)
+                        format!("Failed to load extension '{name}': {error_msg}")
                     ));
                 }
                 
@@ -3387,9 +3383,9 @@ impl Connection {
                 let conn = conn_guard.as_mut()
                     .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                 
-                let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                let sqlite_conn: &mut SqliteConnection = conn;
                 let mut handle = sqlite_conn.lock_handle().await
-                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
                 let raw_db = handle.as_raw_handle().as_ptr();
                 
                 if func_clone.is_none() {
@@ -3401,7 +3397,7 @@ impl Connection {
                     
                     // Remove from SQLite by calling sqlite3_create_function_v2 with NULL callback
                     let name_cstr = std::ffi::CString::new(name.clone())
-                        .map_err(|e| OperationalError::new_err(format!("Function name contains null byte: {}", e)))?;
+                        .map_err(|e| OperationalError::new_err(format!("Function name contains null byte: {e}")))?;
                     let result = unsafe {
                         sqlite3_create_function_v2(
                             raw_db,
@@ -3418,7 +3414,7 @@ impl Connection {
                     
                     if result != SQLITE_OK {
                         return Err(OperationalError::new_err(
-                            format!("Failed to remove function '{}': SQLite error code {}", name, result)
+                            format!("Failed to remove function '{name}': SQLite error code {result}")
                         ));
                     }
                     
@@ -3453,7 +3449,7 @@ impl Connection {
                     
                     // Create a boxed callback pointer to pass as user data
                     let name_cstr = std::ffi::CString::new(name.clone())
-                        .map_err(|e| OperationalError::new_err(format!("Function name contains null byte: {}", e)))?;
+                        .map_err(|e| OperationalError::new_err(format!("Function name contains null byte: {e}")))?;
                     
                     // Store the Python callback in a Box and pass it as user_data
                     // Clone it with GIL
@@ -3505,7 +3501,7 @@ impl Connection {
                                         }
                                         Err(e) => {
                                             // On error, set SQLite error and return
-                                            let error_msg = format!("Error converting argument {}: {}", i, e);
+                                            let error_msg = format!("Error converting argument {i}: {e}");
                                             libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
                                             return;
                                         }
@@ -3543,7 +3539,7 @@ impl Connection {
                                         let args_tuple = match PyTuple::new(py, py_args.iter().map(|arg| arg.clone_ref(py))) {
                                             Ok(t) => t,
                                             Err(e) => {
-                                                let error_msg = format!("Error creating argument tuple: {}", e);
+                                                let error_msg = format!("Error creating argument tuple: {e}");
                                                 libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
                                                 return;
                                             }
@@ -3552,14 +3548,14 @@ impl Connection {
                                         let code_str = match std::ffi::CString::new("lambda f, args: f(*args)") {
                                             Ok(s) => s,
                                             Err(_) => {
-                                                libsqlite3_sys::sqlite3_result_error(ctx, b"Error creating CString\0".as_ptr() as *const i8, 22);
+                                                libsqlite3_sys::sqlite3_result_error(ctx, c"Error creating CString".as_ptr(), 22);
                                                 return;
                                             }
                                         };
                                         let unpack_code = match py.eval(code_str.as_c_str(), None, None) {
                                             Ok(code) => code,
                                             Err(e) => {
-                                                let error_msg = format!("Error creating unpack helper: {}", e);
+                                                let error_msg = format!("Error creating unpack helper: {e}");
                                                 libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
                                                 return;
                                             }
@@ -3574,14 +3570,14 @@ impl Connection {
                                         match py_to_sqlite_c_result(py, ctx, &result) {
                                             Ok(_) => {}
                                             Err(e) => {
-                                                let error_msg = format!("Error converting result: {}", e);
+                                                let error_msg = format!("Error converting result: {e}");
                                                 libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
                                             }
                                         }
                                     }
                                     Err(e) => {
                                         // Python exception - convert to SQLite error
-                                        let error_msg = format!("Python function error: {}", e);
+                                        let error_msg = format!("Python function error: {e}");
                                         libsqlite3_sys::sqlite3_result_error(ctx, error_msg.as_ptr() as *const i8, error_msg.len() as i32);
                                     }
                                 }
@@ -3622,7 +3618,7 @@ impl Connection {
                             funcs_guard.remove(&name);
                         }
                         return Err(OperationalError::new_err(
-                            format!("Failed to create function '{}': SQLite error code {}", name, result)
+                            format!("Failed to create function '{name}': SQLite error code {result}")
                         ));
                     }
                 }
@@ -3675,9 +3671,9 @@ impl Connection {
                 let conn = conn_guard.as_mut()
                     .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                 
-                let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                let sqlite_conn: &mut SqliteConnection = conn;
                 let mut handle = sqlite_conn.lock_handle().await
-                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
                 let raw_db = handle.as_raw_handle().as_ptr();
                 
                 // Define the trace callback trampoline
@@ -3761,7 +3757,7 @@ impl Connection {
                         *trace_guard = None;
                     }
                     return Err(OperationalError::new_err(
-                        format!("Failed to set trace callback: SQLite error code {}", result)
+                        format!("Failed to set trace callback: SQLite error code {result}")
                     ));
                 }
                 
@@ -3850,9 +3846,9 @@ impl Connection {
                 let conn = conn_guard.as_mut()
                     .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                 
-                let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                let sqlite_conn: &mut SqliteConnection = conn;
                 let mut handle = sqlite_conn.lock_handle().await
-                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
                 let raw_db = handle.as_raw_handle().as_ptr();
                 
                 // Define the authorizer callback trampoline
@@ -3921,11 +3917,7 @@ impl Connection {
                             match callback.bind(py).call1((action, py_arg1, py_arg2, py_arg3, py_arg4)) {
                                 Ok(result) => {
                                     // Convert Python result to SQLite auth code
-                                    if let Ok(code) = result.extract::<i32>() {
-                                        code
-                                    } else {
-                                        SQLITE_OK // Default to OK if conversion fails
-                                    }
+                                    result.extract::<i32>().unwrap_or(SQLITE_OK) // Default to OK if conversion fails
                                 }
                                 Err(_) => SQLITE_OK, // Ignore Python errors, default to OK
                             }
@@ -4049,9 +4041,9 @@ impl Connection {
                 let conn = conn_guard.as_mut()
                     .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                 
-                let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                let sqlite_conn: &mut SqliteConnection = conn;
                 let mut handle = sqlite_conn.lock_handle().await
-                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {}", e)))?;
+                    .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
                 let raw_db = handle.as_raw_handle().as_ptr();
                 
                 // Define the progress handler callback trampoline
@@ -4080,10 +4072,8 @@ impl Connection {
                                         } else {
                                             1 // Abort
                                         }
-                                    } else if let Ok(code) = result.extract::<i32>() {
-                                        code // Use integer directly
                                     } else {
-                                        0 // Default to continue if conversion fails
+                                        result.extract::<i32>().unwrap_or(0) // Use integer directly, default to continue if conversion fails
                                     }
                                 }
                                 Err(_) => 0, // Ignore Python errors, default to continue
@@ -4186,7 +4176,7 @@ impl Connection {
                 // Helper function to encode bytes as hex
                 fn bytes_to_hex(bytes: &[u8]) -> String {
                     bytes.iter()
-                        .map(|b| format!("{:02x}", b))
+                        .map(|b| format!("{b:02x}"))
                         .collect()
                 }
 
@@ -4254,19 +4244,19 @@ impl Connection {
                                 if !name.starts_with("sqlite_") {
                                     table_names.push(name.clone());
                                 }
-                                statements.push(format!("{};", sql_stmt));
+                                statements.push(format!("{sql_stmt};"));
                             }
                             "index" => {
                                 // Skip system indexes
                                 if !name.starts_with("sqlite_") {
-                                    statements.push(format!("{};", sql_stmt));
+                                    statements.push(format!("{sql_stmt};"));
                                 }
                             }
                             "trigger" => {
-                                statements.push(format!("{};", sql_stmt));
+                                statements.push(format!("{sql_stmt};"));
                             }
                             "view" => {
-                                statements.push(format!("{};", sql_stmt));
+                                statements.push(format!("{sql_stmt};"));
                             }
                             _ => {}
                         }
@@ -4304,7 +4294,7 @@ impl Connection {
 
                 // Dump data for each table
                 for table_name in table_names {
-                    let query = format!("SELECT * FROM {}", table_name);
+                    let query = format!("SELECT * FROM {table_name}");
                     let rows = if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
                         let conn = conn_guard
@@ -4346,7 +4336,7 @@ impl Connection {
                     let column_count = rows[0].len();
                     let column_names: Vec<String> = (0..column_count)
                         .map(|i| {
-                            rows[0].columns().get(i).map(|c| c.name().to_string()).unwrap_or_else(|| format!("column_{}", i))
+                            rows[0].columns().get(i).map(|c| c.name().to_string()).unwrap_or_else(|| format!("column_{i}"))
                         })
                         .collect();
 
@@ -4518,7 +4508,7 @@ impl Connection {
 
         // Escape table name for SQL
         let escaped_table_name = table_name.replace("'", "''");
-        let query = format!("PRAGMA table_info('{}')", escaped_table_name);
+        let query = format!("PRAGMA table_info('{escaped_table_name}')");
 
         Python::attach(|py| {
             let future = async move {
@@ -4668,7 +4658,7 @@ impl Connection {
         // Build query
         let query = if let Some(ref tbl_name) = table_name {
             let escaped = tbl_name.replace("'", "''");
-            format!("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name = '{}' AND name NOT LIKE 'sqlite_%' ORDER BY name", escaped)
+            format!("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name = '{escaped}' AND name NOT LIKE 'sqlite_%' ORDER BY name")
         } else {
             "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
         };
@@ -4811,7 +4801,7 @@ impl Connection {
 
         // Escape table name for SQL
         let escaped_table_name = table_name.replace("'", "''");
-        let query = format!("PRAGMA foreign_key_list('{}')", escaped_table_name);
+        let query = format!("PRAGMA foreign_key_list('{escaped_table_name}')");
 
         Python::attach(|py| {
             let future = async move {
@@ -5358,7 +5348,7 @@ impl Connection {
 
         // Escape table name for SQL
         let escaped_table_name = table_name.replace("'", "''");
-        let query = format!("PRAGMA index_list('{}')", escaped_table_name);
+        let query = format!("PRAGMA index_list('{escaped_table_name}')");
 
         Python::attach(|py| {
             let future = async move {
@@ -5496,7 +5486,7 @@ impl Connection {
 
         // Escape index name for SQL
         let escaped_index_name = index_name.replace("'", "''");
-        let query = format!("PRAGMA index_info('{}')", escaped_index_name);
+        let query = format!("PRAGMA index_info('{escaped_index_name}')");
 
         Python::attach(|py| {
             let future = async move {
@@ -5623,7 +5613,7 @@ impl Connection {
 
         // Escape table name for SQL
         let escaped_table_name = table_name.replace("'", "''");
-        let query = format!("PRAGMA table_xinfo('{}')", escaped_table_name);
+        let query = format!("PRAGMA table_xinfo('{escaped_table_name}')");
 
         Python::attach(|py| {
             let future = async move {
@@ -5842,9 +5832,9 @@ impl Connection {
                     let conn = conn_guard
                         .as_mut()
                         .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
-                    let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                    let sqlite_conn: &mut SqliteConnection = &mut *conn;
                     let mut handle = sqlite_conn.lock_handle().await
-                        .map_err(|e| OperationalError::new_err(format!("Failed to lock source handle: {}", e)))?;
+                        .map_err(|e| OperationalError::new_err(format!("Failed to lock source handle: {e}")))?;
                     source_handle = SendPtr(handle.as_raw_handle().as_ptr());
                     _source_pool_conn = None;
                 } else if has_callbacks_flag {
@@ -5860,9 +5850,9 @@ impl Connection {
                     let conn = conn_guard
                         .as_mut()
                         .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-                    let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                    let sqlite_conn: &mut SqliteConnection = &mut *conn;
                     let mut handle = sqlite_conn.lock_handle().await
-                        .map_err(|e| OperationalError::new_err(format!("Failed to lock source handle: {}", e)))?;
+                        .map_err(|e| OperationalError::new_err(format!("Failed to lock source handle: {e}")))?;
                     source_handle = SendPtr(handle.as_raw_handle().as_ptr());
                     _source_pool_conn = None;
                 } else {
@@ -5874,10 +5864,10 @@ impl Connection {
                         &connection_timeout_secs,
                     ).await?;
                     let mut pool_conn = pool_clone.acquire().await
-                        .map_err(|e| OperationalError::new_err(format!("Failed to acquire source connection: {}", e)))?;
-                    let sqlite_conn: &mut SqliteConnection = &mut *pool_conn;
+                        .map_err(|e| OperationalError::new_err(format!("Failed to acquire source connection: {e}")))?;
+                    let sqlite_conn: &mut SqliteConnection = &mut pool_conn;
                     let mut handle = sqlite_conn.lock_handle().await
-                        .map_err(|e| OperationalError::new_err(format!("Failed to lock source handle: {}", e)))?;
+                        .map_err(|e| OperationalError::new_err(format!("Failed to lock source handle: {e}")))?;
                     source_handle = SendPtr(handle.as_raw_handle().as_ptr());
                     drop(handle);
                     // Keep pool_conn alive during backup
@@ -5899,10 +5889,10 @@ impl Connection {
                     let target_transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>> = target_transaction_connection_opt.unwrap();
                     let target_callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>> = target_callback_connection_opt.unwrap();
                     let target_load_extension_enabled: Arc<StdMutex<bool>> = target_load_extension_enabled_opt.unwrap();
-                    let target_user_functions: Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>> = target_user_functions_opt.unwrap();
+                    let target_user_functions: UserFunctions = target_user_functions_opt.unwrap();
                     let target_trace_callback: Arc<StdMutex<Option<Py<PyAny>>>> = target_trace_callback_opt.unwrap();
                     let target_authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>> = target_authorizer_callback_opt.unwrap();
-                    let target_progress_handler: Arc<StdMutex<Option<(i32, Py<PyAny>)>>> = target_progress_handler_opt.unwrap();
+                    let target_progress_handler: ProgressHandler = target_progress_handler_opt.unwrap();
 
                     let target_in_transaction = {
                         let g = target_transaction_state.lock().await;
@@ -5922,9 +5912,9 @@ impl Connection {
                         let conn = conn_guard
                             .as_mut()
                             .ok_or_else(|| OperationalError::new_err("Target transaction connection not available"))?;
-                        let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                        let sqlite_conn: &mut SqliteConnection = &mut *conn;
                         let mut handle = sqlite_conn.lock_handle().await
-                            .map_err(|e| OperationalError::new_err(format!("Failed to lock target handle: {}", e)))?;
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock target handle: {e}")))?;
                         target_handle = SendPtr(handle.as_raw_handle().as_ptr());
                         drop(handle);
                         _target_pool_conn = None;
@@ -5941,9 +5931,9 @@ impl Connection {
                         let conn = conn_guard
                             .as_mut()
                             .ok_or_else(|| OperationalError::new_err("Target callback connection not available"))?;
-                        let sqlite_conn: &mut SqliteConnection = &mut **conn;
+                        let sqlite_conn: &mut SqliteConnection = &mut *conn;
                         let mut handle = sqlite_conn.lock_handle().await
-                            .map_err(|e| OperationalError::new_err(format!("Failed to lock target handle: {}", e)))?;
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock target handle: {e}")))?;
                         target_handle = SendPtr(handle.as_raw_handle().as_ptr());
                         drop(handle);
                         _target_pool_conn = None;
@@ -5956,10 +5946,10 @@ impl Connection {
                             &target_connection_timeout_secs,
                         ).await?;
                         let mut target_pool_conn = target_pool_clone.acquire().await
-                            .map_err(|e| OperationalError::new_err(format!("Failed to acquire target connection: {}", e)))?;
-                        let sqlite_conn: &mut SqliteConnection = &mut *target_pool_conn;
+                            .map_err(|e| OperationalError::new_err(format!("Failed to acquire target connection: {e}")))?;
+                        let sqlite_conn: &mut SqliteConnection = &mut target_pool_conn;
                         let mut handle = sqlite_conn.lock_handle().await
-                            .map_err(|e| OperationalError::new_err(format!("Failed to lock target handle: {}", e)))?;
+                            .map_err(|e| OperationalError::new_err(format!("Failed to lock target handle: {e}")))?;
                         target_handle = SendPtr(handle.as_raw_handle().as_ptr());
                         drop(handle);
                         _target_pool_conn = Some(target_pool_conn);
@@ -5977,23 +5967,20 @@ impl Connection {
                         // Import the backup helper module
                         let backup_helper = py.import("rapsqlite._backup_helper")
                             .map_err(|e| OperationalError::new_err(format!(
-                                "Failed to import backup helper: {}. Make sure rapsqlite package is properly installed.",
-                                e
+                                "Failed to import backup helper: {e}. Make sure rapsqlite package is properly installed."
                             )))?;
                         
                         // Get the get_sqlite3_handle function
                         let get_handle = backup_helper.getattr("get_sqlite3_handle")
                             .map_err(|e| OperationalError::new_err(format!(
-                                "Failed to get get_sqlite3_handle function: {}",
-                                e
+                                "Failed to get get_sqlite3_handle function: {e}"
                             )))?;
                         
                         // Call the function with the target connection
                         let conn_obj = target_clone.bind(py);
                         let result = get_handle.call1((conn_obj,))
                             .map_err(|e| OperationalError::new_err(format!(
-                                "Failed to extract sqlite3* handle: {}",
-                                e
+                                "Failed to extract sqlite3* handle: {e}"
                             )))?;
                         
                         // Check if extraction succeeded (returns None on failure)
@@ -6008,8 +5995,7 @@ impl Connection {
                         // Extract the pointer value as usize
                         let ptr_val: usize = result.extract()
                             .map_err(|e| OperationalError::new_err(format!(
-                                "Failed to extract pointer value: {}",
-                                e
+                                "Failed to extract pointer value: {e}"
                             )))?;
                         
                         // Verify pointer is not null
@@ -6060,7 +6046,7 @@ impl Connection {
                 
                 // Convert database name to C string
                 let name_cstr = std::ffi::CString::new(name.clone())
-                    .map_err(|e| OperationalError::new_err(format!("Invalid database name: {}", e)))?;
+                    .map_err(|e| OperationalError::new_err(format!("Invalid database name: {e}")))?;
 
                 // Check connection states before backup
                 // SQLite backup requires destination to not have active transactions
@@ -6108,10 +6094,9 @@ impl Connection {
                     };
                     
                     return Err(OperationalError::new_err(format!(
-                        "Failed to initialize backup: SQLite error code {}, message: '{}'. \
-                        Source libversion: {}. \
-                        Ensure both connections are open and target has no active transactions.",
-                        error_code, error_msg, source_libversion
+                        "Failed to initialize backup: SQLite error code {error_code}, message: '{error_msg}'. \
+                        Source libversion: {source_libversion}. \
+                        Ensure both connections are open and target has no active transactions."
                     )));
                 }
 
@@ -6162,8 +6147,7 @@ impl Connection {
                                 sqlite3_backup_finish(backup_handle.0);
                             }
                             return Err(OperationalError::new_err(format!(
-                                "Backup failed with SQLite error code: {}",
-                                result
+                                "Backup failed with SQLite error code: {result}"
                             )));
                         }
                     }
@@ -6173,8 +6157,7 @@ impl Connection {
                 let final_result = unsafe { sqlite3_backup_finish(backup_handle.0) };
                 if final_result != SQLITE_OK {
                     return Err(OperationalError::new_err(format!(
-                        "Backup finish failed with SQLite error code: {}",
-                        final_result
+                        "Backup finish failed with SQLite error code: {final_result}"
                     )));
                 }
 
@@ -6203,10 +6186,10 @@ struct ExecuteContextManager {
     transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     load_extension_enabled: Arc<StdMutex<bool>>,
-    user_functions: Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>>,
+    user_functions: UserFunctions,
     trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    progress_handler: Arc<StdMutex<Option<(i32, Py<PyAny>)>>>,
+    progress_handler: ProgressHandler,
     init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
     init_hook_called: Arc<StdMutex<bool>>,
     last_rowid: Arc<Mutex<i64>>,
@@ -6481,7 +6464,7 @@ impl TransactionContextManager {
                 let mut conn = pool_clone
                     .acquire()
                     .await
-                    .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {}", e)))?;
+                    .map_err(|e| OperationalError::new_err(format!("Failed to acquire connection: {e}")))?;
                 sqlx::query("PRAGMA busy_timeout = 5000")
                     .execute(&mut *conn)
                     .await
@@ -6562,10 +6545,10 @@ struct Cursor {
     transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     load_extension_enabled: Arc<StdMutex<bool>>,
-    user_functions: Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>>,
+    user_functions: UserFunctions,
     trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    progress_handler: Arc<StdMutex<Option<(i32, Py<PyAny>)>>>,
+    progress_handler: ProgressHandler,
 }
 
 #[pymethods]
@@ -6580,11 +6563,7 @@ impl Cursor {
         self.query = query.clone();
         
         // Store parameters
-        let params_for_storage = if let Some(params) = parameters {
-            Some(params.clone().unbind())
-        } else {
-            None
-        };
+        let params_for_storage = parameters.map(|params| params.clone().unbind());
         
         {
             let mut params_guard = self.parameters.lock().unwrap();
@@ -6674,14 +6653,14 @@ impl Cursor {
                             if let Some(ref params_py) = *params_guard {
                                 let params_bound = params_py.bind(py);
                                 if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                                    let (proc_query, param_values) = process_named_parameters(&query, &dict)?;
+                                    let (proc_query, param_values) = process_named_parameters(&query, dict)?;
                                     return Ok((proc_query, param_values));
                                 }
                                 if let Ok(list) = params_bound.cast::<PyList>() {
-                                    let param_values = process_positional_parameters(&list)?;
+                                    let param_values = process_positional_parameters(list)?;
                                     return Ok((query.clone(), param_values));
                                 }
-                                let param = SqliteParam::from_py(&params_bound)?;
+                                let param = SqliteParam::from_py(params_bound)?;
                                 return Ok((query.clone(), vec![param]));
                             }
                             Ok((query.clone(), Vec::new()))
@@ -6876,17 +6855,17 @@ impl Cursor {
                                     
                                     // Try dict first (named parameters)
                                     if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                                        let (proc_query, param_values) = process_named_parameters(&query, &dict)?;
+                                        let (proc_query, param_values) = process_named_parameters(&query, dict)?;
                                         // Verify we got parameters if query contains named placeholders
                                         if param_values.is_empty() && (query.contains(':') || query.contains('@') || query.contains('$')) {
                                             return Err(ProgrammingError::new_err(
-                                                format!("Named parameters found in query but none extracted. Query: '{}', Processed: '{}'", query, proc_query)
+                                                format!("Named parameters found in query but none extracted. Query: '{query}', Processed: '{proc_query}'")
                                             ));
                                         }
                                         // Additional verification: check if processed query has ? placeholders
                                         if !proc_query.contains('?') && query.contains(':') {
                                             return Err(ProgrammingError::new_err(
-                                                format!("Query had named parameters but processed query has no ? placeholders. Original: '{}', Processed: '{}'", query, proc_query)
+                                                format!("Query had named parameters but processed query has no ? placeholders. Original: '{query}', Processed: '{proc_query}'")
                                             ));
                                         }
                                         return Ok((proc_query, param_values));
@@ -6894,12 +6873,12 @@ impl Cursor {
                                     
                                     // Try list (positional parameters)
                                     if let Ok(list) = params_bound.cast::<PyList>() {
-                                        let param_values = process_positional_parameters(&list)?;
+                                        let param_values = process_positional_parameters(list)?;
                                         return Ok((query.clone(), param_values));
                                     }
                                     
                                     // Single value
-                                    let param = SqliteParam::from_py(&params_bound)?;
+                                    let param = SqliteParam::from_py(params_bound)?;
                                     return Ok((query.clone(), vec![param]));
                                 }
                                 Ok((query.clone(), Vec::new()))
@@ -6927,7 +6906,7 @@ impl Cursor {
                             let conn = conn_guard
                                 .as_mut()
                                 .ok_or_else(|| OperationalError::new_err(
-                                    format!("Transaction is active but transaction_connection is None. This indicates a bug in transaction management.")
+                                    "Transaction is active but transaction_connection is None. This indicates a bug in transaction management.".to_string()
                                 ))?;
                             bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &path).await?
                         } else if has_callbacks_flag {
@@ -7064,18 +7043,18 @@ impl Cursor {
                                 
                                 // Check if it's a dict (named parameters)
                                 if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                                    let (proc_query, param_values) = process_named_parameters(&query, &dict)?;
+                                    let (proc_query, param_values) = process_named_parameters(&query, dict)?;
                                     return Ok((proc_query, param_values));
                                 }
                                 
                                 // Check if it's a list (positional parameters)
                                 if let Ok(list) = params_bound.cast::<PyList>() {
-                                    let param_values = process_positional_parameters(&list)?;
+                                    let param_values = process_positional_parameters(list)?;
                                     return Ok((query.clone(), param_values));
                                 }
                                 
                                 // Single value
-                                let param = SqliteParam::from_py(&params_bound)?;
+                                let param = SqliteParam::from_py(params_bound)?;
                                 return Ok((query.clone(), vec![param]));
                             }
                             Ok((query.clone(), Vec::new()))

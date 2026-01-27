@@ -43,7 +43,7 @@ async def test_connection_pool_performance(test_db):
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
 
     async def pool_operation(worker_id: int):
-        async with connect(test_db) as db:
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
             db.pool_size = 5
             await db.execute("INSERT INTO t (value) VALUES (?)", [worker_id])
             rows = await db.fetch_all(
