@@ -6,12 +6,13 @@
 [![Downloads](https://pepy.tech/badge/rapsqlite)](https://pepy.tech/project/rapsqlite)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Documentation](https://readthedocs.org/projects/rapsqlite/badge/?version=latest)](https://rapsqlite.readthedocs.io/en/latest/)
 
 ## Overview
 
 `rapsqlite` provides true async SQLite operations for Python, backed by Rust, Tokio, and sqlx. Unlike libraries that wrap blocking database calls in `async` syntax, `rapsqlite` guarantees that all database operations execute **outside the Python GIL**, ensuring event loops never stall under load.
 
-**Roadmap Goal**: Achieve drop-in replacement compatibility with `aiosqlite`, enabling seamless migration with true async performance. See [docs/ROADMAP.md](docs/ROADMAP.md) for details.
+📚 **[Full Documentation](https://rapsqlite.readthedocs.io/en/latest/)** | **Roadmap Goal**: Achieve drop-in replacement compatibility with `aiosqlite`, enabling seamless migration with true async performance. See [docs/ROADMAP.md](docs/ROADMAP.md) for details.
 
 ## Why `rap*`?
 
@@ -59,6 +60,17 @@ cd rapsqlite
 pip install maturin
 maturin develop
 ```
+
+## Documentation
+
+📖 **Full documentation is available at [rapsqlite.readthedocs.io](https://rapsqlite.readthedocs.io/en/latest/)**
+
+The documentation includes:
+- [Quickstart Guide](https://rapsqlite.readthedocs.io/en/latest/quickstart.html) - Get started in minutes
+- [API Reference](https://rapsqlite.readthedocs.io/en/latest/api-reference/index.html) - Complete API documentation
+- [Migration Guide](https://rapsqlite.readthedocs.io/en/latest/guides/migration-guide.html) - Migrating from aiosqlite
+- [Performance Guide](https://rapsqlite.readthedocs.io/en/latest/guides/performance.html) - Optimization tips
+- [Advanced Usage](https://rapsqlite.readthedocs.io/en/latest/guides/advanced-usage.html) - Advanced features and patterns
 
 ---
 
