@@ -27,16 +27,17 @@ build:
     # Verify rapsqlite can be imported (from installed package, not source)
     - echo "Verifying rapsqlite import..."
     - |
-      cd /tmp && python << 'EOF'
+      cd /tmp && python << 'PYEOF'
       import sys
       import os
       # Remove source directory from path to ensure we import from installed package
-      source_dir = os.environ.get('READTHEDOCS_PROJECT_DIR', '/home/docs/checkouts/readthedocs.org/user_builds/rapsqlite/checkouts/latest')
+      default_path = "/home/docs/checkouts/readthedocs.org/user_builds/rapsqlite/checkouts/latest"
+      source_dir = os.environ.get("READTHEDOCS_PROJECT_DIR", default_path)
       if source_dir in sys.path:
           sys.path.remove(source_dir)
       import rapsqlite
       print("Successfully imported rapsqlite", rapsqlite.__version__)
-      EOF
+      PYEOF
     - |
       if [ $? -ne 0 ]; then
         echo "ERROR: Failed to import rapsqlite"
