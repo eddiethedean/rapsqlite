@@ -6,13 +6,10 @@ build:
     python: "3.12"
     rust: "stable"
   commands:
-    # Install Rust (if not already available)
-    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-    - source $HOME/.cargo/env
     # Install build dependencies
     - pip install -r docs/requirements.txt
     - pip install maturin
-    # Build the rapsqlite package
+    # Build the rapsqlite package (Rust is available via tools.rust)
     - maturin build --release
     # Install the built wheel
     - pip install target/wheels/rapsqlite-*.whl --force-reinstall
