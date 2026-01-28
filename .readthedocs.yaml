@@ -27,22 +27,8 @@ build:
     # Verify rapsqlite can be imported (from installed package, not source)
     - echo "Verifying rapsqlite import..."
     - |
-      cd /tmp && python << 'PYEOF'
-      import sys
-      import os
-      # Remove source directory from path to ensure we import from installed package
-      default_path = "/home/docs/checkouts/readthedocs.org/user_builds/rapsqlite/checkouts/latest"
-      source_dir = os.environ.get("READTHEDOCS_PROJECT_DIR", default_path)
-      if source_dir in sys.path:
-          sys.path.remove(source_dir)
-      import rapsqlite
-      print("Successfully imported rapsqlite", rapsqlite.__version__)
-      PYEOF
-    - |
-      if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to import rapsqlite"
-        exit 1
-      fi
+      cd /tmp
+      python -c "import rapsqlite; print('Successfully imported rapsqlite', rapsqlite.__version__)" || (echo "ERROR: Failed to import rapsqlite" && exit 1)
     # Build documentation
     - echo "Building documentation with Sphinx..."
     - |
