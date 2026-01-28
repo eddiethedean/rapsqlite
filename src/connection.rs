@@ -41,7 +41,7 @@ use crate::utils::{
     cstr_from_i8_ptr, is_select_query, parse_connection_string, track_query_usage, validate_path,
 };
 use crate::OperationalError;
-use crate::{Cursor, ExecuteContextManager, TransactionContextManager};
+use crate::{Cursor, ExecuteContextManager, ProgrammingError, TransactionContextManager};
 
 /// Async SQLite connection.
 #[pyclass]
@@ -616,90 +616,120 @@ impl Connection {
         let connection_self = self_.into();
         Python::attach(|py| {
             let future = async move {
-                // Check transaction state and release lock before calling init_hook
-                // This prevents deadlock when init_hook calls conn.execute() which needs to check transaction state
                 {
-                    let trans_guard = transaction_state.lock().await;
-                    if *trans_guard == TransactionState::Active {
+                    // Atomically reserve the transaction slot to prevent concurrent begin().
+                    let mut trans_guard = transaction_state.lock().await;
+                    if trans_guard.is_active() {
                         return Err(OperationalError::new_err("Transaction already in progress"));
                     }
-                } // Lock released here
+                    *trans_guard = TransactionState::Starting;
+                } // Lock released here (avoid deadlocks with init_hook).
 
-                // Ensure pool exists before calling init_hook
-                // Note: If pool_size is 1, init_hook's execute() may compete with begin() for the connection
-                // This is handled by ensuring init_hook completes before begin() acquires connection
-                let pool_clone = get_or_create_pool(
-                    &path,
-                    &pool,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                )
-                .await?;
+                let mut from_callback = false;
+                let mut pending_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
 
-                // Execute init_hook if needed (before starting transaction)
-                // Init_hook operations will use pool connections
-                // If pool_size is 1, init_hook's execute() will get the connection, then release it
-                // before begin() tries to acquire it for the transaction
-                // Lock is released, so init_hook's execute() can check transaction state without deadlock
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-
-                // Check if callbacks are set - if so, use callback connection for transaction
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                let mut conn = if has_callbacks_flag {
-                    // Use callback connection for transaction
-                    ensure_callback_connection(
+                let result: Result<(), PyErr> = async {
+                    // Ensure pool exists before calling init_hook
+                    // Note: If pool_size is 1, init_hook's execute() may compete with begin() for the connection
+                    // This is handled by ensuring init_hook completes before begin() acquires connection
+                    let pool_clone = get_or_create_pool(
                         &path,
                         &pool,
-                        &callback_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
                     )
                     .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    conn_guard.take().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?
-                } else {
-                    // Acquire a connection from the pool for the transaction
-                    pool_clone.acquire().await.map_err(|e| {
-                        OperationalError::new_err(format!("Failed to acquire connection: {e}"))
-                    })?
-                };
 
-                // Set PRAGMA busy_timeout on this connection to handle lock contention
-                sqlx::query("PRAGMA busy_timeout = 5000")
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| map_sqlx_error(e, &path, "PRAGMA busy_timeout = 5000"))?;
+                    // Execute init_hook if needed (before starting transaction)
+                    // Lock is released, so init_hook's execute() can check transaction state without deadlock
+                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self)
+                        .await?;
 
-                // Execute BEGIN IMMEDIATE on this specific connection
-                // BEGIN IMMEDIATE acquires the write lock upfront, preventing "database is locked" errors
-                sqlx::query("BEGIN IMMEDIATE")
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| map_sqlx_error(e, &path, "BEGIN IMMEDIATE"))?;
+                    // Check if callbacks are set - if so, use callback connection for transaction
+                    let has_callbacks_flag = has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
 
-                // Store the connection for reuse in all transaction operations
-                {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    *conn_guard = Some(conn);
+                    if has_callbacks_flag {
+                        from_callback = true;
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard.take().ok_or_else(|| {
+                            OperationalError::new_err("Callback connection not available")
+                        })?;
+                        pending_conn = Some(conn);
+                    } else {
+                        let conn = pool_clone.acquire().await.map_err(|e| {
+                            OperationalError::new_err(format!("Failed to acquire connection: {e}"))
+                        })?;
+                        pending_conn = Some(conn);
+                    }
+
+                    let conn = pending_conn
+                        .as_mut()
+                        .expect("pending_conn must be set before BEGIN");
+
+                    // Set PRAGMA busy_timeout on this connection to handle lock contention
+                    sqlx::query("PRAGMA busy_timeout = 5000")
+                        .execute(&mut **conn)
+                        .await
+                        .map_err(|e| map_sqlx_error(e, &path, "PRAGMA busy_timeout = 5000"))?;
+
+                    // Execute BEGIN IMMEDIATE on this specific connection
+                    // BEGIN IMMEDIATE acquires the write lock upfront, preventing "database is locked" errors
+                    sqlx::query("BEGIN IMMEDIATE")
+                        .execute(&mut **conn)
+                        .await
+                        .map_err(|e| map_sqlx_error(e, &path, "BEGIN IMMEDIATE"))?;
+
+                    // Store the connection for reuse in all transaction operations
+                    {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        *conn_guard = pending_conn.take();
+                    }
+
+                    // Re-acquire lock to set transaction state
+                    {
+                        let mut trans_guard = transaction_state.lock().await;
+                        *trans_guard = TransactionState::Active;
+                    }
+                    Ok(())
                 }
+                .await;
 
-                // Re-acquire lock to set transaction state
-                {
+                if result.is_err() {
+                    // Restore any taken connection and clear transaction state/connection.
                     let mut trans_guard = transaction_state.lock().await;
-                    *trans_guard = TransactionState::Active;
+                    *trans_guard = TransactionState::None;
+
+                    // If we had already stored something into transaction_connection, take it back.
+                    let mut trans_conn_guard = transaction_connection.lock().await;
+                    let mut conn = trans_conn_guard.take().or_else(|| pending_conn.take());
+
+                    if from_callback {
+                        if let Some(c) = conn.take() {
+                            let mut cb_guard = callback_connection.lock().await;
+                            *cb_guard = Some(c);
+                        }
+                    } else {
+                        drop(conn);
+                    }
                 }
-                Ok(())
+
+                result
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })
@@ -894,6 +924,7 @@ impl Connection {
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let row_factory = Arc::clone(&self_.row_factory);
+        let text_factory = Arc::clone(&self_.text_factory);
         let connection_self: Py<Connection> = self_.into();
 
         // Clone query before processing (it may be moved)
@@ -967,6 +998,7 @@ impl Connection {
                 pool_size: Arc::clone(&pool_size),
                 connection_timeout_secs: Arc::clone(&connection_timeout_secs),
                 row_factory: Arc::clone(&row_factory),
+                text_factory: Arc::clone(&text_factory),
                 transaction_state: Arc::clone(&transaction_state),
                 transaction_connection: Arc::clone(&transaction_connection),
                 callback_connection: Arc::clone(&callback_connection),
@@ -1227,6 +1259,7 @@ impl Connection {
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
+        let text_factory = Arc::clone(&self_.text_factory);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
@@ -1276,7 +1309,7 @@ impl Connection {
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -1345,9 +1378,11 @@ impl Connection {
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
                     let guard = row_factory.lock().unwrap();
                     let factory_opt = guard.as_ref();
+                    let tf_guard = text_factory.lock().unwrap();
+                    let tf_opt = tf_guard.as_ref();
                     let result_list = PyList::empty(py);
                     for row in rows.iter() {
-                        let out = row_to_py_with_factory(py, row, factory_opt)?;
+                        let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
                         result_list.append(out)?;
                     }
                     Ok(result_list.into())
@@ -1404,6 +1439,7 @@ impl Connection {
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
+        let text_factory = Arc::clone(&self_.text_factory);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
@@ -1443,7 +1479,7 @@ impl Connection {
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -1511,7 +1547,9 @@ impl Connection {
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
                     let guard = row_factory.lock().unwrap();
                     let factory_opt = guard.as_ref();
-                    let out = row_to_py_with_factory(py, &row, factory_opt)?;
+                    let tf_guard = text_factory.lock().unwrap();
+                    let tf_opt = tf_guard.as_ref();
+                    let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt)?;
                     Ok(out.unbind())
                 })
             };
@@ -1570,6 +1608,7 @@ impl Connection {
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
+        let text_factory = Arc::clone(&self_.text_factory);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
@@ -1609,7 +1648,7 @@ impl Connection {
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -1689,7 +1728,9 @@ impl Connection {
                     Some(row) => Python::attach(|py| -> PyResult<Py<PyAny>> {
                         let guard = row_factory.lock().unwrap();
                         let factory_opt = guard.as_ref();
-                        let out = row_to_py_with_factory(py, &row, factory_opt)?;
+                        let tf_guard = text_factory.lock().unwrap();
+                        let tf_opt = tf_guard.as_ref();
+                        let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt)?;
                         Ok(out.unbind())
                     }),
                     None => Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) }),
@@ -1725,6 +1766,7 @@ impl Connection {
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
         let row_factory = Arc::clone(&slf.row_factory);
+        let text_factory = Arc::clone(&slf.text_factory);
         let transaction_state = Arc::clone(&slf.transaction_state);
         let transaction_connection = Arc::clone(&slf.transaction_connection);
         let callback_connection = Arc::clone(&slf.callback_connection);
@@ -1747,6 +1789,7 @@ impl Connection {
             pool_size,
             connection_timeout_secs,
             row_factory,
+            text_factory,
             transaction_state,
             transaction_connection,
             callback_connection,
@@ -1771,6 +1814,7 @@ impl Connection {
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
         let row_factory = Arc::clone(&slf.row_factory);
+        let text_factory = Arc::clone(&slf.text_factory);
         let transaction_state = Arc::clone(&slf.transaction_state);
         let transaction_connection = Arc::clone(&slf.transaction_connection);
         let callback_connection = Arc::clone(&slf.callback_connection);
@@ -1793,6 +1837,7 @@ impl Connection {
             pool_size,
             connection_timeout_secs,
             row_factory,
+            text_factory,
             transaction_state,
             transaction_connection,
             callback_connection,
@@ -2063,6 +2108,13 @@ impl Connection {
         nargs: i32,
         func: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        // SQLite supports nargs in [-1, 127]. (-1 means "any number of args".)
+        if !(-1..=127).contains(&nargs) {
+            return Err(ProgrammingError::new_err(format!(
+                "Invalid nargs for create_function: {nargs}. Expected -1..=127."
+            )));
+        }
+
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
         let callback_connection = Arc::clone(&self.callback_connection);
@@ -2946,7 +2998,7 @@ impl Connection {
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 let has_callbacks_flag = has_callbacks(
@@ -3048,6 +3100,21 @@ impl Connection {
                 // Helper function to escape SQL string
                 let escape_sql_string = |s: &str| -> String { s.replace("'", "''") };
 
+                // Helper to safely quote SQLite identifiers (table/column names).
+                // This prevents malformed SQL and avoids identifier-based SQL injection in iterdump output.
+                fn quote_ident_part(ident: &str) -> String {
+                    format!("\"{}\"", ident.replace('"', "\"\""))
+                }
+
+                // Quote potentially qualified identifiers like `schema.table` by quoting each segment.
+                fn quote_ident_path(ident: &str) -> String {
+                    ident
+                        .split('.')
+                        .map(quote_ident_part)
+                        .collect::<Vec<_>>()
+                        .join(".")
+                }
+
                 // Helper function to format value for INSERT
                 let format_value = |row: &sqlx::sqlite::SqliteRow, idx: usize| -> String {
                     use sqlx::Row;
@@ -3074,7 +3141,8 @@ impl Connection {
 
                 // Dump data for each table
                 for table_name in table_names {
-                    let query = format!("SELECT * FROM {table_name}");
+                    let quoted_table = quote_ident_path(&table_name);
+                    let query = format!("SELECT * FROM {quoted_table}");
                     let rows = if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
                         let conn = conn_guard.as_mut().ok_or_else(|| {
@@ -3125,6 +3193,9 @@ impl Connection {
                         .collect();
 
                     // Generate INSERT statements
+                    let insert_table = quote_ident_path(&table_name);
+                    let insert_cols: Vec<String> =
+                        column_names.iter().map(|c| quote_ident_part(c)).collect();
                     for row in rows {
                         let mut values = Vec::new();
                         for i in 0..column_count {
@@ -3133,8 +3204,8 @@ impl Connection {
                         let values_str = values.join(", ");
                         statements.push(format!(
                             "INSERT INTO {} ({}) VALUES ({});",
-                            table_name,
-                            column_names.join(", "),
+                            insert_table,
+                            insert_cols.join(", "),
                             values_str
                         ));
                     }
@@ -3180,7 +3251,7 @@ impl Connection {
             let future = async move {
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -3296,7 +3367,7 @@ impl Connection {
             let future = async move {
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -3449,7 +3520,7 @@ impl Connection {
             let future = async move {
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -3588,7 +3659,7 @@ impl Connection {
             let future = async move {
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -3731,7 +3802,7 @@ impl Connection {
             let future = async move {
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 let has_callbacks_flag = has_callbacks(
@@ -4029,7 +4100,7 @@ impl Connection {
             let future = async move {
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -4148,7 +4219,7 @@ impl Connection {
             let future = async move {
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -4285,7 +4356,7 @@ impl Connection {
             let future = async move {
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -4411,7 +4482,7 @@ impl Connection {
             let future = async move {
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
@@ -4612,399 +4683,355 @@ impl Connection {
             };
 
             let future = async move {
-                // Get source database handle (priority: transaction > callbacks > pool)
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
-                };
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
                 // Wrapper to make raw pointers Send-safe
                 struct SendPtr<T>(*mut T);
                 unsafe impl<T> Send for SendPtr<T> {}
                 unsafe impl<T> Sync for SendPtr<T> {}
 
-                // Acquire source handle - keep pool connection alive if needed
-                let source_handle;
-                let _source_pool_conn: Option<PoolConnection<sqlx::Sqlite>>;
+                // Type alias for connection taken from slot (slot reference + connection)
+                type TakenConnection = (
+                    Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+                    PoolConnection<sqlx::Sqlite>,
+                );
 
-                if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    let sqlite_conn: &mut SqliteConnection = &mut *conn;
-                    let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                        OperationalError::new_err(format!("Failed to lock source handle: {e}"))
-                    })?;
-                    source_handle = SendPtr(handle.as_raw_handle().as_ptr());
-                    _source_pool_conn = None;
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    let sqlite_conn: &mut SqliteConnection = &mut *conn;
-                    let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                        OperationalError::new_err(format!("Failed to lock source handle: {e}"))
-                    })?;
-                    source_handle = SendPtr(handle.as_raw_handle().as_ptr());
-                    _source_pool_conn = None;
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                    )
-                    .await?;
-                    let mut pool_conn = pool_clone.acquire().await.map_err(|e| {
-                        OperationalError::new_err(format!(
-                            "Failed to acquire source connection: {e}"
-                        ))
-                    })?;
-                    let sqlite_conn: &mut SqliteConnection = &mut pool_conn;
-                    let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                        OperationalError::new_err(format!("Failed to lock source handle: {e}"))
-                    })?;
-                    source_handle = SendPtr(handle.as_raw_handle().as_ptr());
-                    drop(handle);
-                    // Keep pool_conn alive during backup
-                    _source_pool_conn = Some(pool_conn);
-                }
+                // Keep any borrowed/shared connections exclusively held for the duration of the
+                // backup to avoid concurrent sqlx usage on the same sqlite3* handle.
+                //
+                // For pooled connections, holding the PoolConnection already provides exclusivity.
+                // For transaction/callback connections (stored in Arc<Mutex<Option<...>>>), we take
+                // the connection out of the slot and restore it afterwards.
+                let mut source_taken: Option<TakenConnection> = None;
+                let mut target_taken: Option<TakenConnection> = None;
 
-                // Get target database handle - keep pool connection alive if needed
-                let target_handle: SendPtr<sqlite3>;
-                let _target_pool_conn: Option<PoolConnection<sqlx::Sqlite>>;
-
-                if target_is_rapsqlite {
-                    // rapsqlite Connection - get handle same way as source
-                    let target_path: String = target_path_opt.unwrap();
-                    let target_pool: Arc<Mutex<Option<SqlitePool>>> = target_pool_opt.unwrap();
-                    let target_pragmas: Arc<StdMutex<Vec<(String, String)>>> =
-                        target_pragmas_opt.unwrap();
-                    let target_pool_size: Arc<StdMutex<Option<usize>>> =
-                        target_pool_size_opt.unwrap();
-                    let target_connection_timeout_secs: Arc<StdMutex<Option<u64>>> =
-                        target_connection_timeout_secs_opt.unwrap();
-                    let target_transaction_state: Arc<Mutex<TransactionState>> =
-                        target_transaction_state_opt.unwrap();
-                    let target_transaction_connection: Arc<
-                        Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
-                    > = target_transaction_connection_opt.unwrap();
-                    let target_callback_connection: Arc<
-                        Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
-                    > = target_callback_connection_opt.unwrap();
-                    let target_load_extension_enabled: Arc<StdMutex<bool>> =
-                        target_load_extension_enabled_opt.unwrap();
-                    let target_user_functions: UserFunctions = target_user_functions_opt.unwrap();
-                    let target_trace_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
-                        target_trace_callback_opt.unwrap();
-                    let target_authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
-                        target_authorizer_callback_opt.unwrap();
-                    let target_progress_handler: ProgressHandler =
-                        target_progress_handler_opt.unwrap();
-
-                    let target_in_transaction = {
-                        let g = target_transaction_state.lock().await;
-                        *g == TransactionState::Active
+                let result: Result<(), PyErr> = async {
+                    // Determine source connection kind.
+                    let in_transaction = {
+                        let g = transaction_state.lock().await;
+                        g.is_active()
                     };
-
-                    let target_has_callbacks_flag = has_callbacks(
-                        &target_load_extension_enabled,
-                        &target_user_functions,
-                        &target_trace_callback,
-                        &target_authorizer_callback,
-                        &target_progress_handler,
+                    let has_callbacks_flag = has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
                     );
 
-                    if target_in_transaction {
-                        let mut conn_guard = target_transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Target transaction connection not available")
-                        })?;
-                        let sqlite_conn: &mut SqliteConnection = &mut *conn;
-                        let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                            OperationalError::new_err(format!("Failed to lock target handle: {e}"))
-                        })?;
-                        target_handle = SendPtr(handle.as_raw_handle().as_ptr());
-                        drop(handle);
-                        _target_pool_conn = None;
-                    } else if target_has_callbacks_flag {
+                    // Acquire an exclusive source PoolConnection.
+                    let mut source_pool_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
+                    if in_transaction {
+                        let mut guard = transaction_connection.lock().await;
+                        let conn = guard
+                            .take()
+                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+                        source_taken = Some((Arc::clone(&transaction_connection), conn));
+                    } else if has_callbacks_flag {
                         ensure_callback_connection(
-                            &target_path,
-                            &target_pool,
-                            &target_callback_connection,
-                            &target_pragmas,
-                            &target_pool_size,
-                            &target_connection_timeout_secs,
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
                         )
                         .await?;
-                        let mut conn_guard = target_callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Target callback connection not available")
-                        })?;
-                        let sqlite_conn: &mut SqliteConnection = &mut *conn;
+                        let mut guard = callback_connection.lock().await;
+                        let conn = guard
+                            .take()
+                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+                        source_taken = Some((Arc::clone(&callback_connection), conn));
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                        source_pool_conn = Some(pool_clone.acquire().await.map_err(|e| {
+                            OperationalError::new_err(format!("Failed to acquire source connection: {e}"))
+                        })?);
+                    }
+
+                    // Get a mutable reference to the exclusive source connection.
+                    let source_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some((_, ref mut conn)) = source_taken {
+                        conn
+                    } else {
+                        source_pool_conn.as_mut().expect("source_pool_conn must exist")
+                    };
+
+                    // Acquire an exclusive target handle.
+                    let mut target_pool_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
+                    let target_handle: SendPtr<sqlite3>;
+                    if target_is_rapsqlite {
+                        let target_path: String = target_path_opt.clone().unwrap();
+                        let target_pool: Arc<Mutex<Option<SqlitePool>>> = target_pool_opt.clone().unwrap();
+                        let target_pragmas: Arc<StdMutex<Vec<(String, String)>>> =
+                            target_pragmas_opt.clone().unwrap();
+                        let target_pool_size: Arc<StdMutex<Option<usize>>> =
+                            target_pool_size_opt.clone().unwrap();
+                        let target_connection_timeout_secs: Arc<StdMutex<Option<u64>>> =
+                            target_connection_timeout_secs_opt.clone().unwrap();
+                        let target_transaction_state: Arc<Mutex<TransactionState>> =
+                            target_transaction_state_opt.clone().unwrap();
+                        let target_transaction_connection: Arc<
+                            Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
+                        > = target_transaction_connection_opt.clone().unwrap();
+                        let target_callback_connection: Arc<
+                            Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
+                        > = target_callback_connection_opt.clone().unwrap();
+                        let target_load_extension_enabled: Arc<StdMutex<bool>> =
+                            target_load_extension_enabled_opt.clone().unwrap();
+                        let target_user_functions: UserFunctions = target_user_functions_opt.clone().unwrap();
+                        let target_trace_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
+                            target_trace_callback_opt.clone().unwrap();
+                        let target_authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
+                            target_authorizer_callback_opt.clone().unwrap();
+                        let target_progress_handler: ProgressHandler =
+                            target_progress_handler_opt.clone().unwrap();
+
+                        let target_in_transaction = {
+                            let g = target_transaction_state.lock().await;
+                            g.is_active()
+                        };
+
+                        let target_has_callbacks_flag = has_callbacks(
+                            &target_load_extension_enabled,
+                            &target_user_functions,
+                            &target_trace_callback,
+                            &target_authorizer_callback,
+                            &target_progress_handler,
+                        );
+
+                        if target_in_transaction {
+                            let mut guard = target_transaction_connection.lock().await;
+                            let conn = guard.take().ok_or_else(|| {
+                                OperationalError::new_err("Target transaction connection not available")
+                            })?;
+                            target_taken = Some((Arc::clone(&target_transaction_connection), conn));
+                        } else if target_has_callbacks_flag {
+                            ensure_callback_connection(
+                                &target_path,
+                                &target_pool,
+                                &target_callback_connection,
+                                &target_pragmas,
+                                &target_pool_size,
+                                &target_connection_timeout_secs,
+                            )
+                            .await?;
+                            let mut guard = target_callback_connection.lock().await;
+                            let conn = guard.take().ok_or_else(|| {
+                                OperationalError::new_err("Target callback connection not available")
+                            })?;
+                            target_taken = Some((Arc::clone(&target_callback_connection), conn));
+                        } else {
+                            let target_pool_clone = get_or_create_pool(
+                                &target_path,
+                                &target_pool,
+                                &target_pragmas,
+                                &target_pool_size,
+                                &target_connection_timeout_secs,
+                            )
+                            .await?;
+                            target_pool_conn = Some(target_pool_clone.acquire().await.map_err(|e| {
+                                OperationalError::new_err(format!("Failed to acquire target connection: {e}"))
+                            })?);
+                        }
+
+                        let target_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some((_, ref mut conn)) = target_taken {
+                            conn
+                        } else {
+                            target_pool_conn.as_mut().expect("target_pool_conn must exist")
+                        };
+
+                        let sqlite_conn: &mut SqliteConnection = &mut *target_conn;
                         let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
                             OperationalError::new_err(format!("Failed to lock target handle: {e}"))
                         })?;
                         target_handle = SendPtr(handle.as_raw_handle().as_ptr());
-                        drop(handle);
-                        _target_pool_conn = None;
                     } else {
-                        let target_pool_clone = get_or_create_pool(
-                            &target_path,
-                            &target_pool,
-                            &target_pragmas,
-                            &target_pool_size,
-                            &target_connection_timeout_secs,
-                        )
-                        .await?;
-                        let mut target_pool_conn =
-                            target_pool_clone.acquire().await.map_err(|e| {
+                        // sqlite3.Connection - use Python helper to extract handle.
+                        #[allow(deprecated)]
+                        let handle_ptr = Python::with_gil(|py| -> PyResult<*mut sqlite3> {
+                            let backup_helper = py.import("rapsqlite._backup_helper").map_err(|e| {
                                 OperationalError::new_err(format!(
-                                    "Failed to acquire target connection: {e}"
+                                    "Failed to import backup helper: {e}. Make sure rapsqlite package is properly installed."
                                 ))
                             })?;
-                        let sqlite_conn: &mut SqliteConnection = &mut target_pool_conn;
-                        let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                            OperationalError::new_err(format!("Failed to lock target handle: {e}"))
-                        })?;
-                        target_handle = SendPtr(handle.as_raw_handle().as_ptr());
-                        drop(handle);
-                        _target_pool_conn = Some(target_pool_conn);
-                    }
-                } else {
-                    // sqlite3.Connection - use Python helper to extract handle
-                    // The handle is stored in the internal pysqlite_Connection struct
-                    // We use a Python helper function with ctypes to safely extract it
-                    // IMPORTANT: target_clone is already cloned and will keep the connection alive
-                    // throughout the async future. We must ensure it stays in scope.
-                    // Note: Python::with_gil is used here for sync handle extraction in async context.
-                    // The deprecation warning is acceptable as this is a sync operation within async.
-                    #[allow(deprecated)]
-                    let handle_ptr = Python::with_gil(|py| -> PyResult<*mut sqlite3> {
-                        // Import the backup helper module
-                        let backup_helper = py.import("rapsqlite._backup_helper")
-                            .map_err(|e| OperationalError::new_err(format!(
-                                "Failed to import backup helper: {e}. Make sure rapsqlite package is properly installed."
-                            )))?;
-
-                        // Get the get_sqlite3_handle function
-                        let get_handle =
-                            backup_helper.getattr("get_sqlite3_handle").map_err(|e| {
+                            let get_handle = backup_helper.getattr("get_sqlite3_handle").map_err(|e| {
                                 OperationalError::new_err(format!(
                                     "Failed to get get_sqlite3_handle function: {e}"
                                 ))
                             })?;
-
-                        // Call the function with the target connection
-                        let conn_obj = target_clone.bind(py);
-                        let result = get_handle.call1((conn_obj,)).map_err(|e| {
-                            OperationalError::new_err(format!(
-                                "Failed to extract sqlite3* handle: {e}"
-                            ))
+                            let conn_obj = target_clone.bind(py);
+                            let result = get_handle.call1((conn_obj,)).map_err(|e| {
+                                OperationalError::new_err(format!("Failed to extract sqlite3* handle: {e}"))
+                            })?;
+                            if result.is_none() {
+                                return Err(OperationalError::new_err(
+                                    "Could not extract sqlite3* handle from target connection. \
+                                    Target must be a rapsqlite.Connection or sqlite3.Connection. \
+                                    The connection may be closed or invalid.",
+                                ));
+                            }
+                            let ptr_val: usize = result.extract().map_err(|e| {
+                                OperationalError::new_err(format!("Failed to extract pointer value: {e}"))
+                            })?;
+                            if ptr_val == 0 {
+                                return Err(OperationalError::new_err(
+                                    "Extracted sqlite3* handle is null. Connection may be closed.",
+                                ));
+                            }
+                            Ok(ptr_val as *mut sqlite3)
                         })?;
 
-                        // Check if extraction succeeded (returns None on failure)
-                        if result.is_none() {
+                        if handle_ptr.is_null() {
                             return Err(OperationalError::new_err(
-                                "Could not extract sqlite3* handle from target connection. \
-                                Target must be a rapsqlite.Connection or sqlite3.Connection. \
-                                The connection may be closed or invalid.",
+                                "Extracted sqlite3* handle is null. Connection may be closed or invalid.",
                             ));
                         }
+                        // Keep the Python object alive for the whole backup.
+                        let _ensure_target_alive = &target_clone;
+                        target_handle = SendPtr(handle_ptr);
+                    }
 
-                        // Extract the pointer value as usize
-                        let ptr_val: usize = result.extract().map_err(|e| {
-                            OperationalError::new_err(format!(
-                                "Failed to extract pointer value: {e}"
-                            ))
+                    // Get source handle pointer (after ensuring exclusive ownership of the connection).
+                    // Important: do NOT hold the LockedSqliteHandle across await points.
+                    let source_handle = {
+                        let sqlite_conn: &mut SqliteConnection = &mut *source_conn;
+                        let mut guard = sqlite_conn.lock_handle().await.map_err(|e| {
+                            OperationalError::new_err(format!("Failed to lock source handle: {e}"))
                         })?;
+                        SendPtr(guard.as_raw_handle().as_ptr())
+                    };
 
-                        // Verify pointer is not null
-                        if ptr_val == 0 {
-                            return Err(OperationalError::new_err(
-                                "Extracted sqlite3* handle is null. Connection may be closed.",
-                            ));
-                        }
-
-                        Ok(ptr_val as *mut sqlite3)
-                    })?;
-
-                    // Validate handle before use
-                    if handle_ptr.is_null() {
+                    // Validate handles.
+                    if source_handle.0.is_null() {
                         return Err(OperationalError::new_err(
-                            "Extracted sqlite3* handle is null. Connection may be closed or invalid."
+                            "Source sqlite3* handle is null. Connection may be closed or invalid.",
+                        ));
+                    }
+                    if target_handle.0.is_null() {
+                        return Err(OperationalError::new_err(
+                            "Target sqlite3* handle is null. Connection may be closed or invalid.",
                         ));
                     }
 
-                    // Verify handle points to valid SQLite connection by checking autocommit state
-                    // This is a safe operation that validates the handle is usable
-                    let _autocommit_check = unsafe { sqlite3_get_autocommit(handle_ptr) };
-                    // autocommit_check returns 0 (false) or non-zero (true), both are valid
-                    // If handle is invalid, this might segfault, but we need to catch it early
-
-                    target_handle = SendPtr(handle_ptr);
-                    _target_pool_conn = None;
-                    // target_clone (cloned at line 3430) stays in scope for the entire async future,
-                    // keeping the Python connection object alive and preventing handle invalidation
-                    // The handle is only valid as long as the Python object exists
-                    let _ensure_target_alive = &target_clone; // Explicit reference to keep in scope
-                }
-
-                // Validate source handle as well
-                if source_handle.0.is_null() {
-                    return Err(OperationalError::new_err(
-                        "Source sqlite3* handle is null. Connection may be closed or invalid.",
-                    ));
-                }
-
-                // Check SQLite library version compatibility
-                let source_libversion = unsafe {
-                    cstr_from_i8_ptr(sqlite3_libversion())
-                        .to_string_lossy()
-                        .to_string()
-                };
-                // Note: Both should use same library, but verify for debugging
-
-                // Convert database name to C string
-                let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                    OperationalError::new_err(format!("Invalid database name: {e}"))
-                })?;
-
-                // Check connection states before backup
-                // SQLite backup requires destination to not have active transactions
-                // Verify both source and target are in valid states
-                let target_has_transaction =
-                    unsafe { sqlite3_get_autocommit(target_handle.0) == 0 };
-                if target_has_transaction {
-                    return Err(OperationalError::new_err(
-                        "Cannot backup: target connection has an active transaction. \
-                        Commit or rollback the transaction before backup.",
-                    ));
-                }
-
-                // Verify source connection is also in valid state
-                // Source can have transactions, but should be open and valid
-                let _source_autocommit = unsafe { sqlite3_get_autocommit(source_handle.0) };
-                // Both 0 (in transaction) and non-zero (autocommit) are valid for source
-                // This check just verifies the handle is valid and connection is open
-
-                // Initialize backup
-                let backup_handle: SendPtr<libsqlite3_sys::sqlite3_backup> = SendPtr(unsafe {
-                    sqlite3_backup_init(
-                        target_handle.0,
-                        name_cstr.as_ptr(),
-                        source_handle.0,
-                        name_cstr.as_ptr(),
-                    )
-                });
-
-                if backup_handle.0.is_null() {
-                    // Get detailed error information
-                    let error_code = unsafe { sqlite3_errcode(target_handle.0) };
-                    let error_msg = unsafe {
-                        let msg_ptr = sqlite3_errmsg(target_handle.0);
-                        if msg_ptr.is_null() {
-                            "Unknown error (null error message)".to_string()
-                        } else {
-                            cstr_from_i8_ptr(msg_ptr).to_string_lossy().to_string()
-                        }
+                    // Check SQLite library version compatibility (debug info).
+                    let source_libversion = unsafe {
+                        cstr_from_i8_ptr(sqlite3_libversion())
+                            .to_string_lossy()
+                            .to_string()
                     };
 
-                    return Err(OperationalError::new_err(format!(
-                        "Failed to initialize backup: SQLite error code {error_code}, message: '{error_msg}'. \
-                        Source libversion: {source_libversion}. \
-                        Ensure both connections are open and target has no active transactions."
-                    )));
-                }
+                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                        OperationalError::new_err(format!("Invalid database name: {e}"))
+                    })?;
 
-                // Backup loop
-                loop {
-                    let pages_to_copy = if pages == 0 { -1 } else { pages };
-                    let result = unsafe { sqlite3_backup_step(backup_handle.0, pages_to_copy) };
+                    // SQLite backup requires destination to not have active transactions.
+                    let target_has_transaction = unsafe { sqlite3_get_autocommit(target_handle.0) == 0 };
+                    if target_has_transaction {
+                        return Err(OperationalError::new_err(
+                            "Cannot backup: target connection has an active transaction. \
+                            Commit or rollback the transaction before backup.",
+                        ));
+                    }
 
-                    match result {
-                        SQLITE_OK | SQLITE_BUSY | SQLITE_LOCKED => {
-                            // Progress - call progress callback if provided
-                            if let Some(ref progress_cb) = progress_callback {
-                                let remaining =
-                                    unsafe { sqlite3_backup_remaining(backup_handle.0) };
-                                let page_count =
-                                    unsafe { sqlite3_backup_pagecount(backup_handle.0) };
-                                let pages_copied = page_count - remaining;
+                    // Initialize backup.
+                    let backup_handle: SendPtr<libsqlite3_sys::sqlite3_backup> = SendPtr(unsafe {
+                        sqlite3_backup_init(
+                            target_handle.0,
+                            name_cstr.as_ptr(),
+                            source_handle.0,
+                            name_cstr.as_ptr(),
+                        )
+                    });
 
-                                // Call Python callback with GIL
-                                // Note: Python::with_gil is used here for sync callback execution in async context.
-                                // The deprecation warning is acceptable as this is a sync operation within async.
-                                #[allow(deprecated)]
-                                // Note: Python::with_gil is used here for sync operation in async context.
-                                // The deprecation warning is acceptable as this is a sync operation within async.
-                                #[allow(deprecated)]
-                                Python::with_gil(|py| {
-                                    let callback = progress_cb.bind(py);
-                                    let remaining_py: Py<PyAny> =
-                                        PyInt::new(py, remaining as i64).into_any().unbind();
-                                    let page_count_py: Py<PyAny> =
-                                        PyInt::new(py, page_count as i64).into_any().unbind();
-                                    let pages_copied_py: Py<PyAny> =
-                                        PyInt::new(py, pages_copied as i64).into_any().unbind();
-                                    if let Ok(args) = PyTuple::new(
-                                        py,
-                                        &[remaining_py, page_count_py, pages_copied_py],
-                                    ) {
-                                        // Ignore errors in progress callback - don't abort backup
-                                        let _ = callback.call1(args);
-                                    }
-                                });
+                    if backup_handle.0.is_null() {
+                        let error_code = unsafe { sqlite3_errcode(target_handle.0) };
+                        let error_msg = unsafe {
+                            let msg_ptr = sqlite3_errmsg(target_handle.0);
+                            if msg_ptr.is_null() {
+                                "Unknown error (null error message)".to_string()
+                            } else {
+                                cstr_from_i8_ptr(msg_ptr).to_string_lossy().to_string()
                             }
+                        };
 
-                            // Sleep before next step
-                            tokio::time::sleep(Duration::from_secs_f64(sleep)).await;
-                        }
-                        SQLITE_DONE => {
-                            // Backup complete
-                            break;
-                        }
-                        _ => {
-                            // Error - cleanup and return error
-                            unsafe {
-                                sqlite3_backup_finish(backup_handle.0);
+                        return Err(OperationalError::new_err(format!(
+                            "Failed to initialize backup: SQLite error code {error_code}, message: '{error_msg}'. \
+                            Source libversion: {source_libversion}. \
+                            Ensure both connections are open and target has no active transactions."
+                        )));
+                    }
+
+                    // Backup loop.
+                    loop {
+                        let pages_to_copy = if pages == 0 { -1 } else { pages };
+                        let step_result = unsafe { sqlite3_backup_step(backup_handle.0, pages_to_copy) };
+
+                        match step_result {
+                            SQLITE_OK | SQLITE_BUSY | SQLITE_LOCKED => {
+                                if let Some(ref progress_cb) = progress_callback {
+                                    let remaining = unsafe { sqlite3_backup_remaining(backup_handle.0) };
+                                    let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
+                                    let pages_copied = page_count - remaining;
+
+                                    #[allow(deprecated)]
+                                    Python::with_gil(|py| {
+                                        let callback = progress_cb.bind(py);
+                                        let remaining_py: Py<PyAny> =
+                                            PyInt::new(py, remaining as i64).into_any().unbind();
+                                        let page_count_py: Py<PyAny> =
+                                            PyInt::new(py, page_count as i64).into_any().unbind();
+                                        let pages_copied_py: Py<PyAny> =
+                                            PyInt::new(py, pages_copied as i64).into_any().unbind();
+                                        if let Ok(args) = PyTuple::new(
+                                            py,
+                                            &[remaining_py, page_count_py, pages_copied_py],
+                                        ) {
+                                            let _ = callback.call1(args);
+                                        }
+                                    });
+                                }
+
+                                tokio::time::sleep(Duration::from_secs_f64(sleep)).await;
                             }
-                            return Err(OperationalError::new_err(format!(
-                                "Backup failed with SQLite error code: {result}"
-                            )));
+                            SQLITE_DONE => break,
+                            _ => {
+                                unsafe {
+                                    sqlite3_backup_finish(backup_handle.0);
+                                }
+                                return Err(OperationalError::new_err(format!(
+                                    "Backup failed with SQLite error code: {step_result}"
+                                )));
+                            }
                         }
                     }
+
+                    let final_result = unsafe { sqlite3_backup_finish(backup_handle.0) };
+                    if final_result != SQLITE_OK {
+                        return Err(OperationalError::new_err(format!(
+                            "Backup finish failed with SQLite error code: {final_result}"
+                        )));
+                    }
+
+                    Ok(())
+                }
+                .await;
+
+                // Restore any taken connections back to their slots.
+                if let Some((slot, conn)) = source_taken {
+                    let mut g = slot.lock().await;
+                    *g = Some(conn);
+                }
+                if let Some((slot, conn)) = target_taken {
+                    let mut g = slot.lock().await;
+                    *g = Some(conn);
                 }
 
-                // Finalize backup
-                let final_result = unsafe { sqlite3_backup_finish(backup_handle.0) };
-                if final_result != SQLITE_OK {
-                    return Err(OperationalError::new_err(format!(
-                        "Backup finish failed with SQLite error code: {final_result}"
-                    )));
-                }
-
-                Ok(())
+                result
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })

@@ -12,7 +12,7 @@ from rapsqlite import connect
 
 
 @pytest.mark.performance
-@pytest.mark.slow
+@pytest.mark.perf_smoke  # Quick smoke test for PR CI
 @pytest.mark.asyncio
 async def test_query_execution_time(test_db):
     """Test that query execution time is reasonable."""
@@ -74,7 +74,7 @@ async def test_connection_pool_performance(test_db):
 
 
 @pytest.mark.performance
-@pytest.mark.slow
+@pytest.mark.perf_smoke  # Quick smoke test for PR CI
 @pytest.mark.asyncio
 async def test_prepared_statement_cache_performance(test_db):
     """Test prepared statement cache effectiveness."""

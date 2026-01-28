@@ -93,7 +93,7 @@ impl ExecuteContextManager {
                 if !is_select {
                     let in_transaction = {
                         let g = transaction_state.lock().await;
-                        *g == TransactionState::Active
+                        g.is_active()
                     };
 
                     if !in_transaction {
@@ -166,7 +166,7 @@ impl ExecuteContextManager {
                     // For SELECT queries, ensure pool exists for lazy execution
                     let in_transaction = {
                         let g = transaction_state.lock().await;
-                        *g == TransactionState::Active
+                        g.is_active()
                     };
 
                     // Check if init_hook is already being executed (to avoid deadlock)
@@ -286,54 +286,67 @@ impl TransactionContextManager {
             let init_hook = Arc::clone(&slf.borrow(py).init_hook);
             let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
             let future = async move {
-                // Check transaction state and release lock before calling init_hook
-                // This prevents deadlock when init_hook calls conn.execute() which needs to check transaction state
-                {
-                    let trans_guard = transaction_state.lock().await;
-                    if *trans_guard == TransactionState::Active {
-                        return Err(OperationalError::new_err("Transaction already in progress"));
-                    }
-                } // Lock released here
-
-                let pool_clone = get_or_create_pool(
-                    &path,
-                    &pool,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                )
-                .await?;
-
-                // Execute init_hook if needed (before starting transaction)
-                // Clone connection before passing to async function
-                // Lock is released, so init_hook's execute() can check transaction state without deadlock
-                // Note: Python::with_gil is used here for sync clone_ref in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                let connection_for_hook = Python::with_gil(|py| connection.clone_ref(py));
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook)
-                    .await?;
-                let mut conn = pool_clone.acquire().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to acquire connection: {e}"))
-                })?;
-                sqlx::query("PRAGMA busy_timeout = 5000")
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| map_sqlx_error(e, &path, "PRAGMA busy_timeout = 5000"))?;
-                sqlx::query("BEGIN IMMEDIATE")
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| map_sqlx_error(e, &path, "BEGIN IMMEDIATE"))?;
-                {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    *conn_guard = Some(conn);
-                }
-                // Re-acquire lock to set transaction state
+                // Atomically reserve the transaction slot to prevent concurrent begin().
                 {
                     let mut trans_guard = transaction_state.lock().await;
-                    *trans_guard = TransactionState::Active;
+                    if trans_guard.is_active() {
+                        return Err(OperationalError::new_err("Transaction already in progress"));
+                    }
+                    *trans_guard = TransactionState::Starting;
+                } // Lock released here (avoid deadlocks with init_hook).
+
+                let result: Result<Py<PyAny>, PyErr> = async {
+                    let pool_clone = get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+
+                    // Execute init_hook if needed (before starting transaction)
+                    // Clone connection before passing to async function
+                    // Note: Python::with_gil is used here for sync clone_ref in async context.
+                    // The deprecation warning is acceptable as this is a sync operation within async.
+                    #[allow(deprecated)]
+                    let connection_for_hook = Python::with_gil(|py| connection.clone_ref(py));
+                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook)
+                        .await?;
+
+                    let mut conn = pool_clone.acquire().await.map_err(|e| {
+                        OperationalError::new_err(format!("Failed to acquire connection: {e}"))
+                    })?;
+                    sqlx::query("PRAGMA busy_timeout = 5000")
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(|e| map_sqlx_error(e, &path, "PRAGMA busy_timeout = 5000"))?;
+                    sqlx::query("BEGIN IMMEDIATE")
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(|e| map_sqlx_error(e, &path, "BEGIN IMMEDIATE"))?;
+                    {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        *conn_guard = Some(conn);
+                    }
+                    // Re-acquire lock to set transaction state
+                    {
+                        let mut trans_guard = transaction_state.lock().await;
+                        *trans_guard = TransactionState::Active;
+                    }
+                    Ok(connection.into())
                 }
-                Ok(connection)
+                .await;
+
+                // On failure, release the reservation.
+                if result.is_err() {
+                    let mut trans_guard = transaction_state.lock().await;
+                    *trans_guard = TransactionState::None;
+                    let mut conn_guard = transaction_connection.lock().await;
+                    conn_guard.take();
+                }
+
+                result
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })

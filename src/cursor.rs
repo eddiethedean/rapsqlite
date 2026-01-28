@@ -38,6 +38,7 @@ pub(crate) struct Cursor {
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's row_factory at cursor creation
+    pub(crate) text_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's text_factory
     // Transaction and callback state for proper connection priority
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
     pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
@@ -120,6 +121,7 @@ impl Cursor {
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
+        let text_factory = Arc::clone(&self.text_factory);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let callback_connection = Arc::clone(&self.callback_connection);
@@ -172,7 +174,7 @@ impl Cursor {
                     // Priority: transaction > callbacks > pool
                     let in_transaction = {
                         let g = transaction_state.lock().await;
-                        *g == TransactionState::Active
+                        g.is_active()
                     };
 
                     let has_callbacks_flag = has_callbacks(
@@ -238,9 +240,11 @@ impl Cursor {
                     let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
                         let guard = row_factory.lock().unwrap();
                         let factory_opt = guard.as_ref();
+                        let tf_guard = text_factory.lock().unwrap();
+                        let tf_opt = tf_guard.as_ref();
                         let mut vec = Vec::new();
                         for row in rows.iter() {
-                            let out = row_to_py_with_factory(py, row, factory_opt)?;
+                            let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
                             vec.push(out.unbind());
                         }
                         Ok(vec)
@@ -298,6 +302,7 @@ impl Cursor {
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
+        let text_factory = Arc::clone(&self.text_factory);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let callback_connection = Arc::clone(&self.callback_connection);
@@ -413,7 +418,7 @@ impl Cursor {
                         // Check transaction state - must check inside async future to get current state
                         let in_transaction = {
                             let g = transaction_state.lock().await;
-                            *g == TransactionState::Active
+                            g.is_active()
                         };
 
                         let has_callbacks_flag = has_callbacks(
@@ -487,9 +492,11 @@ impl Cursor {
                         let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
                             let guard = row_factory.lock().unwrap();
                             let factory_opt = guard.as_ref();
+                            let tf_guard = text_factory.lock().unwrap();
+                            let tf_opt = tf_guard.as_ref();
                             let mut vec = Vec::new();
                             for row in rows.iter() {
-                                let out = row_to_py_with_factory(py, row, factory_opt)?;
+                                let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
                                 vec.push(out.unbind());
                             }
                             Ok(vec)
@@ -553,6 +560,7 @@ impl Cursor {
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
+        let text_factory = Arc::clone(&self.text_factory);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let callback_connection = Arc::clone(&self.callback_connection);
@@ -611,7 +619,7 @@ impl Cursor {
                     // Priority: transaction > callbacks > pool
                     let in_transaction = {
                         let g = transaction_state.lock().await;
-                        *g == TransactionState::Active
+                        g.is_active()
                     };
 
                     let has_callbacks_flag = has_callbacks(
@@ -678,9 +686,11 @@ impl Cursor {
                     let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
                         let guard = row_factory.lock().unwrap();
                         let factory_opt = guard.as_ref();
+                        let tf_guard = text_factory.lock().unwrap();
+                        let tf_opt = tf_guard.as_ref();
                         let mut vec = Vec::new();
                         for row in rows.iter() {
-                            let out = row_to_py_with_factory(py, row, factory_opt)?;
+                            let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
                             vec.push(out.unbind());
                         }
                         Ok(vec)
@@ -789,7 +799,7 @@ impl Cursor {
                 // Check transaction state and callback flags
                 let in_transaction = {
                     let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
+                    g.is_active()
                 };
 
                 let has_callbacks_flag = has_callbacks(

@@ -845,7 +845,7 @@ async def test_init_hook_with_iterdump(tmp_path):
     # Verify dump contains our table and data
     dump_str = "\n".join(dump)
     assert "CREATE TABLE test" in dump_str
-    assert "INSERT INTO test" in dump_str
+    assert ("INSERT INTO test" in dump_str) or ('INSERT INTO "test"' in dump_str)
 
 
 @pytest.mark.asyncio

@@ -159,29 +159,50 @@ pub(crate) fn sqlite_value_to_py<'py>(
     py: Python<'py>,
     row: &sqlx::sqlite::SqliteRow,
     col: usize,
+    text_factory: Option<&Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Try Option types first to detect NULL
+    use sqlx::{Column, Row, TypeInfo};
+
+    // Apply `text_factory` only for declared TEXT columns (aiosqlite/sqlite3 semantics).
+    if let Some(tf) = text_factory {
+        let tf_bound = tf.bind(py);
+        if !tf_bound.is_none() {
+            let declared = row.columns()[col].type_info().name().to_ascii_uppercase();
+            if declared == "TEXT" {
+                // Prefer String decoding (sqlx already decodes TEXT as UTF-8).
+                // We pass bytes to the text_factory, matching sqlite3's callable(bytes)->Any behavior.
+                if let Ok(opt_val) = row.try_get::<Option<String>, _>(col) {
+                    return Ok(match opt_val {
+                        Some(val) => {
+                            let arg = PyBytes::new(py, val.as_bytes());
+                            tf_bound.call1((arg,))?.unbind()
+                        }
+                        None => py.None(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Fallback path: best-effort type probing (kept for robustness).
     if let Ok(opt_val) = row.try_get::<Option<i64>, _>(col) {
         return Ok(match opt_val {
             Some(val) => PyInt::new(py, val).into(),
             None => py.None(),
         });
     }
-
     if let Ok(opt_val) = row.try_get::<Option<f64>, _>(col) {
         return Ok(match opt_val {
             Some(val) => PyFloat::new(py, val).into(),
             None => py.None(),
         });
     }
-
     if let Ok(opt_val) = row.try_get::<Option<String>, _>(col) {
         return Ok(match opt_val {
             Some(val) => PyString::new(py, &val).into(),
             None => py.None(),
         });
     }
-
     if let Ok(opt_val) = row.try_get::<Option<Vec<u8>>, _>(col) {
         return Ok(match opt_val {
             Some(val) => PyBytes::new(py, &val).into(),
@@ -189,24 +210,6 @@ pub(crate) fn sqlite_value_to_py<'py>(
         });
     }
 
-    // Try non-Option types
-    if let Ok(val) = row.try_get::<i64, _>(col) {
-        return Ok(PyInt::new(py, val).into());
-    }
-
-    if let Ok(val) = row.try_get::<f64, _>(col) {
-        return Ok(PyFloat::new(py, val).into());
-    }
-
-    if let Ok(val) = row.try_get::<String, _>(col) {
-        return Ok(PyString::new(py, &val).into());
-    }
-
-    if let Ok(val) = row.try_get::<Vec<u8>, _>(col) {
-        return Ok(PyBytes::new(py, &val).into());
-    }
-
-    // Last resort: return None (treat as NULL)
     Ok(py.None())
 }
 
@@ -214,10 +217,11 @@ pub(crate) fn sqlite_value_to_py<'py>(
 pub(crate) fn row_to_py_list<'py>(
     py: Python<'py>,
     row: &sqlx::sqlite::SqliteRow,
+    text_factory: Option<&Py<PyAny>>,
 ) -> PyResult<Bound<'py, PyList>> {
     let list = PyList::empty(py);
     for i in 0..row.len() {
-        let val = sqlite_value_to_py(py, row, i)?;
+        let val = sqlite_value_to_py(py, row, i, text_factory)?;
         list.append(val)?;
     }
     Ok(list)
@@ -229,8 +233,9 @@ pub(crate) fn row_to_py_with_factory<'py>(
     py: Python<'py>,
     row: &sqlx::sqlite::SqliteRow,
     factory: Option<&Py<PyAny>>,
+    text_factory: Option<&Py<PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let default = || row_to_py_list(py, row).map(|l| l.into_any());
+    let default = || row_to_py_list(py, row, text_factory).map(|l| l.into_any());
     let Some(f) = factory else {
         return default();
     };
@@ -245,7 +250,7 @@ pub(crate) fn row_to_py_with_factory<'py>(
                 let dict = PyDict::new(py);
                 for i in 0..row.len() {
                     let col_name = row.columns()[i].name();
-                    let val = sqlite_value_to_py(py, row, i)?;
+                    let val = sqlite_value_to_py(py, row, i, text_factory)?;
                     dict.set_item(col_name, val)?;
                 }
                 Ok(dict.into_any())
@@ -253,7 +258,7 @@ pub(crate) fn row_to_py_with_factory<'py>(
             "tuple" => {
                 let mut vals = Vec::new();
                 for i in 0..row.len() {
-                    vals.push(sqlite_value_to_py(py, row, i)?);
+                    vals.push(sqlite_value_to_py(py, row, i, text_factory)?);
                 }
                 let tuple = PyTuple::new(py, vals)?;
                 Ok(tuple.into_any())
@@ -275,7 +280,7 @@ pub(crate) fn row_to_py_with_factory<'py>(
                 let mut values = Vec::new();
                 for i in 0..row.len() {
                     columns.push(row.columns()[i].name().to_string());
-                    let val = sqlite_value_to_py(py, row, i)?;
+                    let val = sqlite_value_to_py(py, row, i, text_factory)?;
                     values.push(val);
                 }
                 let raprow = raprow_class.call1((columns, values))?;
@@ -285,7 +290,7 @@ pub(crate) fn row_to_py_with_factory<'py>(
     }
 
     // Fallback: treat as callable
-    let list = row_to_py_list(py, row)?;
+    let list = row_to_py_list(py, row, text_factory)?;
     let result = f.call1((list,))?;
     Ok(result)
 }
