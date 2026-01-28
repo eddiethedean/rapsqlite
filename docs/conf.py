@@ -60,6 +60,15 @@ autoclass_content = "both"  # Include both class and __init__ docstrings
 autodoc_typehints = "description"  # Show type hints in description
 autodoc_typehints_format = "short"
 
+# Skip import errors gracefully (useful for Read the Docs builds)
+autodoc_mock_imports = []
+try:
+    import rapsqlite
+except ImportError:
+    # If rapsqlite can't be imported, mock it to allow docs to build
+    # This shouldn't happen if the build process works correctly
+    autodoc_mock_imports = ["rapsqlite"]
+
 # Intersphinx mapping
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
