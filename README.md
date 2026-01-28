@@ -12,7 +12,7 @@
 
 `rapsqlite` provides true async SQLite operations for Python, backed by Rust, Tokio, and sqlx. Unlike libraries that wrap blocking database calls in `async` syntax, `rapsqlite` guarantees that all database operations execute **outside the Python GIL**, ensuring event loops never stall under load.
 
-📚 **[Full Documentation](https://rapsqlite.readthedocs.io/en/latest/)** | **Roadmap Goal**: Achieve drop-in replacement compatibility with `aiosqlite`, enabling seamless migration with true async performance. See [docs/ROADMAP.md](docs/ROADMAP.md) for details.
+📚 **[Full Documentation](https://rapsqlite.readthedocs.io/en/latest/)** | **Roadmap Goal**: Achieve drop-in replacement compatibility with `aiosqlite`, enabling seamless migration with true async performance. See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md) for details.
 
 ## Why `rap*`?
 
@@ -168,7 +168,7 @@ For most applications, this is all you need! All core aiosqlite APIs are support
 
 ## Roadmap
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals include:
+See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md) for detailed development plans. Key goals include:
 
 - ✅ Phase 1: Connection lifecycle, transactions, type system, error handling, cursor API (complete)
 - ✅ Phase 2: Parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump/backup, schema introspection, database initialization hooks, prepared statement caching (complete)
@@ -183,7 +183,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development plans. Key goals
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and version history.
+See [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/master/CHANGELOG.md) for detailed release notes and version history.
 
 ## Limitations (v0.2.0)
 
@@ -216,7 +216,7 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and version history.
 - ✅ Improved error handling: Enhanced error messages with database path and query context
 - ✅ Type stubs: Added `.pyi` type stubs for better IDE support and type checking
 
-**Roadmap**: See [docs/ROADMAP.md](docs/ROADMAP.md) for planned improvements. Our goal is to achieve drop-in replacement compatibility with `aiosqlite` while providing true async performance with GIL-independent database operations.
+**Roadmap**: See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md) for planned improvements. Our goal is to achieve drop-in replacement compatibility with `aiosqlite` while providing true async performance with GIL-independent database operations.
 
 ## Contributing
 
