@@ -14,9 +14,8 @@ use crate::conversion::row_to_py_with_factory;
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{ensure_callback_connection, get_or_create_pool, has_callbacks};
 use crate::query::{
-    bind_and_execute, bind_and_execute_on_connection, bind_and_fetch_all, bind_and_fetch_all_on_connection,
-    bind_and_fetch_one, bind_and_fetch_one_on_connection, bind_and_fetch_optional,
-    bind_and_fetch_optional_on_connection,
+    bind_and_execute, bind_and_execute_on_connection, bind_and_fetch_all,
+    bind_and_fetch_all_on_connection,
 };
 use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
 use crate::utils::is_select_query;

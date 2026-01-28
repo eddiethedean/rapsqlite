@@ -26,8 +26,7 @@ use libsqlite3_sys::{
 };
 
 use crate::conversion::{
-    py_to_sqlite_c_result, row_to_py_list, row_to_py_with_factory, sqlite_c_value_to_py,
-    sqlite_value_to_py,
+    py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py,
 };
 use crate::errors::map_sqlx_error;
 use crate::parameters::{process_named_parameters, process_positional_parameters};
@@ -39,11 +38,10 @@ use crate::query::{
 };
 use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
 use crate::utils::{
-    cstr_from_i8_ptr, is_select_query, normalize_query, parse_connection_string, track_query_usage,
-    validate_path,
+    cstr_from_i8_ptr, is_select_query, parse_connection_string, track_query_usage, validate_path,
 };
 use crate::{Cursor, ExecuteContextManager, TransactionContextManager};
-use crate::{DatabaseError, IntegrityError, OperationalError, ProgrammingError};
+use crate::OperationalError;
 
 /// Async SQLite connection.
 #[pyclass]

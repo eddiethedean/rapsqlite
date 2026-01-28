@@ -11,7 +11,7 @@ name = "rapsqlite"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.27", features = ["extension-module"] }
+pyo3 = { version = "0.27" }
 pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 tokio = { version = "1.35", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"], default-features = false }
