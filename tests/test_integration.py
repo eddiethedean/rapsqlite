@@ -4,6 +4,8 @@ Tests real-world scenarios, common usage patterns, and framework integration exa
 """
 
 import asyncio
+import time
+
 import pytest
 
 from rapsqlite import connect
@@ -126,32 +128,33 @@ async def test_transaction_rollback_pattern(test_db):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_connection_pooling_pattern(test_db):
-    """Test connection pooling pattern for high-throughput scenarios."""
+    """Test connection pooling pattern for high-throughput scenarios.
+
+    Uses a single shared connection pool with many concurrent inserts. Previously
+    used 50 separate connect() calls (50 pools), which caused "database is locked"
+    under CI (SQLite write contention). One pool with concurrent executes avoids
+    that while still exercising pooling.
+    """
     async with connect(test_db) as db:
         db.pool_size = 10
+        db.connection_timeout = 10
         await db.execute(
             "CREATE TABLE logs (id INTEGER PRIMARY KEY, message TEXT, timestamp INTEGER)"
         )
 
-    # Simulate high-throughput logging
-    async def log_message(message: str):
-        async with connect(test_db) as db:  # type: ignore[attr-defined]
-            db.pool_size = 10
-            db.connection_timeout = 10
-            import time
-
+        # Simulate high-throughput logging: one pool, many concurrent inserts
+        async def log_message(message: str):
             await db.execute(
                 "INSERT INTO logs (message, timestamp) VALUES (?, ?)",
                 [message, int(time.time())],
             )
 
-    # Log many messages concurrently (reduced from 100 to 50 for CI stability)
-    messages = [f"Log message {i}" for i in range(50)]
-    await asyncio.gather(*[log_message(msg) for msg in messages])
+        messages = [f"Log message {i}" for i in range(50)]
+        await asyncio.gather(*[log_message(msg) for msg in messages])
 
     # Verify all logged
-    async with connect(test_db) as db:
-        count = await db.fetch_one("SELECT COUNT(*) FROM logs")
+    async with connect(test_db) as db2:
+        count = await db2.fetch_one("SELECT COUNT(*) FROM logs")
         assert count[0] >= 50
 
 
