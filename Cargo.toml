@@ -19,5 +19,5 @@ libsqlite3-sys = "0.30"
 
 [features]
 extension-module = ["pyo3/extension-module"]
-default = []
+default = ["extension-module"]
 
