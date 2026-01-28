@@ -29,9 +29,11 @@ build:
     - |
       cd /tmp && python << 'EOF'
       import sys
+      import os
       # Remove source directory from path to ensure we import from installed package
-      if '/home/docs/checkouts/readthedocs.org/user_builds/rapsqlite/checkouts/latest' in sys.path:
-          sys.path.remove('/home/docs/checkouts/readthedocs.org/user_builds/rapsqlite/checkouts/latest')
+      source_dir = os.environ.get('READTHEDOCS_PROJECT_DIR', '/home/docs/checkouts/readthedocs.org/user_builds/rapsqlite/checkouts/latest')
+      if source_dir in sys.path:
+          sys.path.remove(source_dir)
       import rapsqlite
       print("Successfully imported rapsqlite", rapsqlite.__version__)
       EOF
