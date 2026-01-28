@@ -1,21 +1,8 @@
 version: 2
 
-build:
-  os: ubuntu-22.04
-  apt_packages:
-    - libsqlite3-dev
-    - pkg-config
-  tools:
-    python: "3.12"
+sphinx:
+  configuration: docs/conf.py
 
 python:
   install:
     - requirements: docs/requirements.txt
-
-formats:
-  - htmlzip
-  - pdf
-
-sphinx:
-  configuration: docs/conf.py
-  fail_on_warning: false
