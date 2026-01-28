@@ -453,6 +453,18 @@ async def test_row_factory_rapsqlite_row_mixed_access(test_db):
         assert "id" in keys and "a" in keys and "b" in keys
         values = list(row.values())
         assert 1 in values and "x" in values and 1.5 in values
+        items = dict(row.items())
+        assert items["id"] == 1
+        assert items["a"] == "x"
+        assert items["b"] == 1.5
+
+        # __contains__ and __len__
+        assert "id" in row
+        assert "missing" not in row
+        assert 0 in row
+        assert 2 in row
+        assert 3 not in row
+        assert len(row) == 3
 
 
 @pytest.mark.asyncio

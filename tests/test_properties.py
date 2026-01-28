@@ -18,6 +18,7 @@ from rapsqlite import connect
 )
 @given(
     value=st.one_of(
+        st.none(),
         st.integers(
             min_value=-(2**63), max_value=2**63 - 1
         ),  # Limit to SQLite INTEGER range
@@ -41,7 +42,9 @@ async def test_parameter_round_trip(test_db, value):
 
         retrieved = rows[0][0]
 
-        if isinstance(value, bytes):
+        if value is None:
+            assert retrieved is None
+        elif isinstance(value, bytes):
             assert retrieved == value
         elif isinstance(value, str):
             assert retrieved == value
@@ -256,3 +259,49 @@ async def test_blob_round_trip(test_db, blob_value):
         rows = await db.fetch_all("SELECT value FROM t ORDER BY id DESC LIMIT 1")
 
         assert rows[0][0] == blob_value
+
+
+@pytest.mark.property
+@pytest.mark.asyncio
+@settings(
+    max_examples=25,
+    deadline=5000,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    values=st.lists(
+        st.one_of(
+            st.none(),
+            st.integers(min_value=-(2**63), max_value=2**63 - 1),
+            st.floats(allow_nan=False, allow_infinity=False),
+            st.text(max_size=100),
+            st.binary(max_size=256),
+        ),
+        min_size=1,
+        max_size=20,
+    )
+)
+async def test_sequence_insert_delete_invariant(test_db, values):
+    """Insert a sequence, delete a subset, and verify remaining values match."""
+    # Keep the deletion predicate simple and deterministic given the generated values:
+    # delete values at even indices.
+    to_delete = {i for i in range(len(values)) if i % 2 == 0}
+
+    async with connect(test_db) as db:
+        await db.execute("DROP TABLE IF EXISTS t_seq")
+        await db.execute("CREATE TABLE t_seq (id INTEGER PRIMARY KEY, v BLOB)")
+
+        for v in values:
+            await db.execute("INSERT INTO t_seq (v) VALUES (?)", [v])
+
+        # Delete even ids (1-indexed) corresponding to even indices (0-indexed)
+        for idx in sorted(to_delete):
+            await db.execute("DELETE FROM t_seq WHERE id = ?", [idx + 1])
+
+        rows = await db.fetch_all("SELECT id, v FROM t_seq ORDER BY id")
+        remaining_by_id = {row[0]: row[1] for row in rows}
+
+        expected_remaining = {
+            i + 1: v for i, v in enumerate(values) if i not in to_delete
+        }
+        assert remaining_by_id == expected_remaining

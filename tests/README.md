@@ -31,9 +31,47 @@ Tests are organized into the following files:
 
 ## Running Tests
 
+### Install/build for local testing
+
+Most tests exercise the compiled Rust extension, so install the package in editable mode first:
+
+```bash
+python -m pip install -e .
+```
+
+On macOS, if you hit linker errors about missing Python symbols when building locally, use:
+
+```bash
+RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" python -m pip install -e .
+```
+
+Rust unit tests (fast, pure helpers):
+
+```bash
+cargo test
+```
+
+Note: because this crate links against the Python C-API via PyO3, `cargo test` can be
+environment-dependent on macOS when it’s built in “extension module” mode (symbols resolved at
+import time by Python).
+
+On macOS, run Rust unit tests like this:
+
+```bash
+PYO3_PYTHON="$(python3 -c 'import sys; print(sys.executable)')" cargo test --no-default-features
+```
+
+This builds the crate **without** the `extension-module` feature, so the Rust test binary links
+against `libpython` and can run standalone.
+
 ### Run All Tests
 ```bash
 pytest tests/
+```
+
+### Recommended fast local run (matches PR CI defaults)
+```bash
+pytest tests/ -m "not slow and not stress and not performance"
 ```
 
 ### Run Tests in Parallel
@@ -66,6 +104,9 @@ pytest tests/ -m property
 
 # Skip slow tests
 pytest tests/ -m "not slow"
+
+# Skip slow/stress/performance (fast default)
+pytest tests/ -m "not slow and not stress and not performance"
 ```
 
 ### Run with Coverage

@@ -70,10 +70,11 @@ def pytest_configure(config):
     # Each worker process will import conftest.py and get the correct policy
     if sys.platform == "win32":
         import asyncio
+
         # Set policy again in pytest_configure to ensure it's set early
         # (conftest.py module-level code runs first, but this provides extra safety)
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
+
     config.addinivalue_line("markers", "unit: Unit tests")
     config.addinivalue_line("markers", "integration: Integration tests")
     config.addinivalue_line("markers", "edge_case: Edge case tests")

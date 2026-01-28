@@ -127,3 +127,64 @@ pub(crate) unsafe fn cstr_from_i8_ptr(ptr: *const i8) -> &'static CStr {
     CStr::from_ptr(ptr)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_select_query_basic() {
+        assert!(is_select_query("SELECT 1"));
+        assert!(is_select_query(" select 1 "));
+        assert!(is_select_query("\n\tSELECT 1"));
+        assert!(is_select_query("WITH cte AS (SELECT 1) SELECT * FROM cte"));
+
+        assert!(!is_select_query("INSERT INTO t VALUES (1)"));
+        assert!(!is_select_query("UPDATE t SET x = 1"));
+        assert!(!is_select_query("DELETE FROM t"));
+        assert!(!is_select_query("PRAGMA foreign_keys = ON"));
+    }
+
+    #[test]
+    fn test_normalize_query_whitespace() {
+        assert_eq!(normalize_query("  SELECT   1  "), "SELECT 1");
+        assert_eq!(normalize_query("SELECT\t1"), "SELECT 1");
+        assert_eq!(normalize_query("SELECT\n1"), "SELECT 1");
+        assert_eq!(normalize_query("SELECT\r\n1"), "SELECT 1");
+        assert_eq!(normalize_query("SELECT  1   FROM   t"), "SELECT 1 FROM t");
+    }
+
+    #[test]
+    fn test_parse_connection_string_memory() {
+        let (path, params) = parse_connection_string(":memory:").unwrap();
+        assert_eq!(path, ":memory:");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_parse_connection_string_non_uri_path() {
+        let (path, params) = parse_connection_string("db.sqlite").unwrap();
+        assert_eq!(path, "db.sqlite");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_parse_connection_string_uri_relative() {
+        let (path, params) = parse_connection_string("file:db.sqlite?mode=ro&cache=shared").unwrap();
+        assert_eq!(path, "db.sqlite");
+        assert_eq!(
+            params,
+            vec![
+                ("mode".to_string(), "ro".to_string()),
+                ("cache".to_string(), "shared".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_connection_string_uri_absolute_like() {
+        let (path, params) = parse_connection_string("file:///tmp/test.db?mode=ro").unwrap();
+        assert_eq!(path, "/tmp/test.db");
+        assert_eq!(params, vec![("mode".to_string(), "ro".to_string())]);
+    }
+}
+

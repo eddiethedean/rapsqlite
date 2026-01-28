@@ -4,14 +4,13 @@ use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::into_future;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{SqliteConnection, SqlitePool};
-use std::collections::HashMap;
+use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use crate::types::{ProgressHandler, TransactionState, UserFunctions};
-use crate::{DatabaseError, IntegrityError, OperationalError};
+use crate::types::{ProgressHandler, UserFunctions};
+use crate::OperationalError;
 
 /// Helper to get or create pool and apply PRAGMAs.
 pub(crate) async fn get_or_create_pool(

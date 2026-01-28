@@ -9,7 +9,7 @@ import tempfile
 import os
 import sys
 
-from rapsqlite import connect, DatabaseError
+from rapsqlite import connect, DatabaseError, OperationalError
 
 
 def cleanup_db(test_db: str) -> None:
@@ -124,6 +124,20 @@ async def test_create_function_with_blob(test_db):
 
         result = await db.fetch_one("SELECT blob_length(data) FROM test")
         assert result[0] == len(test_blob)
+
+
+@pytest.mark.asyncio
+async def test_create_function_returns_blob_bytes(test_db):
+    """Returning bytes from a user function yields a SQLite BLOB (round-trips as bytes)."""
+    async with connect(test_db) as db:
+        payload = b"\xff\xfe\x00binary\x00data"
+
+        def make_blob():
+            return payload
+
+        await db.create_function("make_blob", 0, make_blob)
+        row = await db.fetch_one("SELECT make_blob()")
+        assert row[0] == payload
 
 
 @pytest.mark.asyncio
@@ -893,6 +907,39 @@ async def test_backup_basic(test_db):
     await target_conn.close()
     if os.path.exists(target_path):
         os.remove(target_path)
+
+
+@pytest.mark.asyncio
+async def test_backup_target_in_transaction_raises(test_db):
+    """Backup should fail cleanly if target connection has an active transaction."""
+    import rapsqlite
+    import os
+
+    source_conn = rapsqlite.Connection(test_db)
+    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
+
+    target_path = test_db + ".backup_txn"
+    if os.path.exists(target_path):
+        os.remove(target_path)
+    with open(target_path, "w"):
+        pass
+
+    target_conn = rapsqlite.Connection(target_path)
+    await target_conn.begin()
+    try:
+        with pytest.raises(OperationalError, match="active transaction"):
+            await source_conn.backup(target_conn)
+    finally:
+        # Ensure we leave target in a clean state regardless of assertion outcome
+        try:
+            await target_conn.rollback()
+        except Exception:
+            pass
+        await source_conn.close()
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
 
 @pytest.mark.asyncio

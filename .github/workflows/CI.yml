@@ -5,6 +5,15 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      full_suite:
+        description: "Run slow/perf/stress tests too"
+        required: false
+        default: "false"
+  schedule:
+    # Nightly full-suite run (slow/perf/stress)
+    - cron: "0 6 * * *"
 
 jobs:
   test:
@@ -86,6 +95,16 @@ jobs:
       shell: bash
       timeout-minutes: 25
       run: |
+        # Default (PR/push): skip slow/perf/stress to keep CI fast.
+        # Full suite runs on schedule or when manually requested via workflow_dispatch input.
+        PYTEST_MARKERS='not slow and not stress and not performance'
+        if [ "${{ github.event_name }}" == "schedule" ]; then
+          PYTEST_MARKERS="true"
+        fi
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ inputs.full_suite }}" == "true" ]; then
+          PYTEST_MARKERS="true"
+        fi
+
         # Windows: Use D: drive for temporary files (30%+ faster I/O than C: drive)
         # The D: drive has significantly better I/O performance on GitHub Actions Windows runners
         # This addresses the primary cause of Windows CI slowness
@@ -106,7 +125,7 @@ jobs:
           # process will have the correct event loop policy. Windows uses spawn (not fork)
           # which is better for asyncio. If parallel execution fails, fallback to sequential.
           # Using limited workers (2) instead of auto to reduce risk of event loop conflicts
-          python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" -n 2 || python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
+          python -m pytest "$WORKSPACE/tests/" -v -m "$PYTEST_MARKERS" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" -n 2 || python -m pytest "$WORKSPACE/tests/" -v -m "$PYTEST_MARKERS" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
         else
           cd /tmp
           # Ensure coverage XML directory exists and is writable
@@ -114,7 +133,7 @@ jobs:
           COV_XML="${{ github.workspace }}/coverage.xml"
           # Run tests with parallel execution
           # If pytest-xdist fails (e.g., on macOS Python 3.10), fallback to sequential execution
-          python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML" -n auto || python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML"
+          python -m pytest ${{ github.workspace }}/tests/ -v -m "$PYTEST_MARKERS" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML" -n auto || python -m pytest ${{ github.workspace }}/tests/ -v -m "$PYTEST_MARKERS" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML"
         fi
 
     - name: Upload coverage to Codecov
@@ -125,6 +144,26 @@ jobs:
         flags: unittests
         name: codecov-umbrella
         fail_ci_if_error: false
+
+  rust-tests:
+    name: Rust unit tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python (for pyo3 build config)
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Run cargo test
+      run: cargo test
 
   lint:
     name: Lint
