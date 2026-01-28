@@ -28,7 +28,7 @@ build:
     - echo "Verifying rapsqlite import..."
     - |
       cd /tmp
-      python -c "import rapsqlite; print('Successfully imported rapsqlite', rapsqlite.__version__)" || (echo "ERROR: Failed to import rapsqlite" && exit 1)
+      python -c "import rapsqlite; print(\"Successfully imported rapsqlite\", rapsqlite.__version__)" || (echo "ERROR: Failed to import rapsqlite" && exit 1)
     # Build documentation
     - echo "Building documentation with Sphinx..."
     - |
