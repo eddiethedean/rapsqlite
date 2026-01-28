@@ -72,15 +72,15 @@ jobs:
 
     - name: Run tests
       shell: bash
+      timeout-minutes: 25
       run: |
         # Change to a temp directory to avoid importing from source
         # On Windows, use temp directory and absolute paths to avoid source import issues
+        # Windows: run tests without xdist (-n auto) to avoid spawn+asyncio stalls/hangs.
         if [ "${{ runner.os }}" == "Windows" ]; then
-          # On Windows, cd to temp and use absolute path to tests
-          # Convert workspace path to forward slashes for bash compatibility
           WORKSPACE=$(echo "${{ github.workspace }}" | sed 's|\\|/|g')
           cd "$TEMP" || cd "$TMP"
-          python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" -n auto
+          python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
         else
           cd /tmp
           python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
