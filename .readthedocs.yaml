@@ -14,19 +14,24 @@ build:
     - pip install maturin
     # Build the rapsqlite package (Rust is available via tools.rust)
     - echo "Building rapsqlite package with maturin..."
-    - maturin build --release || (echo "Maturin build failed!" && exit 1)
+    - |
+      maturin build --release || (echo "Maturin build failed!" && exit 1)
     # Verify the wheel was built
     - echo "Checking for built wheels..."
-    - ls -la target/wheels/ || (echo "ERROR: No wheels found in target/wheels/" && exit 1)
+    - |
+      ls -la target/wheels/ || (echo "ERROR: No wheels found in target/wheels/" && exit 1)
     # Install the built wheel
     - echo "Installing rapsqlite wheel..."
-    - pip install target/wheels/rapsqlite-*.whl --force-reinstall || (echo "ERROR: Failed to install wheel" && exit 1)
+    - |
+      pip install target/wheels/rapsqlite-*.whl --force-reinstall || (echo "ERROR: Failed to install wheel" && exit 1)
     # Verify rapsqlite can be imported
     - echo "Verifying rapsqlite import..."
-    - python -c "import rapsqlite; print(f'Successfully imported rapsqlite {rapsqlite.__version__}')" || (echo "ERROR: Failed to import rapsqlite" && exit 1)
+    - |
+      python -c "import rapsqlite; print(f'Successfully imported rapsqlite {rapsqlite.__version__}')" || (echo "ERROR: Failed to import rapsqlite" && exit 1)
     # Build documentation
     - echo "Building documentation with Sphinx..."
-    - sphinx-build -b html docs/ docs/_build/html || (echo "ERROR: Sphinx build failed" && exit 1)
+    - |
+      sphinx-build -b html docs/ docs/_build/html || (echo "ERROR: Sphinx build failed" && exit 1)
 
 python:
   install:
