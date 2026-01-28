@@ -7,20 +7,6 @@ build:
     - pkg-config
   tools:
     python: "3.12"
-  commands:
-    # Install build and runtime dependencies
-    - pip install -r docs/requirements.txt
-    # Install released rapsqlite from PyPI (avoids rebuilding Rust extension on RTD)
-    - pip install rapsqlite
-    # Verify rapsqlite can be imported
-    - echo "Verifying rapsqlite import..."
-    - |
-      cd /tmp
-      python -c "import rapsqlite; print(\"Successfully imported rapsqlite\", rapsqlite.__version__)" || (echo "ERROR: Failed to import rapsqlite" && exit 1)
-    # Build documentation
-    - echo "Building documentation with Sphinx..."
-    - |
-      sphinx-build -b html docs/ docs/_build/html || (echo "ERROR: Sphinx build failed" && exit 1)
 
 python:
   install:
