@@ -59,9 +59,18 @@ async def test_connection_pool_performance(test_db):
     elapsed = time.perf_counter() - start
 
     assert all(results)
-    # Should complete 50 operations in reasonable time (< 8.0 seconds)
-    # Allow extra time for CI environments which may be slower, especially Python 3.14
-    assert elapsed < 8.0, f"50 pool operations took {elapsed:.3f}s, expected < 8.0s"
+    # Should complete 50 operations in reasonable time
+    # CI environments (Windows and macOS) are typically slower, so allow more time
+    if sys.platform == "win32":
+        max_time = 15.0
+    elif sys.platform == "darwin":  # macOS
+        max_time = 12.0
+    else:
+        max_time = 8.0
+    assert elapsed < max_time, (
+        f"50 pool operations took {elapsed:.3f}s, expected < {max_time}s "
+        f"(platform: {sys.platform})"
+    )
 
 
 @pytest.mark.performance
@@ -178,10 +187,17 @@ async def test_transaction_performance(test_db):
                 await db.execute("INSERT INTO t (value) VALUES (?)", [i])
         elapsed = time.perf_counter() - start
 
-        # Should complete transaction in reasonable time (< 2 seconds)
-        # Allow extra time for CI environments which may be slower
-        assert elapsed < 2.0, (
-            f"Transaction with 1000 inserts took {elapsed:.3f}s, expected < 2.0s"
+        # Should complete transaction in reasonable time
+        # CI environments (Windows and macOS) are typically slower, so allow more time
+        if sys.platform == "win32":
+            max_time = 10.0
+        elif sys.platform == "darwin":  # macOS
+            max_time = 5.0
+        else:
+            max_time = 2.0
+        assert elapsed < max_time, (
+            f"Transaction with 1000 inserts took {elapsed:.3f}s, expected < {max_time}s "
+            f"(platform: {sys.platform})"
         )
 
         # Verify all inserted

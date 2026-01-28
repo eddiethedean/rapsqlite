@@ -80,6 +80,8 @@ jobs:
         if [ "${{ runner.os }}" == "Windows" ]; then
           WORKSPACE=$(echo "${{ github.workspace }}" | sed 's|\\|/|g')
           cd "$TEMP" || cd "$TMP"
+          # Ensure coverage XML directory exists
+          mkdir -p "$WORKSPACE"
           python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
         else
           cd /tmp
