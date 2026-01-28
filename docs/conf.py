@@ -18,7 +18,6 @@ extensions = [
     "sphinx.ext.napoleon",  # Google/NumPy style docstrings
     "sphinx.ext.viewcode",
     "sphinx.ext.autosummary",
-    "sphinx_autodoc_typehints",
 ]
 
 # Napoleon settings for Google-style docstrings
@@ -49,11 +48,9 @@ autodoc_default_options = {
 
 autodoc_member_order = "bysource"
 autoclass_content = "both"  # Include both class and __init__ docstrings
-autodoc_typehints = "description"  # Show type hints in description
-autodoc_typehints_format = "short"
 
-# Always mock rapsqlite on RTD/docs builds to keep things fast and avoid import issues
-autodoc_mock_imports = ["rapsqlite"]
+# Don't mock rapsqlite - we install it from PyPI (prebuilt wheel, fast)
+autodoc_mock_imports = []
 
 # Templates
 templates_path = ["_templates"]
@@ -108,9 +105,7 @@ html_css_files = [
 ]
 
 # -- Options for autosummary -------------------------------------------------
-# Keep autosummary generation enabled but docs are small so this is cheap
 autosummary_generate = True
 
 # -- Options for viewcode ---------------------------------------------------
-
 viewcode_enable_epub = True
