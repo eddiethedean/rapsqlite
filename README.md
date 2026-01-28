@@ -89,9 +89,9 @@ Complete API documentation is available at [rapsqlite.readthedocs.io](https://ra
 - [Exception Classes](https://rapsqlite.readthedocs.io/en/latest/api-reference/exceptions.html)
 - [Row Factory](https://rapsqlite.readthedocs.io/en/latest/api-reference/row.html)
 
-### Backup Limitations
+### Backup Support
 
-**⚠️ Important**: The `Connection.backup()` method only supports backing up to another `rapsqlite.Connection`. Backing up to Python's standard `sqlite3.Connection` is **not supported** and will cause a segmentation fault.
+The `Connection.backup()` method supports backing up to both `rapsqlite.Connection` and Python's standard `sqlite3.Connection` targets. For `sqlite3.Connection` targets, the backup uses Python's sqlite3 backup API on the on-disk database file (file-backed databases only; `:memory:` and non-file URIs are not supported).
 
 For more details, see the [Backup documentation](https://rapsqlite.readthedocs.io/en/latest/api-reference/connection.html#rapsqlite.Connection.backup) in the API reference.
 
@@ -153,9 +153,7 @@ For most applications, this is all you need! All core aiosqlite APIs are support
   dump_sql = "\n".join(lines)
   ```
 
-- **`backup()` targets**: `rapsqlite` only supports backups where both source and target are `rapsqlite.Connection` objects. For flows that used `sqlite3.Connection` as a target in `aiosqlite`, prefer:
-  - rapsqlite-to-rapsqlite backup when staying within rapsqlite, or
-  - file-based copy / sqlite3’s own backup API when working purely with `sqlite3`.
+- **`backup()` targets**: `rapsqlite` supports backups to both `rapsqlite.Connection` and `sqlite3.Connection` targets. For `sqlite3.Connection` targets, only file-backed databases are supported (not `:memory:` or non-file URIs).
 
 **See the [Migration Guide](https://rapsqlite.readthedocs.io/en/latest/guides/migration-guide.html) for a complete migration guide** with:
 - Step-by-step migration instructions
@@ -189,7 +187,7 @@ See [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/master/CHANGEL
 
 **Current limitations:**
 - ⏳ Not designed for synchronous use cases
-- ⚠️ **Backup to `sqlite3.Connection` not supported**: The `Connection.backup()` method supports backing up to another `rapsqlite.Connection`, but backing up to Python's standard `sqlite3.Connection` is not supported due to SQLite library instance incompatibility. See [Backup Limitations](#backup-limitations) below for details.
+- ⚠️ **Backup to `sqlite3.Connection`**: The `Connection.backup()` method supports backing up to `sqlite3.Connection` targets, but only for file-backed databases (`:memory:` and non-file URIs are not supported). See [Backup Support](#backup-support) above for details.
 
 **Phase 2.1-2.11 improvements (v0.2.0):**
 - ✅ Parameterized queries (named and positional parameters) - Phase 2.1 complete

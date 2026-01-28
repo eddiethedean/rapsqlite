@@ -686,6 +686,31 @@ async def test_iterdump_with_special_characters(test_db):
 
 
 @pytest.mark.asyncio
+async def test_iterdump_quotes_identifiers(tmp_path):
+    """iterdump should quote identifiers so dumps are replayable for weird names."""
+    src_db = tmp_path / "src.db"
+    dst_db = tmp_path / "dst.db"
+    # rapsqlite currently expects the database file to exist.
+    src_db.touch()
+    dst_db.touch()
+
+    table_sql = 'CREATE TABLE "weird ""name""" ("col space" TEXT, "a""b" INTEGER)'
+    insert_sql = 'INSERT INTO "weird ""name""" ("col space", "a""b") VALUES (?, ?)'
+
+    async with connect(str(src_db)) as db:
+        await db.execute(table_sql)
+        await db.execute(insert_sql, ["hello", 1])
+        dump = await db.iterdump()
+
+    # Replay the dump into a new database and verify we can read the data back.
+    async with connect(str(dst_db)) as db:
+        for stmt in dump:
+            await db.execute(stmt)
+        rows = await db.fetch_all('SELECT "col space", "a""b" FROM "weird ""name"""')
+        assert rows == [["hello", 1]]
+
+
+@pytest.mark.asyncio
 async def test_iterdump_multiple_tables(test_db):
     """Test iterdump with multiple tables."""
     async with connect(test_db) as db:

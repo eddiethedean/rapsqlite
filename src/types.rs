@@ -13,7 +13,16 @@ pub(crate) type ProgressHandler = Arc<StdMutex<Option<(i32, Py<PyAny>)>>>;
 #[derive(Clone, PartialEq)]
 pub(crate) enum TransactionState {
     None,
+    /// A transaction is in the process of starting (connection is being acquired / BEGIN pending).
+    Starting,
     Active,
+}
+
+impl TransactionState {
+    /// True if the connection should treat itself as "in transaction" for routing purposes.
+    pub(crate) fn is_active(&self) -> bool {
+        matches!(self, TransactionState::Starting | TransactionState::Active)
+    }
 }
 
 /// Convert a Python value to a SQLite-compatible value for binding.

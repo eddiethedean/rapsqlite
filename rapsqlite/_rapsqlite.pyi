@@ -134,10 +134,9 @@ class Connection:
         """Make a backup of the current database to a target database.
         
         Args:
-            target: Target connection for backup. Must be a rapsqlite.Connection.
-                Backing up to Python's standard sqlite3.Connection is NOT supported
-                and will cause a segmentation fault due to SQLite library instance
-                incompatibility.
+            target: Target connection for backup. Can be a rapsqlite.Connection or
+                sqlite3.Connection. For sqlite3.Connection targets, only file-backed
+                databases are supported (not :memory: or non-file URIs).
             pages: Number of pages to copy per step (0 = all pages). Default: 0
             progress: Optional progress callback function receiving (remaining, page_count, pages_copied).
                 Default: None
@@ -145,12 +144,13 @@ class Connection:
             sleep: Sleep duration in seconds between backup steps. Default: 0.25
         
         Raises:
-            OperationalError: If backup fails or target connection is invalid
+            OperationalError: If backup fails, target connection is invalid, or
+                target is sqlite3.Connection with an active transaction
         
         Note:
-            The target parameter must be a rapsqlite.Connection. Backing up to
-            sqlite3.Connection is not supported due to SQLite library instance
-            incompatibility. See README.md for details and workarounds.
+            For sqlite3.Connection targets, the source database must be file-backed.
+            The backup operation performs a WAL checkpoint before backing up to ensure
+            committed state is visible. See README.md for details.
         """
         ...
     

@@ -81,5 +81,8 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "concurrency: Concurrency tests")
     config.addinivalue_line("markers", "stress: Stress/load tests")
     config.addinivalue_line("markers", "performance: Performance tests")
+    config.addinivalue_line(
+        "markers", "perf_smoke: Quick performance smoke tests for PR CI"
+    )
     config.addinivalue_line("markers", "property: Property-based tests")
     config.addinivalue_line("markers", "slow: Slow-running tests")

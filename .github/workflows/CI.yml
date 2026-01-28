@@ -95,9 +95,9 @@ jobs:
       shell: bash
       timeout-minutes: 25
       run: |
-        # Default (PR/push): skip slow/perf/stress to keep CI fast.
+        # Default (PR/push): skip slow/stress/full perf, but run perf_smoke for quick validation.
         # Full suite runs on schedule or when manually requested via workflow_dispatch input.
-        PYTEST_MARKERS='not slow and not stress and not performance'
+        PYTEST_MARKERS='not slow and not stress and (not performance or perf_smoke)'
         if [ "${{ github.event_name }}" == "schedule" ]; then
           PYTEST_MARKERS="true"
         fi
