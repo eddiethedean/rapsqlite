@@ -83,7 +83,12 @@ jobs:
           python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
         else
           cd /tmp
-          python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:${{ github.workspace }}/coverage.xml -n auto
+          # Ensure coverage XML directory exists and is writable
+          mkdir -p "${{ github.workspace }}"
+          COV_XML="${{ github.workspace }}/coverage.xml"
+          # Run tests with parallel execution
+          # If pytest-xdist fails (e.g., on macOS Python 3.10), fallback to sequential execution
+          python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML" -n auto || python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML"
         fi
 
     - name: Upload coverage to Codecov
