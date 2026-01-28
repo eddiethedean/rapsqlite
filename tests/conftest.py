@@ -64,7 +64,16 @@ def test_db_memory() -> str:
 
 # Pytest markers for test categorization
 def pytest_configure(config):
-    """Register custom pytest markers."""
+    """Register custom pytest markers and ensure Windows event loop policy is set."""
+    # Ensure WindowsSelectorEventLoopPolicy is set before any tests run
+    # This is especially important for pytest-xdist parallel execution on Windows
+    # Each worker process will import conftest.py and get the correct policy
+    if sys.platform == "win32":
+        import asyncio
+        # Set policy again in pytest_configure to ensure it's set early
+        # (conftest.py module-level code runs first, but this provides extra safety)
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     config.addinivalue_line("markers", "unit: Unit tests")
     config.addinivalue_line("markers", "integration: Integration tests")
     config.addinivalue_line("markers", "edge_case: Edge case tests")

@@ -96,15 +96,17 @@ jobs:
         fi
         # Change to a temp directory to avoid importing from source
         # On Windows, use temp directory and absolute paths to avoid source import issues
-        # Windows: run tests without xdist (-n auto) to avoid spawn+asyncio stalls/hangs.
         if [ "${{ runner.os }}" == "Windows" ]; then
           WORKSPACE=$(echo "${{ github.workspace }}" | sed 's|\\|/|g')
           cd "$TEMP" || cd "$TMP"
           # Ensure coverage XML directory exists
           mkdir -p "$WORKSPACE"
-          # Windows: Run tests sequentially (no xdist) to avoid asyncio event loop issues
-          # The conftest.py sets WindowsSelectorEventLoopPolicy to prevent hangs
-          python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
+          # Windows: Try limited parallelization (2 workers) with fallback to sequential
+          # With WindowsSelectorEventLoopPolicy set in conftest.py, each spawned worker
+          # process will have the correct event loop policy. Windows uses spawn (not fork)
+          # which is better for asyncio. If parallel execution fails, fallback to sequential.
+          # Using limited workers (2) instead of auto to reduce risk of event loop conflicts
+          python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" -n 2 || python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
         else
           cd /tmp
           # Ensure coverage XML directory exists and is writable
