@@ -7,8 +7,14 @@ import sys
 from pathlib import Path
 
 # Add the project root to the Python path so autodoc can find rapsqlite
+# But insert it AFTER site-packages to ensure installed package takes precedence
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+# Find site-packages index
+site_packages_idx = next(
+    (i for i, p in enumerate(sys.path) if 'site-packages' in p),
+    len(sys.path)
+)
+sys.path.insert(site_packages_idx, str(project_root))
 
 # -- Project information -----------------------------------------------------
 
