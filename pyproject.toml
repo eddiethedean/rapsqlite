@@ -39,6 +39,9 @@ features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Use function-scoped event loops on Windows to avoid event loop closure issues
+# This prevents "Event loop is closed" errors that cause test hangs on Windows
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 markers = [

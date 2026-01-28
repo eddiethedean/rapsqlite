@@ -6,6 +6,16 @@ import tempfile
 import pytest
 from typing import Generator
 
+# Windows-specific asyncio event loop policy fix
+# Windows uses ProactorEventLoop by default, which has known issues with pytest-asyncio
+# Setting SelectorEventLoopPolicy prevents event loop closure errors and hangs
+if sys.platform == "win32":
+    import asyncio
+
+    # Use SelectorEventLoop on Windows instead of ProactorEventLoop
+    # This prevents "Event loop is closed" errors and test hangs
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 
 def cleanup_db(test_db: str) -> None:
     """Helper to clean up database file.

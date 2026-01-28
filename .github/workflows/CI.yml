@@ -82,6 +82,8 @@ jobs:
           cd "$TEMP" || cd "$TMP"
           # Ensure coverage XML directory exists
           mkdir -p "$WORKSPACE"
+          # Windows: Run tests sequentially (no xdist) to avoid asyncio event loop issues
+          # The conftest.py sets WindowsSelectorEventLoopPolicy to prevent hangs
           python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
         else
           cd /tmp
