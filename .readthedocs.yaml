@@ -2,12 +2,13 @@ version: 2
 
 build:
   os: ubuntu-22.04
+  apt_packages:
+    - libsqlite3-dev
+    - pkg-config
   tools:
     python: "3.12"
     rust: "stable"
   commands:
-    # Install system dependencies for SQLite
-    - apt-get update -qq && apt-get install -y -qq libsqlite3-dev pkg-config
     # Install build dependencies
     - pip install -r docs/requirements.txt
     - pip install maturin
