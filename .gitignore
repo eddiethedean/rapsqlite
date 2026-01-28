@@ -44,6 +44,7 @@ env.bak/
 venv.bak/
 .venv/
 .venv-docs/
+.rtd-venv/
 
 # Environment variables
 .env
@@ -83,6 +84,7 @@ coverage.xml
 .hypothesis/
 .cache
 nosetests.xml
+.benchmarks/
 
 # Documentation
 docs/_build/
@@ -98,6 +100,9 @@ site/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Ruff
+.ruff_cache/
 
 # Pyre type checker
 .pyre/
