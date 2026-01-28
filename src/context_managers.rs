@@ -9,7 +9,9 @@ use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
-use crate::pool::{ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks};
+use crate::pool::{
+    ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
+};
 use crate::query::{bind_and_execute, bind_and_execute_on_connection};
 use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
 use crate::{map_sqlx_error, Connection, Cursor, OperationalError};

@@ -25,12 +25,12 @@ use libsqlite3_sys::{
     SQLITE_TRACE_STMT, SQLITE_UTF8,
 };
 
-use crate::conversion::{
-    py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py,
-};
+use crate::conversion::{py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py};
 use crate::errors::map_sqlx_error;
 use crate::parameters::{process_named_parameters, process_positional_parameters};
-use crate::pool::{ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks};
+use crate::pool::{
+    ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
+};
 use crate::query::{
     bind_and_execute, bind_and_execute_on_connection, bind_and_fetch_all,
     bind_and_fetch_all_on_connection, bind_and_fetch_one, bind_and_fetch_one_on_connection,
@@ -40,8 +40,8 @@ use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions
 use crate::utils::{
     cstr_from_i8_ptr, is_select_query, parse_connection_string, track_query_usage, validate_path,
 };
-use crate::{Cursor, ExecuteContextManager, TransactionContextManager};
 use crate::OperationalError;
+use crate::{Cursor, ExecuteContextManager, TransactionContextManager};
 
 /// Async SQLite connection.
 #[pyclass]
@@ -2277,9 +2277,7 @@ impl Connection {
                                         // Create a helper function that unpacks the tuple
                                         let args_tuple = match PyTuple::new(
                                             py,
-                                            py_args
-                                                .iter()
-                                                .map(|arg: &Py<PyAny>| arg.clone_ref(py)),
+                                            py_args.iter().map(|arg: &Py<PyAny>| arg.clone_ref(py)),
                                         ) {
                                             Ok(t) => t,
                                             Err(e) => {

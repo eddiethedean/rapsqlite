@@ -10,5 +10,3 @@ create_exception!(_rapsqlite, DatabaseError, PyException);
 create_exception!(_rapsqlite, OperationalError, PyException);
 create_exception!(_rapsqlite, ProgrammingError, PyException);
 create_exception!(_rapsqlite, IntegrityError, PyException);
-
-
