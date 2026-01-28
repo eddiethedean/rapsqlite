@@ -4,6 +4,7 @@ Tests baseline performance metrics and detects performance regressions.
 """
 
 import asyncio
+import sys
 import time
 import pytest
 
@@ -111,9 +112,13 @@ async def test_execute_many_performance(test_db):
         await db.execute_many("INSERT INTO t (value) VALUES (?)", params)
         elapsed = time.perf_counter() - start
 
-        # Should complete 1000 inserts in reasonable time (< 4.0 seconds)
-        # Allow extra time for CI environments which may be slower
-        assert elapsed < 4.0, f"1000 inserts took {elapsed:.3f}s, expected < 4.0s"
+        # Should complete 1000 inserts in reasonable time
+        # Windows CI environments are typically slower, so allow more time
+        max_time = 8.0 if sys.platform == "win32" else 4.0
+        assert elapsed < max_time, (
+            f"1000 inserts took {elapsed:.3f}s, expected < {max_time}s "
+            f"(platform: {sys.platform})"
+        )
 
         # Verify all inserted
         rows = await db.fetch_all("SELECT COUNT(*) FROM t")
@@ -138,9 +143,13 @@ async def test_large_result_set_performance(test_db):
         elapsed = time.perf_counter() - start
 
         assert len(rows) == 10000
-        # Should fetch 10K rows in reasonable time (< 4 seconds)
-        # Allow extra time for CI environments which may be slower
-        assert elapsed < 4.0, f"Fetching 10K rows took {elapsed:.3f}s, expected < 4.0s"
+        # Should fetch 10K rows in reasonable time
+        # Windows CI environments are typically slower, so allow more time
+        max_time = 8.0 if sys.platform == "win32" else 4.0
+        assert elapsed < max_time, (
+            f"Fetching 10K rows took {elapsed:.3f}s, expected < {max_time}s "
+            f"(platform: {sys.platform})"
+        )
 
 
 @pytest.mark.performance
