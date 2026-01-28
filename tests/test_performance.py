@@ -113,9 +113,14 @@ async def test_execute_many_performance(test_db):
         elapsed = time.perf_counter() - start
 
         # Should complete 1000 inserts in reasonable time
-        # Windows CI environments are typically much slower, so allow significantly more time
-        # Observed: Windows CI can take ~17s for 1000 inserts, so set threshold to 25s
-        max_time = 25.0 if sys.platform == "win32" else 4.0
+        # CI environments (Windows and macOS) are typically slower, so allow more time
+        # Observed: Windows CI can take ~17s for 1000 inserts, macOS can also be slow
+        if sys.platform == "win32":
+            max_time = 25.0
+        elif sys.platform == "darwin":  # macOS
+            max_time = 10.0
+        else:
+            max_time = 4.0
         assert elapsed < max_time, (
             f"1000 inserts took {elapsed:.3f}s, expected < {max_time}s "
             f"(platform: {sys.platform})"
@@ -145,8 +150,13 @@ async def test_large_result_set_performance(test_db):
 
         assert len(rows) == 10000
         # Should fetch 10K rows in reasonable time
-        # Windows CI environments are typically slower, so allow more time
-        max_time = 8.0 if sys.platform == "win32" else 4.0
+        # CI environments (Windows and macOS) are typically slower, so allow more time
+        if sys.platform == "win32":
+            max_time = 8.0
+        elif sys.platform == "darwin":  # macOS
+            max_time = 6.0
+        else:
+            max_time = 4.0
         assert elapsed < max_time, (
             f"Fetching 10K rows took {elapsed:.3f}s, expected < {max_time}s "
             f"(platform: {sys.platform})"
