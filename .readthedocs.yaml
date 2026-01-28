@@ -24,10 +24,14 @@ build:
     - echo "Installing rapsqlite wheel..."
     - |
       pip install target/wheels/rapsqlite-*.whl --force-reinstall || (echo "ERROR: Failed to install wheel" && exit 1)
-    # Verify rapsqlite can be imported
+    # Verify rapsqlite can be imported (from installed package, not source)
     - echo "Verifying rapsqlite import..."
     - |
-      python << 'EOF'
+      cd /tmp && python << 'EOF'
+      import sys
+      # Remove source directory from path to ensure we import from installed package
+      if '/home/docs/checkouts/readthedocs.org/user_builds/rapsqlite/checkouts/latest' in sys.path:
+          sys.path.remove('/home/docs/checkouts/readthedocs.org/user_builds/rapsqlite/checkouts/latest')
       import rapsqlite
       print("Successfully imported rapsqlite", rapsqlite.__version__)
       EOF
