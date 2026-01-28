@@ -289,4 +289,3 @@ pub(crate) fn row_to_py_with_factory<'py>(
     let result = f.call1((list,))?;
     Ok(result)
 }
-

@@ -470,4 +470,3 @@ pub(crate) async fn bind_and_fetch_optional_on_connection(
         .await
         .map_err(|e| crate::map_sqlx_error(e, path, query))
 }
-

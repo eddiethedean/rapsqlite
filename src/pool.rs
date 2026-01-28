@@ -165,4 +165,3 @@ pub(crate) fn has_callbacks(
 
     load_ext || has_functions || has_trace || has_authorizer || has_progress
 }
-

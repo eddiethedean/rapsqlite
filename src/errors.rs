@@ -34,4 +34,3 @@ pub(crate) fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
         _ => DatabaseError::new_err(error_msg),
     }
 }
-

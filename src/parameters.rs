@@ -93,7 +93,9 @@ pub(crate) fn process_named_parameters(
 }
 
 /// Process positional parameters from a list/tuple.
-pub(crate) fn process_positional_parameters(list: &Bound<'_, PyList>) -> PyResult<Vec<SqliteParam>> {
+pub(crate) fn process_positional_parameters(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<SqliteParam>> {
     let mut param_values = Vec::new();
     for item in list.iter() {
         let param = SqliteParam::from_py(&item)?;
@@ -123,4 +125,3 @@ macro_rules! bind_chain {
         }
     };
 }
-

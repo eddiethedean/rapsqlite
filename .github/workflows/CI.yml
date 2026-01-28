@@ -163,7 +163,12 @@ jobs:
         override: true
 
     - name: Run cargo test
-      run: cargo test
+      shell: bash
+      run: |
+        set -e
+        # Run tests without extension-module so the test binary links against libpython.
+        export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+        cargo test --no-default-features
 
   lint:
     name: Lint

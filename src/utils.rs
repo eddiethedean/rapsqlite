@@ -169,7 +169,8 @@ mod tests {
 
     #[test]
     fn test_parse_connection_string_uri_relative() {
-        let (path, params) = parse_connection_string("file:db.sqlite?mode=ro&cache=shared").unwrap();
+        let (path, params) =
+            parse_connection_string("file:db.sqlite?mode=ro&cache=shared").unwrap();
         assert_eq!(path, "db.sqlite");
         assert_eq!(
             params,
@@ -187,4 +188,3 @@ mod tests {
         assert_eq!(params, vec![("mode".to_string(), "ro".to_string())]);
     }
 }
-

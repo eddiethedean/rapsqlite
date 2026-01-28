@@ -117,4 +117,3 @@ impl RapRow {
         self.__str__(py)
     }
 }
-
