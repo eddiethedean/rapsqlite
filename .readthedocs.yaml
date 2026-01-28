@@ -13,15 +13,20 @@ build:
     - pip install -r docs/requirements.txt
     - pip install maturin
     # Build the rapsqlite package (Rust is available via tools.rust)
-    - maturin build --release
+    - echo "Building rapsqlite package with maturin..."
+    - maturin build --release || (echo "Maturin build failed!" && exit 1)
     # Verify the wheel was built
-    - ls -la target/wheels/ || echo "Warning: No wheels found in target/wheels/"
+    - echo "Checking for built wheels..."
+    - ls -la target/wheels/ || (echo "ERROR: No wheels found in target/wheels/" && exit 1)
     # Install the built wheel
-    - pip install target/wheels/rapsqlite-*.whl --force-reinstall
+    - echo "Installing rapsqlite wheel..."
+    - pip install target/wheels/rapsqlite-*.whl --force-reinstall || (echo "ERROR: Failed to install wheel" && exit 1)
     # Verify rapsqlite can be imported
-    - python -c "import rapsqlite; print(f'Successfully imported rapsqlite {rapsqlite.__version__}')" || echo "Warning: Failed to import rapsqlite"
+    - echo "Verifying rapsqlite import..."
+    - python -c "import rapsqlite; print(f'Successfully imported rapsqlite {rapsqlite.__version__}')" || (echo "ERROR: Failed to import rapsqlite" && exit 1)
     # Build documentation
-    - sphinx-build -b html docs/ docs/_build/html
+    - echo "Building documentation with Sphinx..."
+    - sphinx-build -b html docs/ docs/_build/html || (echo "ERROR: Sphinx build failed" && exit 1)
 
 python:
   install:
