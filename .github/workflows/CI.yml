@@ -30,7 +30,13 @@ jobs:
         override: true
 
     - name: Install maturin
-      run: pip install maturin
+      run: python -m pip install maturin
+
+    - name: Verify Python version
+      run: |
+        python --version
+        which python
+        python -c "import sys; print(f'Python executable: {sys.executable}')"
 
     - name: Build package (Linux)
       if: runner.os == 'Linux'
@@ -42,23 +48,83 @@ jobs:
 
     - name: Install package
       shell: bash
-      run: pip install target/wheels/rapsqlite-*.whl --force-reinstall
+      run: |
+        # Windows: Use D: drive for temporary files (30%+ faster I/O than C: drive)
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          export TEMP="D:/a/_temp"
+          export TMP="D:/a/_temp"
+          mkdir -p "$TEMP" || true
+        fi
+        python --version
+        python -m pip install target/wheels/rapsqlite-*.whl --force-reinstall || echo "Wheel installation failed or no wheels found"
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          cd "$TEMP" || cd "$TMP"
+          python -c "import rapsqlite; print(f'Successfully imported rapsqlite version {rapsqlite.__version__}')" || (echo "Import failed, checking installed packages:" && python -m pip list | grep rapsqlite && exit 1)
+        else
+          cd /tmp && python -c "import rapsqlite; print(f'Successfully imported rapsqlite version {rapsqlite.__version__}')" || (echo "Import failed, checking installed packages:" && python -m pip list | grep rapsqlite && exit 1)
+        fi
 
     - name: Install test dependencies
       shell: bash
-      run: pip install pytest pytest-asyncio
+      run: pip install pytest pytest-asyncio pytest-cov pytest-xdist hypothesis
 
     - name: Test package import
       shell: bash
       run: |
-        cd /tmp && python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
+        # Windows: Use D: drive for temporary files (faster I/O)
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          export TEMP="D:/a/_temp"
+          export TMP="D:/a/_temp"
+          mkdir -p "$TEMP" || true
+          cd "$TEMP" || cd "$TMP"
+          python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
+        else
+          cd /tmp && python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
+        fi
 
     - name: Run tests
       shell: bash
+      timeout-minutes: 25
       run: |
-        cp test_rapsqlite.py /tmp/
-        cd /tmp
-        python -m pytest test_rapsqlite.py -v
+        # Windows: Use D: drive for temporary files (30%+ faster I/O than C: drive)
+        # The D: drive has significantly better I/O performance on GitHub Actions Windows runners
+        # This addresses the primary cause of Windows CI slowness
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          export TEMP="D:/a/_temp"
+          export TMP="D:/a/_temp"
+          mkdir -p "$TEMP" || true
+        fi
+        # Change to a temp directory to avoid importing from source
+        # On Windows, use temp directory and absolute paths to avoid source import issues
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          WORKSPACE=$(echo "${{ github.workspace }}" | sed 's|\\|/|g')
+          cd "$TEMP" || cd "$TMP"
+          # Ensure coverage XML directory exists
+          mkdir -p "$WORKSPACE"
+          # Windows: Try limited parallelization (2 workers) with fallback to sequential
+          # With WindowsSelectorEventLoopPolicy set in conftest.py, each spawned worker
+          # process will have the correct event loop policy. Windows uses spawn (not fork)
+          # which is better for asyncio. If parallel execution fails, fallback to sequential.
+          # Using limited workers (2) instead of auto to reduce risk of event loop conflicts
+          python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" -n 2 || python -m pytest "$WORKSPACE/tests/" -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
+        else
+          cd /tmp
+          # Ensure coverage XML directory exists and is writable
+          mkdir -p "${{ github.workspace }}"
+          COV_XML="${{ github.workspace }}/coverage.xml"
+          # Run tests with parallel execution
+          # If pytest-xdist fails (e.g., on macOS Python 3.10), fallback to sequential execution
+          python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML" -n auto || python -m pytest ${{ github.workspace }}/tests/ -v --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML"
+        fi
+
+    - name: Upload coverage to Codecov
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ${{ github.workspace }}/coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
 
   lint:
     name: Lint
