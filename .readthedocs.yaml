@@ -7,28 +7,16 @@ build:
     - pkg-config
   tools:
     python: "3.12"
-    rust: "latest"
   commands:
-    # Install build dependencies
+    # Install build and runtime dependencies
     - pip install -r docs/requirements.txt
-    - pip install maturin
-    # Build the rapsqlite package (Rust is available via tools.rust)
-    - echo "Building rapsqlite package with maturin..."
-    - |
-      maturin build --release || (echo "Maturin build failed!" && exit 1)
-    # Verify the wheel was built
-    - echo "Checking for built wheels..."
-    - |
-      ls -la target/wheels/ || (echo "ERROR: No wheels found in target/wheels/" && exit 1)
-    # Install the built wheel
-    - echo "Installing rapsqlite wheel..."
-    - |
-      pip install target/wheels/rapsqlite-*.whl --force-reinstall || (echo "ERROR: Failed to install wheel" && exit 1)
-    # Verify rapsqlite can be imported (from installed package, not source)
+    # Install released rapsqlite from PyPI (avoids rebuilding Rust extension on RTD)
+    - pip install rapsqlite
+    # Verify rapsqlite can be imported
     - echo "Verifying rapsqlite import..."
     - |
       cd /tmp
-      python -c "import rapsqlite; print(\"Successfully imported rapsqlite\", rapsqlite.__version__)" || (echo "ERROR: Failed to import rapsqlite" && exit 1)
+      python -c "import rapsqlite; print('Successfully imported rapsqlite', rapsqlite.__version__)" || (echo "ERROR: Failed to import rapsqlite" && exit 1)
     # Build documentation
     - echo "Building documentation with Sphinx..."
     - |
