@@ -42,7 +42,9 @@ use crate::utils::{
     cstr_from_i8_ptr, is_select_query, parse_connection_string, track_query_usage, validate_path,
 };
 use crate::OperationalError;
-use crate::{Cursor, ExecuteContextManager, ProgrammingError, TransactionContextManager, ValueError};
+use crate::{
+    Cursor, ExecuteContextManager, ProgrammingError, TransactionContextManager, ValueError,
+};
 
 /// Async SQLite connection.
 #[pyclass]
@@ -478,10 +480,10 @@ impl Connection {
     }
 
     /// Get whether query strings are included in error messages.
-    /// 
+    ///
     /// When True (default), error messages include sanitized query strings for debugging.
     /// When False, query strings are excluded entirely for enhanced security.
-    /// 
+    ///
     /// Queries are always sanitized to remove sensitive patterns (passwords, tokens, etc.)
     /// even when included. For maximum security with highly sensitive data, set this to False.
     #[getter(include_query_in_errors)]
@@ -491,10 +493,10 @@ impl Connection {
     }
 
     /// Set whether query strings are included in error messages.
-    /// 
+    ///
     /// When True (default), error messages include sanitized query strings for debugging.
     /// When False, query strings are excluded entirely for enhanced security.
-    /// 
+    ///
     /// Queries are always sanitized to remove sensitive patterns (passwords, tokens, etc.)
     /// even when included. For maximum security with highly sensitive data, set this to False.
     #[setter(include_query_in_errors)]
@@ -505,10 +507,10 @@ impl Connection {
     }
 
     /// Get the SQLite busy_timeout value (in seconds).
-    /// 
+    ///
     /// This controls how long SQLite will wait when the database is locked by another
     /// process/thread before raising an error. Default: 5.0 seconds (matches sqlite3/aiosqlite).
-    /// 
+    ///
     /// This is an aiosqlite-compatible feature that sets SQLite's busy_timeout PRAGMA.
     #[getter(timeout)]
     fn timeout(&self) -> PyResult<f64> {
@@ -517,10 +519,10 @@ impl Connection {
     }
 
     /// Set the SQLite busy_timeout value (in seconds).
-    /// 
+    ///
     /// This controls how long SQLite will wait when the database is locked by another
     /// process/thread before raising an error. Set to 0.0 to disable timeout.
-    /// 
+    ///
     /// This is an aiosqlite-compatible feature that sets SQLite's busy_timeout PRAGMA.
     /// The timeout is applied to connections when they are used (e.g., in transactions).
     #[setter(timeout)]
@@ -539,8 +541,18 @@ impl Connection {
         *guard = if value.is_none() {
             None
         } else {
-            let n = value.extract::<i64>()?;
-            if n < 0 {
+            // Accept both int and float, convert to u64 (seconds)
+            // Try float first (handles both int and float), then int
+            let n: f64 = if let Ok(f) = value.extract::<f64>() {
+                f
+            } else if let Ok(i) = value.extract::<i64>() {
+                i as f64
+            } else {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "connection_timeout must be an int or float",
+                ));
+            };
+            if n < 0.0 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "connection_timeout must be >= 0",
                 ));
@@ -716,22 +728,19 @@ impl Connection {
         let connection_self = self_.into();
         Python::attach(|py| {
             let future = async move {
+                // Check if transaction is already active (before doing any work)
                 {
-                    // Atomically reserve the transaction slot to prevent concurrent begin().
-                    let mut trans_guard = transaction_state.lock().await;
+                    let trans_guard = transaction_state.lock().await;
                     if trans_guard.is_active() {
                         return Err(OperationalError::new_err("Transaction already in progress"));
                     }
-                    *trans_guard = TransactionState::Starting;
-                } // Lock released here (avoid deadlocks with init_hook).
+                } // Lock released immediately
 
                 let mut from_callback = false;
                 let mut pending_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
 
                 let result: Result<(), PyErr> = async {
                     // Ensure pool exists before calling init_hook
-                    // Note: If pool_size is 1, init_hook's execute() may compete with begin() for the connection
-                    // This is handled by ensuring init_hook completes before begin() acquires connection
                     let pool_clone = get_or_create_pool(
                         &path,
                         &pool,
@@ -741,10 +750,21 @@ impl Connection {
                     )
                     .await?;
 
-                    // Execute init_hook if needed (before starting transaction)
-                    // Lock is released, so init_hook's execute() can check transaction state without deadlock
+                    // Execute init_hook if needed (BEFORE setting transaction state)
+                    // This ensures init_hook can use regular pool connections, not transaction connection
                     execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self)
                         .await?;
+
+                    // Now atomically reserve the transaction slot
+                    {
+                        let mut trans_guard = transaction_state.lock().await;
+                        if trans_guard.is_active() {
+                            return Err(OperationalError::new_err(
+                                "Transaction already in progress",
+                            ));
+                        }
+                        *trans_guard = TransactionState::Starting;
+                    } // Lock released
 
                     // Check if callbacks are set - if so, use callback connection for transaction
                     let has_callbacks_flag = has_callbacks(
@@ -1220,6 +1240,8 @@ impl Connection {
         Python::attach(|py| {
             let future = async move {
                 // Priority: transaction > callbacks > pool
+                // Note: Only check for Active state, not Starting (Starting means transaction is being set up,
+                // and init_hook may need to execute queries using pool connection)
                 let in_transaction = {
                     let trans_guard = transaction_state.lock().await;
                     *trans_guard == TransactionState::Active

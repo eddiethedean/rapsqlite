@@ -60,7 +60,7 @@ pub(crate) fn track_query_usage(query_cache: &Arc<StdMutex<HashMap<String, u64>>
 }
 
 /// Validate a file path for security and correctness.
-/// 
+///
 /// Checks for:
 /// - Empty paths
 /// - Null bytes (security risk)
@@ -72,14 +72,14 @@ pub(crate) fn validate_path(path: &str) -> PyResult<()> {
             "Database path cannot be empty",
         ));
     }
-    
+
     // Check for null bytes (security risk - can be used for path injection)
     if path.contains('\0') {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Database path cannot contain null bytes",
         ));
     }
-    
+
     // Check path length (prevent DoS from extremely long paths)
     // SQLite supports paths up to PATH_MAX (typically 4096 on Linux, 1024 on macOS)
     // We use a reasonable limit of 4096 characters
@@ -91,7 +91,7 @@ pub(crate) fn validate_path(path: &str) -> PyResult<()> {
             path.len()
         )));
     }
-    
+
     // Basic path traversal check (for non-:memory: paths)
     // Note: This is a basic check - full path validation would require resolving
     // the path and checking against a base directory, which is application-specific
@@ -100,7 +100,7 @@ pub(crate) fn validate_path(path: &str) -> PyResult<()> {
         // Full validation should be done at the application level
         // We don't reject these here as they might be legitimate relative paths
     }
-    
+
     Ok(())
 }
 
@@ -132,7 +132,7 @@ pub(crate) fn parse_connection_string(uri: &str) -> PyResult<(String, Vec<(Strin
                     query.len()
                 )));
             }
-            
+
             for param_pair in query.split('&') {
                 // Validate parameter pair length
                 if param_pair.len() > 512 {
@@ -141,25 +141,25 @@ pub(crate) fn parse_connection_string(uri: &str) -> PyResult<(String, Vec<(Strin
                         param_pair.len()
                     )));
                 }
-                
+
                 if let Some(equal_pos) = param_pair.find('=') {
                     let key = param_pair[..equal_pos].to_string();
                     let value = param_pair[equal_pos + 1..].to_string();
-                    
+
                     // Validate parameter key (must be non-empty, alphanumeric + underscore/hyphen)
                     if key.is_empty() {
                         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                             "URI parameter key cannot be empty",
                         ));
                     }
-                    
+
                     // Check for null bytes in key or value
                     if key.contains('\0') || value.contains('\0') {
                         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                             "URI parameter cannot contain null bytes",
                         ));
                     }
-                    
+
                     params.push((key, value));
                 } else {
                     // Parameter without value (e.g., ?flag)

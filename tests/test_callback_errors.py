@@ -55,7 +55,7 @@ async def test_trace_callback_exception_handled(test_db):
 @pytest.mark.asyncio
 async def test_authorizer_callback_exception_fails_secure(test_db):
     """Test that exceptions in authorizer callbacks default to DENY (fail-secure).
-    
+
     Note: This test verifies that the code defaults to SQLITE_DENY on exceptions.
     The authorizer callback is set on the callback connection, so it may not
     be triggered by all operations. The important fix is that exceptions default
@@ -112,7 +112,7 @@ async def test_progress_handler_exception_continues(test_db):
 @pytest.mark.asyncio
 async def test_authorizer_callback_invalid_return_defaults_to_deny(test_db):
     """Test that invalid return values from authorizer default to DENY.
-    
+
     Note: This test verifies that the code defaults to SQLITE_DENY when
     return value extraction fails. The authorizer callback is set on the
     callback connection, so it may not be triggered by all operations.
@@ -155,7 +155,9 @@ async def test_backup_progress_callback_exception_handled(test_db):
                 raise ValueError("Backup progress error")
 
         # Backup should complete despite progress callback errors
-        async with rapsqlite.connect(test_db) as src, rapsqlite.connect(target_db) as tgt:
+        async with rapsqlite.connect(test_db) as src, rapsqlite.connect(
+            target_db
+        ) as tgt:
             await src.backup(tgt, pages=1, progress=progress_callback)
 
         # Verify backup succeeded

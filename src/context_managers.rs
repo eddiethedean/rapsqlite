@@ -92,9 +92,22 @@ impl ExecuteContextManager {
             let future = async move {
                 // For non-SELECT queries, execute immediately when entering context
                 if !is_select {
-                    let in_transaction = {
+                    // Check if we're currently executing init_hook FIRST (before checking transaction state)
+                    // If we're inside init_hook, we should use pool connection, not transaction connection
+                    let hook_already_called = {
+                        let guard = init_hook_called.lock().unwrap();
+                        *guard
+                    };
+
+                    // Only check for Active state, not Starting (Starting means transaction is being set up,
+                    // and init_hook may need to execute queries using pool connection)
+                    // If we're inside init_hook execution, don't use transaction connection
+                    let in_transaction = if hook_already_called {
+                        // If we're inside init_hook, don't use transaction connection even if state is Starting
+                        false
+                    } else {
                         let g = transaction_state.lock().await;
-                        g.is_active()
+                        *g == TransactionState::Active
                     };
 
                     if !in_transaction {
@@ -112,6 +125,19 @@ impl ExecuteContextManager {
                     // This prevents deadlocks when init_hook calls conn.execute() which triggers __aenter__
                     execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
 
+                    // Re-check transaction state after init_hook (state may have changed during hook execution)
+                    // Only check for Active state, not Starting (Starting means transaction is being set up)
+                    // Also, if we're inside init_hook execution, don't use transaction connection
+                    let in_transaction_after_hook = if hook_already_called {
+                        // If we were already inside init_hook when this execute() was called,
+                        // we should use pool connection, not transaction connection
+                        false
+                    } else {
+                        // Check transaction state - only use transaction connection if state is Active
+                        let g = transaction_state.lock().await;
+                        *g == TransactionState::Active
+                    };
+
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
@@ -120,7 +146,7 @@ impl ExecuteContextManager {
                         &progress_handler,
                     );
 
-                    let result = if in_transaction {
+                    let result = if in_transaction_after_hook {
                         let mut conn_guard = transaction_connection.lock().await;
                         let conn = conn_guard.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
@@ -165,9 +191,11 @@ impl ExecuteContextManager {
                     // and return empty results without executing. This is handled in fetchall().
                 } else {
                     // For SELECT queries, ensure pool exists for lazy execution
+                    // Only check for Active state, not Starting (Starting means transaction is being set up,
+                    // and init_hook may need to execute queries using pool connection)
                     let in_transaction = {
                         let g = transaction_state.lock().await;
-                        g.is_active()
+                        *g == TransactionState::Active
                     };
 
                     // Check if init_hook is already being executed (to avoid deadlock)
@@ -289,14 +317,13 @@ impl TransactionContextManager {
             let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
             let timeout = Arc::clone(&slf.borrow(py).timeout);
             let future = async move {
-                // Atomically reserve the transaction slot to prevent concurrent begin().
+                // Check if transaction is already active (before doing any work)
                 {
-                    let mut trans_guard = transaction_state.lock().await;
+                    let trans_guard = transaction_state.lock().await;
                     if trans_guard.is_active() {
                         return Err(OperationalError::new_err("Transaction already in progress"));
                     }
-                    *trans_guard = TransactionState::Starting;
-                } // Lock released here (avoid deadlocks with init_hook).
+                } // Lock released immediately
 
                 let result: Result<Py<PyAny>, PyErr> = async {
                     let pool_clone = get_or_create_pool(
@@ -308,7 +335,8 @@ impl TransactionContextManager {
                     )
                     .await?;
 
-                    // Execute init_hook if needed (before starting transaction)
+                    // Execute init_hook if needed (BEFORE setting transaction state)
+                    // This ensures init_hook can use regular pool connections, not transaction connection
                     // Clone connection before passing to async function
                     // Note: Python::with_gil is used here for sync clone_ref in async context.
                     // The deprecation warning is acceptable as this is a sync operation within async.
@@ -316,6 +344,17 @@ impl TransactionContextManager {
                     let connection_for_hook = Python::with_gil(|py| connection.clone_ref(py));
                     execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook)
                         .await?;
+
+                    // Now atomically reserve the transaction slot
+                    {
+                        let mut trans_guard = transaction_state.lock().await;
+                        if trans_guard.is_active() {
+                            return Err(OperationalError::new_err(
+                                "Transaction already in progress",
+                            ));
+                        }
+                        *trans_guard = TransactionState::Starting;
+                    } // Lock released
 
                     let pool_size_val = {
                         let g = pool_size.lock().unwrap();

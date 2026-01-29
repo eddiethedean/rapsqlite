@@ -13,24 +13,37 @@ use crate::types::{ProgressHandler, UserFunctions};
 use crate::OperationalError;
 
 /// Create a helpful error message for pool acquisition failures.
-pub(crate) fn pool_acquisition_error(path: &str, error: &sqlx::Error, pool_size: Option<usize>, timeout: Option<u64>) -> PyErr {
+pub(crate) fn pool_acquisition_error(
+    path: &str,
+    error: &sqlx::Error,
+    pool_size: Option<usize>,
+    timeout: Option<u64>,
+) -> PyErr {
     let error_str = error.to_string();
     let is_timeout = error_str.contains("timeout") || error_str.contains("timed out");
-    
+
     let mut msg = format!("Failed to acquire connection from pool at {path}: {error_str}");
-    
+
     if is_timeout {
         msg.push_str("\n\nPossible solutions:");
         msg.push_str("\n  - Increase pool_size (current: ");
-        msg.push_str(&pool_size.map(|s| s.to_string()).unwrap_or_else(|| "1 (default)".to_string()));
-        msg.push_str(")");
+        msg.push_str(
+            &pool_size
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "1 (default)".to_string()),
+        );
+        msg.push(')');
         msg.push_str("\n  - Increase connection_timeout (current: ");
-        msg.push_str(&timeout.map(|t| format!("{}s", t)).unwrap_or_else(|| "30s (default)".to_string()));
-        msg.push_str(")");
+        msg.push_str(
+            &timeout
+                .map(|t| format!("{}s", t))
+                .unwrap_or_else(|| "30s (default)".to_string()),
+        );
+        msg.push(')');
         msg.push_str("\n  - Ensure connections are properly released (use async context managers)");
         msg.push_str("\n  - Check for long-running transactions that hold connections");
     }
-    
+
     OperationalError::new_err(msg)
 }
 
@@ -115,9 +128,10 @@ pub(crate) async fn ensure_callback_connection(
             let g = connection_timeout_secs.lock().unwrap();
             *g
         };
-        let pool_conn = pool_clone.acquire().await.map_err(|e| {
-            pool_acquisition_error(path, &e, pool_size_val, timeout_val)
-        })?;
+        let pool_conn = pool_clone
+            .acquire()
+            .await
+            .map_err(|e| pool_acquisition_error(path, &e, pool_size_val, timeout_val))?;
 
         *callback_guard = Some(pool_conn);
     }

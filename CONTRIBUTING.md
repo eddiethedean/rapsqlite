@@ -10,15 +10,29 @@ git clone https://github.com/eddiethedean/rapsqlite.git
 cd rapsqlite
 ```
 
-2. Install development dependencies:
+2. Ensure Python development headers are installed:
+   - **macOS (Homebrew)**: Python headers are included with Python installations
+   - **Linux (Debian/Ubuntu)**: `sudo apt-get install python3-dev`
+   - **Linux (Fedora/RHEL)**: `sudo dnf install python3-devel`
+   - **Windows**: Python headers are included with Python installations
+   - **pyenv users**: Headers are included when installing Python versions via pyenv
+
+3. Install development dependencies:
 ```bash
 pip install maturin pytest pytest-asyncio pytest-cov pytest-xdist hypothesis
 ```
 
-3. Build the package in development mode:
+4. Build the package in development mode:
 ```bash
+# Use maturin develop (recommended) - handles Python linking automatically
+maturin develop
+
+# Or set PYO3_PYTHON environment variable if needed
+export PYO3_PYTHON=$(which python3)
 maturin develop
 ```
+
+**Note**: Use `maturin develop` instead of `cargo build` for development, as maturin automatically handles Python library linking. If you need to use `cargo build` directly, ensure `PYO3_PYTHON` is set to your Python executable.
 
 ## Running Tests
 

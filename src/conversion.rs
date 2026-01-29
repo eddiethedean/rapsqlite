@@ -187,7 +187,7 @@ pub(crate) fn sqlite_value_to_py<'py>(
     // Fallback path: use column type information to reduce redundant probes.
     // Check declared type first, then fall back to type probing for robustness.
     let type_name = row.columns()[col].type_info().name().to_ascii_uppercase();
-    
+
     // Try type-specific extraction based on declared type (more efficient)
     match type_name.as_str() {
         "INTEGER" | "INT" => {
@@ -226,7 +226,7 @@ pub(crate) fn sqlite_value_to_py<'py>(
             // Unknown or NULL type - fall through to type probing below
         }
     }
-    
+
     // Type probing fallback (for NULL, unknown types, or when declared type doesn't match)
     // This handles SQLite's dynamic typing where any column can store any type
     if let Ok(opt_val) = row.try_get::<Option<i64>, _>(col) {
