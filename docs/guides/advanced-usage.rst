@@ -160,6 +160,96 @@ Always include context in error messages:
    except IntegrityError as e:
        raise IntegrityError(f"Failed to insert user '{name}': {e}") from e
 
+Callback Exception Handling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When using SQLite callbacks (user-defined functions, trace callbacks, authorizer, progress handler),
+exceptions in your Python callbacks are handled automatically:
+
+**User-Defined Functions:**
+- Exceptions are converted to SQLite errors
+- The query will fail with an ``OperationalError`` containing the Python exception message
+- Example: If your function raises ``ValueError("Invalid input")``, the query fails with
+  "Python function error: ValueError: Invalid input"
+
+**Trace Callbacks:**
+- Exceptions are silently ignored to prevent trace callback failures from affecting database operations
+- Your trace callback should handle exceptions internally if you need error handling
+- Example: Wrap your callback logic in try/except if you need to log errors
+
+**Authorizer Callbacks:**
+- Exceptions default to **DENY** (fail-secure behavior) for security
+- If your authorizer callback raises an exception, the operation is denied
+- This prevents authorization bypass if the callback crashes
+- Example: Always handle exceptions in authorizer callbacks to avoid denying legitimate operations
+
+**Progress Handlers:**
+- Exceptions default to **continue** (don't abort the operation)
+- Progress callback failures won't abort long-running operations
+- Example: Handle exceptions internally if you need to track progress errors
+
+Best Practice: Always handle exceptions within your callback functions:
+
+.. code-block:: python
+
+   def safe_user_function(x):
+       try:
+           # Your logic here
+           return process_value(x)
+       except Exception as e:
+           # Log error and return a safe default or re-raise
+           logger.error(f"Error in user function: {e}")
+           return None  # Or raise if you want query to fail
+
+   await conn.create_function("safe_func", 1, safe_user_function)
+
+Connection Lifecycle and Cleanup
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Always use context managers** for proper cleanup:
+
+.. code-block:: python
+
+   # Good: Automatic cleanup
+   async with connect("example.db") as conn:
+       await conn.execute("SELECT 1")
+   # Connection automatically closed, transactions rolled back
+
+   # Bad: Manual cleanup required
+   conn = connect("example.db")
+   try:
+       await conn.execute("SELECT 1")
+   finally:
+       await conn.close()  # Must remember to close
+
+**Transaction cleanup:**
+- Active transactions are automatically rolled back when connection is closed
+- Use transaction context managers for automatic commit/rollback
+- Example: ``async with conn.transaction():`` ensures cleanup even on exceptions
+
+Pool Exhaustion Troubleshooting
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you see "Failed to acquire connection from pool" errors:
+
+1. **Increase pool_size**: More connections allow more concurrent operations
+2. **Increase connection_timeout**: Give more time for connections to become available
+3. **Check for long-running transactions**: Transactions hold connections until commit/rollback
+4. **Ensure proper cleanup**: Use context managers to release connections promptly
+
+Error messages include current pool configuration and suggestions:
+
+.. code-block:: python
+
+   try:
+       await conn.execute("SELECT 1")
+   except OperationalError as e:
+       # Error message includes:
+       # - Current pool_size
+       # - Current connection_timeout
+       # - Suggestions for resolution
+       print(e)
+
 .. _performance-tuning:
 
 Performance Tuning

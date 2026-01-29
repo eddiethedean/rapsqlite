@@ -42,3 +42,27 @@ Properties
 .. autoattribute:: rapsqlite.Connection.text_factory
 .. autoattribute:: rapsqlite.Connection.pool_size
 .. autoattribute:: rapsqlite.Connection.connection_timeout
+.. autoattribute:: rapsqlite.Connection.timeout
+.. autoattribute:: rapsqlite.Connection.include_query_in_errors
+
+Callback Methods
+-----------------
+
+.. automethod:: rapsqlite.Connection.create_function
+.. automethod:: rapsqlite.Connection.set_trace_callback
+.. automethod:: rapsqlite.Connection.set_authorizer
+.. automethod:: rapsqlite.Connection.set_progress_handler
+.. automethod:: rapsqlite.Connection.enable_load_extension
+.. automethod:: rapsqlite.Connection.load_extension
+
+Callback Exception Handling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When using callback methods, exceptions in your Python callbacks are handled as follows:
+
+- **User-defined functions** (`create_function`): Exceptions are converted to SQLite errors, causing the query to fail with an ``OperationalError``
+- **Trace callbacks** (`set_trace_callback`): Exceptions are silently ignored to prevent affecting database operations
+- **Authorizer callbacks** (`set_authorizer`): Exceptions default to **DENY** (fail-secure) - operations are denied if callback raises
+- **Progress handlers** (`set_progress_handler`): Exceptions default to **continue** - operation continues even if callback raises
+
+Best practice: Always handle exceptions within your callback functions to avoid unexpected behavior.

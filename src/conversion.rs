@@ -184,7 +184,51 @@ pub(crate) fn sqlite_value_to_py<'py>(
         }
     }
 
-    // Fallback path: best-effort type probing (kept for robustness).
+    // Fallback path: use column type information to reduce redundant probes.
+    // Check declared type first, then fall back to type probing for robustness.
+    let type_name = row.columns()[col].type_info().name().to_ascii_uppercase();
+    
+    // Try type-specific extraction based on declared type (more efficient)
+    match type_name.as_str() {
+        "INTEGER" | "INT" => {
+            if let Ok(opt_val) = row.try_get::<Option<i64>, _>(col) {
+                return Ok(match opt_val {
+                    Some(val) => PyInt::new(py, val).into(),
+                    None => py.None(),
+                });
+            }
+        }
+        "REAL" | "FLOAT" | "DOUBLE" => {
+            if let Ok(opt_val) = row.try_get::<Option<f64>, _>(col) {
+                return Ok(match opt_val {
+                    Some(val) => PyFloat::new(py, val).into(),
+                    None => py.None(),
+                });
+            }
+        }
+        "TEXT" | "VARCHAR" | "CHAR" => {
+            if let Ok(opt_val) = row.try_get::<Option<String>, _>(col) {
+                return Ok(match opt_val {
+                    Some(val) => PyString::new(py, &val).into(),
+                    None => py.None(),
+                });
+            }
+        }
+        "BLOB" => {
+            if let Ok(opt_val) = row.try_get::<Option<Vec<u8>>, _>(col) {
+                return Ok(match opt_val {
+                    Some(val) => PyBytes::new(py, &val).into(),
+                    None => py.None(),
+                });
+            }
+        }
+        _ => {
+            // Unknown or NULL type - fall through to type probing below
+        }
+    }
+    
+    // Type probing fallback (for NULL, unknown types, or when declared type doesn't match)
+    // This handles SQLite's dynamic typing where any column can store any type
     if let Ok(opt_val) = row.try_get::<Option<i64>, _>(col) {
         return Ok(match opt_val {
             Some(val) => PyInt::new(py, val).into(),

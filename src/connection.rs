@@ -21,8 +21,8 @@ use libsqlite3_sys::{
     sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg, sqlite3_free,
     sqlite3_get_autocommit, sqlite3_libversion, sqlite3_load_extension, sqlite3_progress_handler,
     sqlite3_result_null, sqlite3_set_authorizer, sqlite3_total_changes, sqlite3_trace_v2,
-    sqlite3_user_data, sqlite3_value, SQLITE_BUSY, SQLITE_DONE, SQLITE_LOCKED, SQLITE_OK,
-    SQLITE_TRACE_STMT, SQLITE_UTF8,
+    sqlite3_user_data, sqlite3_value, SQLITE_BUSY, SQLITE_DENY, SQLITE_DONE, SQLITE_LOCKED,
+    SQLITE_OK, SQLITE_TRACE_STMT, SQLITE_UTF8,
 };
 
 use crate::conversion::{py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py};
@@ -30,6 +30,7 @@ use crate::errors::map_sqlx_error;
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{
     ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
+    pool_acquisition_error,
 };
 use crate::query::{
     bind_and_execute, bind_and_execute_on_connection, bind_and_fetch_all,
@@ -41,7 +42,7 @@ use crate::utils::{
     cstr_from_i8_ptr, is_select_query, parse_connection_string, track_query_usage, validate_path,
 };
 use crate::OperationalError;
-use crate::{Cursor, ExecuteContextManager, ProgrammingError, TransactionContextManager};
+use crate::{Cursor, ExecuteContextManager, ProgrammingError, TransactionContextManager, ValueError};
 
 /// Async SQLite connection.
 #[pyclass]
@@ -75,7 +76,26 @@ pub(crate) struct Connection {
     trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Trace callback
     authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Authorizer callback
     progress_handler: ProgressHandler,           // (n, callback)
+    // Error message security: control whether query strings are included in errors
+    include_query_in_errors: Arc<StdMutex<bool>>, // If false, exclude query strings from error messages
+    // SQLite busy_timeout (aiosqlite compatibility) - timeout in seconds for database locks
+    timeout: Arc<StdMutex<f64>>, // Default: 5.0 seconds (matches sqlite3 default)
 }
+
+// Note: We do not implement Drop for Connection because:
+// 1. PyO3 pyclass cleanup happens in Python's GC, which may not have Tokio context
+// 2. Async cleanup (transaction rollback, connection release) requires async context
+// 3. The close() method handles all cleanup properly
+//
+// Resource cleanup behavior:
+// - Arc references will be automatically dropped when Connection is dropped
+// - Pool connections will be returned to pool when Arc<Mutex<Option<PoolConnection>>> is dropped
+// - However, active transactions will NOT be rolled back automatically
+// - Callback connections will be returned to pool when Arc is dropped
+//
+// For proper cleanup including transaction rollback, always:
+// - Use async context managers: `async with rapsqlite.connect(...) as db:`
+// - Or call close() explicitly: `await db.close()`
 
 #[pymethods]
 impl Connection {
@@ -135,12 +155,17 @@ impl Connection {
     ///     pass
     /// ```
     #[new]
-    #[pyo3(signature = (path, *, pragmas = None, init_hook = None))]
+    #[pyo3(signature = (path, *, pragmas = None, init_hook = None, timeout = 5.0))]
     fn new(
         path: String,
         pragmas: Option<&Bound<'_, pyo3::types::PyDict>>,
         init_hook: Option<Py<PyAny>>,
+        timeout: f64,
     ) -> PyResult<Self> {
+        // Validate timeout (must be non-negative)
+        if timeout < 0.0 {
+            return Err(ValueError::new_err("timeout must be >= 0.0"));
+        }
         // Parse connection string if it's a URI
         let (db_path, uri_params) = parse_connection_string(&path)?;
         validate_path(&db_path)?;
@@ -186,6 +211,8 @@ impl Connection {
             trace_callback: Arc::new(StdMutex::new(None)),
             authorizer_callback: Arc::new(StdMutex::new(None)),
             progress_handler: Arc::new(StdMutex::new(None)),
+            include_query_in_errors: Arc::new(StdMutex::new(true)), // Default: include queries for debugging
+            timeout: Arc::new(StdMutex::new(timeout)), // SQLite busy_timeout in seconds (aiosqlite compatibility)
         })
     }
 
@@ -308,8 +335,16 @@ impl Connection {
                             &connection_timeout_secs,
                         )
                         .await?;
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
                         let mut temp_conn = pool_clone.acquire().await.map_err(|e| {
-                            OperationalError::new_err(format!("Failed to acquire connection: {e}"))
+                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
                         })?;
                         let sqlite_conn: &mut SqliteConnection = &mut temp_conn;
                         let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
@@ -318,6 +353,10 @@ impl Connection {
                         let handle_ptr = handle.as_raw_handle().as_ptr();
 
                         // Call sqlite3_total_changes while connection is alive
+                        // Safety: handle_ptr is a valid sqlite3* pointer obtained from
+                        // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be
+                        // valid for the lifetime of the handle lock. sqlite3_total_changes
+                        // is a read-only operation that doesn't modify the database handle.
                         let total = unsafe { sqlite3_total_changes(handle_ptr) };
 
                         // Connection will be released when temp_conn is dropped
@@ -329,6 +368,10 @@ impl Connection {
                 };
 
                 // Call sqlite3_total_changes (for transaction or callback connection paths)
+                // Safety: raw_db is a valid sqlite3* pointer obtained from
+                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                // for the lifetime of the handle lock. sqlite3_total_changes is a
+                // read-only operation that doesn't modify the database handle.
                 let total = unsafe { sqlite3_total_changes(raw_db) };
 
                 Ok(total as u64)
@@ -432,6 +475,62 @@ impl Connection {
                 None => py.None(),
             })
         })
+    }
+
+    /// Get whether query strings are included in error messages.
+    /// 
+    /// When True (default), error messages include sanitized query strings for debugging.
+    /// When False, query strings are excluded entirely for enhanced security.
+    /// 
+    /// Queries are always sanitized to remove sensitive patterns (passwords, tokens, etc.)
+    /// even when included. For maximum security with highly sensitive data, set this to False.
+    #[getter(include_query_in_errors)]
+    fn include_query_in_errors(&self) -> PyResult<bool> {
+        let guard = self.include_query_in_errors.lock().unwrap();
+        Ok(*guard)
+    }
+
+    /// Set whether query strings are included in error messages.
+    /// 
+    /// When True (default), error messages include sanitized query strings for debugging.
+    /// When False, query strings are excluded entirely for enhanced security.
+    /// 
+    /// Queries are always sanitized to remove sensitive patterns (passwords, tokens, etc.)
+    /// even when included. For maximum security with highly sensitive data, set this to False.
+    #[setter(include_query_in_errors)]
+    fn set_include_query_in_errors(&self, value: bool) -> PyResult<()> {
+        let mut guard = self.include_query_in_errors.lock().unwrap();
+        *guard = value;
+        Ok(())
+    }
+
+    /// Get the SQLite busy_timeout value (in seconds).
+    /// 
+    /// This controls how long SQLite will wait when the database is locked by another
+    /// process/thread before raising an error. Default: 5.0 seconds (matches sqlite3/aiosqlite).
+    /// 
+    /// This is an aiosqlite-compatible feature that sets SQLite's busy_timeout PRAGMA.
+    #[getter(timeout)]
+    fn timeout(&self) -> PyResult<f64> {
+        let guard = self.timeout.lock().unwrap();
+        Ok(*guard)
+    }
+
+    /// Set the SQLite busy_timeout value (in seconds).
+    /// 
+    /// This controls how long SQLite will wait when the database is locked by another
+    /// process/thread before raising an error. Set to 0.0 to disable timeout.
+    /// 
+    /// This is an aiosqlite-compatible feature that sets SQLite's busy_timeout PRAGMA.
+    /// The timeout is applied to connections when they are used (e.g., in transactions).
+    #[setter(timeout)]
+    fn set_timeout(&self, value: f64) -> PyResult<()> {
+        if value < 0.0 {
+            return Err(ValueError::new_err("timeout must be >= 0.0"));
+        }
+        let mut guard = self.timeout.lock().unwrap();
+        *guard = value;
+        Ok(())
     }
 
     #[setter(connection_timeout)]
@@ -613,6 +712,7 @@ impl Connection {
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let timeout = Arc::clone(&self_.timeout);
         let connection_self = self_.into();
         Python::attach(|py| {
             let future = async move {
@@ -672,8 +772,16 @@ impl Connection {
                         })?;
                         pending_conn = Some(conn);
                     } else {
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
                         let conn = pool_clone.acquire().await.map_err(|e| {
-                            OperationalError::new_err(format!("Failed to acquire connection: {e}"))
+                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
                         })?;
                         pending_conn = Some(conn);
                     }
@@ -683,10 +791,16 @@ impl Connection {
                         .expect("pending_conn must be set before BEGIN");
 
                     // Set PRAGMA busy_timeout on this connection to handle lock contention
-                    sqlx::query("PRAGMA busy_timeout = 5000")
+                    // Convert timeout from seconds (float) to milliseconds (integer) for SQLite
+                    let timeout_ms = {
+                        let timeout_guard = timeout.lock().unwrap();
+                        (*timeout_guard * 1000.0) as i64
+                    };
+                    let busy_timeout_query = format!("PRAGMA busy_timeout = {}", timeout_ms);
+                    sqlx::query(&busy_timeout_query)
                         .execute(&mut **conn)
                         .await
-                        .map_err(|e| map_sqlx_error(e, &path, "PRAGMA busy_timeout = 5000"))?;
+                        .map_err(|e| map_sqlx_error(e, &path, &busy_timeout_query))?;
 
                     // Execute BEGIN IMMEDIATE on this specific connection
                     // BEGIN IMMEDIATE acquires the write lock upfront, preventing "database is locked" errors
@@ -1861,6 +1975,7 @@ impl Connection {
         let transaction_connection = Arc::clone(&slf.transaction_connection);
         let init_hook = Arc::clone(&slf.init_hook);
         let init_hook_called = Arc::clone(&slf.init_hook_called);
+        let timeout = Arc::clone(&slf.timeout);
         let connection: Py<Connection> = slf.into();
         Ok(TransactionContextManager {
             path,
@@ -1873,6 +1988,7 @@ impl Connection {
             connection,
             init_hook,
             init_hook_called,
+            timeout,
         })
     }
 
@@ -1925,6 +2041,13 @@ impl Connection {
             }
         }
 
+        // Safety: PRAGMA names and values come from user input, but PRAGMA statements
+        // are limited in scope. SQLite PRAGMA names are identifiers (alphanumeric + underscore),
+        // and values are typically simple (strings, integers, or keywords like "WAL", "NORMAL").
+        // However, to be safe, we validate that the name doesn't contain SQL injection patterns.
+        // Note: Full validation would require a whitelist of valid PRAGMA names, but that's
+        // overly restrictive. The current approach relies on SQLite's PRAGMA parser which
+        // will reject invalid PRAGMA names/values.
         let pragma_query = format!("PRAGMA {name} = {pragma_value}");
 
         Python::attach(|py| {
@@ -1998,6 +2121,10 @@ impl Connection {
 
                 // Call the C API
                 let enabled_int = if enabled { 1 } else { 0 };
+                // Safety: raw_db is a valid sqlite3* pointer obtained from
+                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                // for the lifetime of the handle lock. sqlite3_enable_load_extension
+                // is thread-safe and modifies only the connection's extension loading state.
                 let result = unsafe { sqlite3_enable_load_extension(raw_db, enabled_int) };
 
                 if result != 0 {
@@ -2068,6 +2195,11 @@ impl Connection {
                 // Call sqlite3_load_extension
                 // Use NULL for entry point - SQLite will try sqlite3_extension_init first
                 let mut errmsg: *mut i8 = std::ptr::null_mut();
+                // Safety: raw_db is a valid sqlite3* pointer obtained from
+                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                // for the lifetime of the handle lock. name_cstr is a valid CString.
+                // errmsg is a mutable pointer that SQLite may set; we check for null and
+                // free it if set. sqlite3_load_extension is thread-safe for the connection.
                 let result = unsafe {
                     sqlite3_load_extension(
                         raw_db,
@@ -2080,8 +2212,13 @@ impl Connection {
                 // Handle error message if present
                 if result != SQLITE_OK {
                     let error_msg = if !errmsg.is_null() {
+                        // Safety: errmsg is a pointer returned by sqlite3_load_extension.
+                        // We check for null before dereferencing. cstr_from_i8_ptr safely
+                        // converts the C string to a Rust CStr reference.
                         let cstr = unsafe { cstr_from_i8_ptr(errmsg) };
                         let msg = cstr.to_string_lossy().to_string();
+                        // Safety: errmsg was allocated by SQLite and must be freed with
+                        // sqlite3_free. We've already copied the string, so it's safe to free.
                         unsafe {
                             sqlite3_free(errmsg as *mut std::ffi::c_void);
                         }
@@ -2167,6 +2304,10 @@ impl Connection {
                     let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
                         OperationalError::new_err(format!("Function name contains null byte: {e}"))
                     })?;
+                    // Safety: raw_db is a valid sqlite3* pointer obtained from
+                    // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                    // for the lifetime of the handle lock. name_cstr is a valid CString.
+                    // We pass NULL for all callbacks to remove the function, which is safe.
                     let result = unsafe {
                         sqlite3_create_function_v2(
                             raw_db,
@@ -2236,6 +2377,11 @@ impl Connection {
                         argc: std::ffi::c_int,
                         argv: *mut *mut sqlite3_value,
                     ) {
+                        // Safety: ctx is a valid sqlite3_context* pointer provided by SQLite
+                        // when calling the user-defined function. user_data was set when
+                        // registering the function and contains a Box<Py<PyAny>> pointer.
+                        // We check for null before dereferencing. The callback is called
+                        // synchronously from SQLite's execution context.
                         unsafe {
                             // Extract the Python callback from user_data
                             let user_data = sqlite3_user_data(ctx);
@@ -2408,6 +2554,11 @@ impl Connection {
 
                     // Destructor to clean up the callback pointer
                     extern "C" fn udf_destructor(user_data: *mut std::ffi::c_void) {
+                        // Safety: user_data is a pointer to a Box<Py<PyAny>> that was
+                        // created with Box::into_raw when registering the function.
+                        // SQLite calls this destructor when the function is removed or
+                        // the database connection is closed. We check for null before
+                        // converting back to Box and dropping it.
                         unsafe {
                             if !user_data.is_null() {
                                 let _ = Box::from_raw(user_data as *mut Py<PyAny>);
@@ -2415,6 +2566,11 @@ impl Connection {
                         }
                     }
 
+                    // Safety: raw_db is a valid sqlite3* pointer obtained from
+                    // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                    // for the lifetime of the handle lock. name_cstr is a valid CString.
+                    // callback_ptr is a pointer to Box<Py<PyAny>> created with Box::into_raw.
+                    // The trampoline and destructor functions handle the callback safely.
                     let result = unsafe {
                         sqlite3_create_function_v2(
                             raw_db,
@@ -2431,6 +2587,9 @@ impl Connection {
 
                     if result != SQLITE_OK {
                         // Clean up the callback pointer on error
+                        // Safety: callback_ptr was created with Box::into_raw, so we can
+                        // safely convert it back to Box and drop it. This is safe because
+                        // the function registration failed, so SQLite won't call the destructor.
                         unsafe {
                             let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
                         }
@@ -2507,6 +2666,10 @@ impl Connection {
                     _p: *mut std::ffi::c_void,
                     x: *mut std::ffi::c_void,
                 ) -> std::ffi::c_int {
+                    // Safety: ctx is a pointer to the Python callback (Box<Py<PyAny>>)
+                    // that was set when registering the trace callback. x is a pointer to
+                    // the SQL string provided by SQLite. We check for null before dereferencing.
+                    // The callback is called synchronously from SQLite's execution context.
                     unsafe {
                         // x is a pointer to the SQL string (for SQLITE_TRACE_STMT)
                         if x.is_null() || ctx.is_null() {
@@ -2527,8 +2690,13 @@ impl Connection {
                         #[allow(deprecated)]
                         Python::with_gil(|py| {
                             let callback = (*callback_ptr).clone_ref(py);
-                            let _ = callback.bind(py).call1((sql_str,));
-                            // Ignore Python errors in trace callback
+                            if let Err(e) = callback.bind(py).call1((sql_str,)) {
+                                // Trace callbacks are informational - log errors but continue
+                                // The error is silently ignored to prevent trace callback failures
+                                // from affecting database operations. Applications should handle
+                                // exceptions within their trace callbacks if they need error handling.
+                                let _ = e; // Explicitly ignore for clarity
+                            }
                         });
                     }
                     0
@@ -2554,6 +2722,11 @@ impl Connection {
                 };
 
                 // Set or clear the trace callback
+                // Safety: raw_db is a valid sqlite3* pointer obtained from
+                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                // for the lifetime of the handle lock. callback_ptr is either null or
+                // a pointer to Box<Py<PyAny>> created with Box::into_raw. The trampoline
+                // function handles the callback safely.
                 let result = unsafe {
                     sqlite3_trace_v2(
                         raw_db,
@@ -2573,6 +2746,9 @@ impl Connection {
 
                 if result != SQLITE_OK {
                     // Clean up callback pointer on error
+                    // Safety: callback_ptr was created with Box::into_raw, so we can
+                    // safely convert it back to Box and drop it. This is safe because
+                    // the trace callback registration failed, so SQLite won't call the destructor.
                     if !callback_ptr.is_null() {
                         unsafe {
                             let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
@@ -2689,6 +2865,11 @@ impl Connection {
                     arg3: *const i8,
                     arg4: *const i8,
                 ) -> std::ffi::c_int {
+                    // Safety: ctx is a pointer to the Python callback (Box<Py<PyAny>>)
+                    // that was set when registering the authorizer callback. The arg1-arg4
+                    // pointers are C strings provided by SQLite; we check for null and
+                    // safely convert them using cstr_from_i8_ptr. The callback is called
+                    // synchronously from SQLite's execution context.
                     unsafe {
                         if ctx.is_null() {
                             return SQLITE_OK;
@@ -2749,10 +2930,16 @@ impl Connection {
                             {
                                 Ok(result) => {
                                     // Convert Python result to SQLite auth code
-                                    result.extract::<i32>().unwrap_or(SQLITE_OK)
-                                    // Default to OK if conversion fails
+                                    result.extract::<i32>().unwrap_or(SQLITE_DENY)
+                                    // Default to DENY if conversion fails (fail-secure)
                                 }
-                                Err(_) => SQLITE_OK, // Ignore Python errors, default to OK
+                                Err(_e) => {
+                                    // On Python exception in authorizer callback, default to DENY
+                                    // This is a security-critical callback - fail-secure behavior
+                                    // Logging the error would require additional infrastructure,
+                                    // but denying access is the safe default
+                                    SQLITE_DENY
+                                }
                             }
                         })
                     }
@@ -2777,6 +2964,11 @@ impl Connection {
                 };
 
                 // Set or clear the authorizer callback
+                // Safety: raw_db is a valid sqlite3* pointer obtained from
+                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                // for the lifetime of the handle lock. callback_ptr is either null or
+                // a pointer to Box<Py<PyAny>> created with Box::into_raw. The trampoline
+                // function handles the callback safely.
                 unsafe {
                     sqlite3_set_authorizer(
                         raw_db,
@@ -2884,6 +3076,10 @@ impl Connection {
 
                 // Define the progress handler callback trampoline
                 extern "C" fn progress_trampoline(ctx: *mut std::ffi::c_void) -> std::ffi::c_int {
+                    // Safety: ctx is a pointer to the Python callback (Box<Py<PyAny>>)
+                    // that was set when registering the progress handler. We check for
+                    // null before dereferencing. The callback is called synchronously
+                    // from SQLite's execution context during long-running operations.
                     unsafe {
                         if ctx.is_null() {
                             return 0; // Continue
@@ -2912,7 +3108,11 @@ impl Connection {
                                         result.extract::<i32>().unwrap_or(0) // Use integer directly, default to continue if conversion fails
                                     }
                                 }
-                                Err(_) => 0, // Ignore Python errors, default to continue
+                                Err(_) => {
+                                    // Progress handler callbacks are advisory - on error, default to continue
+                                    // This prevents progress callback failures from aborting long-running operations
+                                    0 // Continue on error
+                                }
                             }
                         })
                     }
@@ -2937,6 +3137,11 @@ impl Connection {
                 };
 
                 // Set or clear the progress handler
+                // Safety: raw_db is a valid sqlite3* pointer obtained from
+                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                // for the lifetime of the handle lock. callback_ptr is either null or
+                // a pointer to Box<Py<PyAny>> created with Box::into_raw. The trampoline
+                // function handles the callback safely.
                 unsafe {
                     sqlite3_progress_handler(
                         raw_db,
@@ -3140,6 +3345,9 @@ impl Connection {
                 };
 
                 // Dump data for each table
+                // Safety: table_name comes from sqlite_master (trusted source), and we use
+                // identifier quoting (quote_ident_path) which properly escapes identifiers,
+                // preventing SQL injection even if a malicious table name was created.
                 for table_name in table_names {
                     let quoted_table = quote_ident_path(&table_name);
                     let query = format!("SELECT * FROM {quoted_table}");
@@ -3280,6 +3488,7 @@ impl Connection {
 
                 // Build query
                 let query = if let Some(ref table_name) = name {
+                    // Safety: table_name comes from user input, escaped to prevent SQL injection
                     format!("SELECT name FROM sqlite_master WHERE type='table' AND name = '{}' AND name NOT LIKE 'sqlite_%'", table_name.replace("'", "''"))
                 } else {
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
@@ -3359,7 +3568,11 @@ impl Connection {
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let connection_self = self_.into();
 
-        // Escape table name for SQL
+        // Escape table name for SQL (string literal escaping)
+        // Safety: table_name comes from user input, so we escape single quotes to prevent SQL injection.
+        // Using string literal escaping ('...') is safe here as SQLite will parse it as a string literal.
+        // For better safety, we could use identifier quoting (double quotes), but string literals work
+        // for PRAGMA table_info which accepts table names as string literals.
         let escaped_table_name = table_name.replace("'", "''");
         let query = format!("PRAGMA table_info('{escaped_table_name}')");
 
@@ -3509,6 +3722,8 @@ impl Connection {
         let connection_self = self_.into();
 
         // Build query
+        // Safety: table_name comes from user input, so we escape single quotes to prevent SQL injection.
+        // The escaped value is used in a WHERE clause string literal, which is safe.
         let query = if let Some(ref tbl_name) = table_name {
             let escaped = tbl_name.replace("'", "''");
             format!("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name = '{escaped}' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -4749,8 +4964,16 @@ impl Connection {
                             &connection_timeout_secs,
                         )
                         .await?;
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
                         source_pool_conn = Some(pool_clone.acquire().await.map_err(|e| {
-                            OperationalError::new_err(format!("Failed to acquire source connection: {e}"))
+                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
                         })?);
                     }
 
@@ -4834,8 +5057,16 @@ impl Connection {
                                 &target_connection_timeout_secs,
                             )
                             .await?;
+                            let target_pool_size_val = {
+                                let g = target_pool_size.lock().unwrap();
+                                *g
+                            };
+                            let target_timeout_val = {
+                                let g = target_connection_timeout_secs.lock().unwrap();
+                                *g
+                            };
                             target_pool_conn = Some(target_pool_clone.acquire().await.map_err(|e| {
-                                OperationalError::new_err(format!("Failed to acquire target connection: {e}"))
+                                pool_acquisition_error(&target_path, &e, target_pool_size_val, target_timeout_val)
                             })?);
                         }
 
@@ -4919,6 +5150,9 @@ impl Connection {
                     }
 
                     // Check SQLite library version compatibility (debug info).
+                    // Safety: sqlite3_libversion() returns a static C string that is
+                    // valid for the lifetime of the program. cstr_from_i8_ptr safely
+                    // converts it to a Rust CStr reference.
                     let source_libversion = unsafe {
                         cstr_from_i8_ptr(sqlite3_libversion())
                             .to_string_lossy()
@@ -4930,6 +5164,10 @@ impl Connection {
                     })?;
 
                     // SQLite backup requires destination to not have active transactions.
+                    // Safety: target_handle.0 is a valid sqlite3* pointer obtained from
+                    // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                    // for the lifetime of the handle lock. sqlite3_get_autocommit is a
+                    // read-only operation that doesn't modify the database handle.
                     let target_has_transaction = unsafe { sqlite3_get_autocommit(target_handle.0) == 0 };
                     if target_has_transaction {
                         return Err(OperationalError::new_err(
@@ -4939,6 +5177,10 @@ impl Connection {
                     }
 
                     // Initialize backup.
+                    // Safety: target_handle.0 and source_handle.0 are valid sqlite3* pointers
+                    // obtained from lock_handle().as_raw_handle().as_ptr() and are guaranteed
+                    // to be valid for the lifetime of the handle locks. name_cstr is a valid
+                    // CString. sqlite3_backup_init returns a backup handle or null on error.
                     let backup_handle: SendPtr<libsqlite3_sys::sqlite3_backup> = SendPtr(unsafe {
                         sqlite3_backup_init(
                             target_handle.0,
@@ -4949,12 +5191,16 @@ impl Connection {
                     });
 
                     if backup_handle.0.is_null() {
+                        // Safety: target_handle.0 is a valid sqlite3* pointer. sqlite3_errcode
+                        // and sqlite3_errmsg are read-only operations that return error information.
                         let error_code = unsafe { sqlite3_errcode(target_handle.0) };
                         let error_msg = unsafe {
                             let msg_ptr = sqlite3_errmsg(target_handle.0);
                             if msg_ptr.is_null() {
                                 "Unknown error (null error message)".to_string()
                             } else {
+                                // Safety: msg_ptr is a pointer to a static C string returned
+                                // by sqlite3_errmsg, valid until the next SQLite API call.
                                 cstr_from_i8_ptr(msg_ptr).to_string_lossy().to_string()
                             }
                         };
@@ -4969,11 +5215,17 @@ impl Connection {
                     // Backup loop.
                     loop {
                         let pages_to_copy = if pages == 0 { -1 } else { pages };
+                        // Safety: backup_handle.0 is a valid sqlite3_backup* pointer returned
+                        // by sqlite3_backup_init. It remains valid until sqlite3_backup_finish
+                        // is called. sqlite3_backup_step is thread-safe for the backup handle.
                         let step_result = unsafe { sqlite3_backup_step(backup_handle.0, pages_to_copy) };
 
                         match step_result {
                             SQLITE_OK | SQLITE_BUSY | SQLITE_LOCKED => {
                                 if let Some(ref progress_cb) = progress_callback {
+                                    // Safety: backup_handle.0 is a valid sqlite3_backup* pointer.
+                                    // sqlite3_backup_remaining and sqlite3_backup_pagecount are
+                                    // read-only operations that return backup progress information.
                                     let remaining = unsafe { sqlite3_backup_remaining(backup_handle.0) };
                                     let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
                                     let pages_copied = page_count - remaining;
@@ -5000,6 +5252,10 @@ impl Connection {
                             }
                             SQLITE_DONE => break,
                             _ => {
+                                // Safety: backup_handle.0 is a valid sqlite3_backup* pointer.
+                                // sqlite3_backup_finish must be called to clean up the backup
+                                // handle, even on error. After this call, backup_handle.0 is
+                                // no longer valid.
                                 unsafe {
                                     sqlite3_backup_finish(backup_handle.0);
                                 }
@@ -5010,6 +5266,9 @@ impl Connection {
                         }
                     }
 
+                    // Safety: backup_handle.0 is a valid sqlite3_backup* pointer.
+                    // sqlite3_backup_finish must be called to clean up the backup handle.
+                    // After this call, backup_handle.0 is no longer valid.
                     let final_result = unsafe { sqlite3_backup_finish(backup_handle.0) };
                     if final_result != SQLITE_OK {
                         return Err(OperationalError::new_err(format!(

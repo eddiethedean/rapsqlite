@@ -12,6 +12,28 @@ use tokio::sync::Mutex;
 use crate::types::{ProgressHandler, UserFunctions};
 use crate::OperationalError;
 
+/// Create a helpful error message for pool acquisition failures.
+pub(crate) fn pool_acquisition_error(path: &str, error: &sqlx::Error, pool_size: Option<usize>, timeout: Option<u64>) -> PyErr {
+    let error_str = error.to_string();
+    let is_timeout = error_str.contains("timeout") || error_str.contains("timed out");
+    
+    let mut msg = format!("Failed to acquire connection from pool at {path}: {error_str}");
+    
+    if is_timeout {
+        msg.push_str("\n\nPossible solutions:");
+        msg.push_str("\n  - Increase pool_size (current: ");
+        msg.push_str(&pool_size.map(|s| s.to_string()).unwrap_or_else(|| "1 (default)".to_string()));
+        msg.push_str(")");
+        msg.push_str("\n  - Increase connection_timeout (current: ");
+        msg.push_str(&timeout.map(|t| format!("{}s", t)).unwrap_or_else(|| "30s (default)".to_string()));
+        msg.push_str(")");
+        msg.push_str("\n  - Ensure connections are properly released (use async context managers)");
+        msg.push_str("\n  - Check for long-running transactions that hold connections");
+    }
+    
+    OperationalError::new_err(msg)
+}
+
 /// Helper to get or create pool and apply PRAGMAs.
 pub(crate) async fn get_or_create_pool(
     path: &str,
@@ -45,6 +67,12 @@ pub(crate) async fn get_or_create_pool(
         };
 
         for (name, value) in pragmas_list {
+            // Safety: PRAGMA names and values come from user input (via pragmas parameter or URI).
+            // SQLite's PRAGMA parser will reject invalid syntax, providing protection against
+            // SQL injection. PRAGMA names are identifiers (alphanumeric + underscore), and
+            // values are typically simple (strings, integers, keywords). While not perfect,
+            // SQLite's parser provides reasonable protection. For maximum security, applications
+            // should validate PRAGMA names against a whitelist.
             let pragma_query = format!("PRAGMA {name} = {value}");
             sqlx::query(&pragma_query)
                 .execute(&new_pool)
@@ -54,6 +82,8 @@ pub(crate) async fn get_or_create_pool(
 
         *pool_guard = Some(new_pool);
     }
+    // Safety: We just checked pool_guard.is_none() above and set it to Some if None.
+    // If it was already Some, we return it here. So unwrap() is safe.
     Ok(pool_guard.as_ref().unwrap().clone())
 }
 
@@ -77,8 +107,16 @@ pub(crate) async fn ensure_callback_connection(
             get_or_create_pool(path, pool, pragmas, pool_size, connection_timeout_secs).await?;
 
         // Acquire a connection from the pool
+        let pool_size_val = {
+            let g = pool_size.lock().unwrap();
+            *g
+        };
+        let timeout_val = {
+            let g = connection_timeout_secs.lock().unwrap();
+            *g
+        };
         let pool_conn = pool_clone.acquire().await.map_err(|e| {
-            OperationalError::new_err(format!("Failed to acquire connection for callbacks: {e}"))
+            pool_acquisition_error(path, &e, pool_size_val, timeout_val)
         })?;
 
         *callback_guard = Some(pool_conn);
@@ -157,6 +195,9 @@ pub(crate) fn has_callbacks(
     authorizer_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
     progress_handler: &ProgressHandler,
 ) -> bool {
+    // Safety: StdMutex::lock() only fails if the mutex is poisoned (another thread panicked).
+    // In Python's GIL context and with proper error handling, this is extremely unlikely.
+    // These are read-only operations, so unwrap() is acceptable.
     let load_ext = *load_extension_enabled.lock().unwrap();
     let has_functions = !user_functions.lock().unwrap().is_empty();
     let has_trace = trace_callback.lock().unwrap().is_some();

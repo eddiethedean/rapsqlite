@@ -97,7 +97,9 @@ __all__: List[str] = [
 ]
 
 
-def connect(path: str, *, pragmas: Any = None, **kwargs: Any) -> "Connection":  # type: ignore[valid-type]
+def connect(
+    path: str, *, pragmas: Any = None, timeout: float = 5.0, **kwargs: Any
+) -> "Connection":  # type: ignore[valid-type]
     """Connect to a SQLite database.
 
     This function matches the aiosqlite.connect() API for compatibility,
@@ -113,12 +115,22 @@ def connect(path: str, *, pragmas: Any = None, **kwargs: Any) -> "Connection":  
             Example: {"journal_mode": "WAL", "synchronous": "NORMAL",
             "foreign_keys": True}. See SQLite PRAGMA documentation for
             available settings.
+        timeout: How long to wait (in seconds) when the database is locked by
+            another process/thread before raising an error. Default: 5.0 seconds.
+            This sets SQLite's busy_timeout PRAGMA. Set to 0.0 to disable timeout.
+            This matches aiosqlite and sqlite3's timeout parameter.
         **kwargs: Additional arguments (currently ignored, reserved for future use)
 
     Returns:
         Connection: An async SQLite connection object that can be used as an
             async context manager. The connection uses lazy initialization -
             the actual database connection pool is created on first use.
+
+    Example:
+        With timeout (aiosqlite compatibility)::
+
+            async with connect("example.db", timeout=10.0) as conn:
+                await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
     Raises:
         ValueError: If the database path is invalid (empty or contains null bytes)
@@ -164,7 +176,7 @@ def connect(path: str, *, pragmas: Any = None, **kwargs: Any) -> "Connection":  
         :class:`Connection`: For more advanced connection options including
         initialization hooks.
     """
-    return Connection(path, pragmas=pragmas)  # type: ignore[no-any-return]
+    return Connection(path, pragmas=pragmas, timeout=timeout)  # type: ignore[no-any-return]
 
 
 # -----------------------------------------------------------------------------
