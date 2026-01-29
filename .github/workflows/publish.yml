@@ -12,6 +12,7 @@ jobs:
   build-wheels:
     name: Build wheels (${{ matrix.os }} / ${{ matrix.architecture }} / py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -40,7 +41,7 @@ jobs:
           - os: ubuntu-latest
             python: "3.14"
             architecture: x86-64
-          # Ubuntu ARM64 (aarch64)
+          # Ubuntu ARM64 (aarch64) — QEMU-emulated on x86 runners; job has extended timeout
           - os: ubuntu-latest
             python: "3.8"
             architecture: aarch64
@@ -167,15 +168,19 @@ jobs:
           else
             DOCKER_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
           fi
+          # Under QEMU (aarch64 on x86), limit parallel Rust jobs to avoid OOM/timeouts
+          CARGO_JOBS="$([ "${{ matrix.architecture }}" = 'aarch64' ] && echo '2' || echo '')"
           docker run --rm \
             --platform linux/${{ matrix.architecture }} \
             -v "$PWD:/io" \
             -e PYO3_USE_ABI3_FORWARD_COMPATIBILITY="${{ (matrix.python == '3.13' || matrix.python == '3.14') && '1' || '' }}" \
             -e PYTHON_TAG="${PYTHON_TAG}" \
+            -e CARGO_BUILD_JOBS="${CARGO_JOBS}" \
             -w /io \
             ${DOCKER_IMAGE} \
             /bin/bash -c "
-            curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --profile minimal
+            set -e
+            curl -sSfL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
             source \$HOME/.cargo/env
             /opt/python/\${PYTHON_TAG}-\${PYTHON_TAG}/bin/pip install maturin
             /opt/python/\${PYTHON_TAG}-\${PYTHON_TAG}/bin/python -m maturin build \
