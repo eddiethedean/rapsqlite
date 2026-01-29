@@ -33,10 +33,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
 
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Install maturin
       run: python -m pip install maturin
@@ -157,10 +154,7 @@ jobs:
         python-version: '3.12'
 
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Run cargo test
       shell: bash
@@ -177,11 +171,10 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Set up Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        components: clippy, rustfmt
-        override: true
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install Rust components
+      run: rustup component add clippy rustfmt
 
     - name: Run clippy
       run: cargo clippy --lib -- -D clippy::all -A deprecated
@@ -205,10 +198,7 @@ jobs:
         python-version: '3.12'
 
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Install maturin
       run: pip install maturin
