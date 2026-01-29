@@ -49,6 +49,8 @@ Example:
 
 from typing import Any, List, Optional
 
+import builtins as _builtins
+
 try:
     # Preferred: import extension from the local module name used when installed.
     import _rapsqlite as _ext  # type: ignore[import-not-found]
@@ -69,7 +71,11 @@ DatabaseError = _ext.DatabaseError
 OperationalError = _ext.OperationalError
 ProgrammingError = _ext.ProgrammingError
 IntegrityError = _ext.IntegrityError
-ValueError = getattr(_ext, "ValueError", None)
+try:
+    ValueError = _ext.ValueError
+except AttributeError:  # pragma: no cover - compatibility with older wheels
+    # Fall back to the built-in ValueError so callers can still catch it.
+    ValueError = _builtins.ValueError
 
 # Export RapRow as Row for aiosqlite compatibility, but fall back to Row if
 # running against an older build that does not expose RapRow explicitly.

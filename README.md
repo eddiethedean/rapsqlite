@@ -150,10 +150,10 @@ For most applications, this is all you need! All core aiosqlite APIs are support
   in_tx = await db.in_transaction()
   ```
 
-- **`iterdump()`**: `aiosqlite` exposes an async iterator, while `rapsqlite` returns `List[str]`:
+- **`iterdump()`**: `rapsqlite` supports both async iteration (aiosqlite-style) and await-to-list:
 
   ```python
-  # aiosqlite
+  # aiosqlite and rapsqlite (async iterator)
   lines = [line async for line in db.iterdump()]
 
   # rapsqlite
@@ -197,16 +197,8 @@ See [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/master/CHANGEL
 - ⏳ Not designed for synchronous use cases
 - ⚠️ **Backup to `sqlite3.Connection`**: The `Connection.backup()` method supports backing up to `sqlite3.Connection` targets, but only for file-backed databases (`:memory:` and non-file URIs are not supported). See [Backup Support](#backup-support) above for details.
 
-**Phase 2.1-2.11 improvements (v0.2.0):**
-- ✅ Parameterized queries (named and positional parameters) - Phase 2.1 complete
-- ✅ Cursor improvements (fetchmany with size-based slicing) - Phase 2.2 complete
-- ✅ Connection and pool configuration (PRAGMAs, pool size, timeouts) - Phase 2.3-2.4 complete
-- ✅ Row factory support (dict, tuple, callable) - Phase 2.5 complete
-- ✅ Transaction context managers - Phase 2.6 complete
-- ✅ Advanced SQLite callbacks (create_function, set_trace_callback, etc.) - Phase 2.7 complete
-- ✅ Database dump and backup - Phase 2.8-2.9 complete
-- ✅ Schema introspection (9 methods) - Phase 2.10 complete
-- ✅ Database initialization hooks - Phase 2.11 complete
+**Phase 2 (v0.2.0) status:**
+- ✅ Phase 2 is complete. See [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/master/CHANGELOG.md) for the full list of features and compatibility notes.
 
 **Phase 1 improvements (v0.1.0 – v0.1.1):**
 - ✅ Connection lifecycle management (async context managers)
@@ -226,7 +218,7 @@ See [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/master/CHANGEL
 
 ## Contributing
 
-Contributions are welcome! Please see our [contributing guidelines](https://github.com/eddiethedean/rapsqlite/blob/main/CONTRIBUTING.md) (coming soon).
+Contributions are welcome! Please see our [contributing guidelines](https://github.com/eddiethedean/rapsqlite/blob/master/CONTRIBUTING.md).
 
 ## License
 

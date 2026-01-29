@@ -30,11 +30,13 @@ def check_wheel_metadata(wheel_path):
 
         # Check for problematic fields
         issues = []
+        # License-File is valid in modern Core Metadata (e.g., Metadata-Version: 2.4).
         if (
             "License-File:" in metadata_content
             or "license-file:" in metadata_content.lower()
         ):
-            issues.append("Found 'license-file' field (PyPI doesn't accept this)")
+            # Keep as a note, not a failure.
+            pass
 
         if (
             "License-Expression:" in metadata_content
@@ -72,11 +74,12 @@ def check_sdist_metadata(sdist_path):
 
         # Check for problematic fields
         issues = []
+        # License-File is valid in modern Core Metadata (e.g., Metadata-Version: 2.4).
         if (
             "License-File:" in pkg_info_content
             or "license-file:" in pkg_info_content.lower()
         ):
-            issues.append("Found 'license-file' field (PyPI doesn't accept this)")
+            pass
 
         if (
             "License-Expression:" in pkg_info_content
