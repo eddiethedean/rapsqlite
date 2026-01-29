@@ -45,6 +45,7 @@ See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philo
 
 - Python 3.8+ (including Python 3.13 and 3.14)
 - Rust 1.70+ (for building from source)
+- Python development headers (included with most Python installations)
 
 ## Installation
 
@@ -54,12 +55,19 @@ pip install rapsqlite
 
 ### Building from Source
 
+**Prerequisites:**
+- Python 3.8+ with development headers installed
+- Rust 1.70+ and Cargo
+
+**Installation:**
 ```bash
 git clone https://github.com/eddiethedean/rapsqlite.git
 cd rapsqlite
 pip install maturin
 maturin develop
 ```
+
+**Note**: Python development headers are required for building. They're typically included with Python installations, but on some Linux distributions you may need to install `python3-dev` or `python3-devel` package. Use `maturin develop` instead of `cargo build` for development, as maturin automatically handles Python library linking.
 
 ## Documentation
 

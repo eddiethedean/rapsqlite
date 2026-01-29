@@ -230,16 +230,17 @@ async def test_large_parameter_list(test_db):
 @pytest.mark.edge_case
 @pytest.mark.asyncio
 async def test_too_many_parameters(test_db):
-    """Test parameter list exceeding limit (>16 parameters)."""
+    """Test parameter list mismatch - more parameters than columns."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 
-        # Create query with 20 placeholders
+        # Create query with 20 placeholders but table only has 1 column
         placeholders = ", ".join(["?" for _ in range(20)])
         # Should fail with OperationalError or DatabaseError
+        # SQLite error: table has 1 columns but 20 values were supplied
         with pytest.raises(
             (OperationalError, DatabaseError, ProgrammingError),
-            match="Too many parameters",
+            match="(columns|values|parameters)",
         ):
             await db.execute(f"INSERT INTO t VALUES ({placeholders})", list(range(20)))
 

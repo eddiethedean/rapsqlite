@@ -6,20 +6,29 @@ use crate::exceptions::{DatabaseError, IntegrityError, OperationalError, Program
 
 /// Sanitize a query string to remove potentially sensitive information.
 /// Replaces common sensitive patterns with placeholders.
-/// 
+///
 /// This is a best-effort sanitization. For production use with highly sensitive data,
 /// consider setting `include_query_in_errors=False` to exclude queries entirely.
 fn sanitize_query(query: &str) -> String {
     let mut sanitized = query.to_string();
     let query_lower = query.to_lowercase();
-    
+
     // Simple pattern matching for common sensitive fields
     // Note: This is basic sanitization - full regex would be better but requires
     // additional dependencies. For production, consider excluding queries entirely.
-    
+
     // Match patterns like "password='value'" or "password=value" or "PASSWORD = value"
-    let sensitive_keywords = ["password", "passwd", "secret", "token", "api_key", "api-key", "auth_token", "auth-token"];
-    
+    let sensitive_keywords = [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "api_key",
+        "api-key",
+        "auth_token",
+        "auth-token",
+    ];
+
     for keyword in sensitive_keywords.iter() {
         // Find the keyword in the query (case-insensitive)
         if let Some(pos) = query_lower.find(keyword) {
@@ -32,25 +41,33 @@ fn sanitize_query(query: &str) -> String {
                     .find(|c: char| !c.is_whitespace())
                     .map(|i| start + i)
                     .unwrap_or(start);
-                
+
                 // Find the end of the value (space, comma, quote, or end of string)
                 let end = query[start..]
-                    .find(|c: char| c == ' ' || c == ',' || c == '\'' || c == '"' || c == ';' || c == '\n' || c == '\r')
+                    .find(|c: char| {
+                        c == ' '
+                            || c == ','
+                            || c == '\''
+                            || c == '"'
+                            || c == ';'
+                            || c == '\n'
+                            || c == '\r'
+                    })
                     .map(|i| start + i)
                     .unwrap_or(query.len());
-                
+
                 if end > start {
                     sanitized.replace_range(start..end, "***");
                 }
             }
         }
     }
-    
+
     sanitized
 }
 
 /// Map sqlx error to appropriate Python exception.
-/// 
+///
 /// Queries are automatically sanitized to remove sensitive patterns (passwords, tokens, etc.).
 /// For production use with highly sensitive data, consider excluding queries entirely
 /// by setting `include_query_in_errors=False` on the connection.

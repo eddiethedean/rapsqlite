@@ -69,6 +69,7 @@ DatabaseError = _ext.DatabaseError
 OperationalError = _ext.OperationalError
 ProgrammingError = _ext.ProgrammingError
 IntegrityError = _ext.IntegrityError
+ValueError = getattr(_ext, "ValueError", None)
 
 # Export RapRow as Row for aiosqlite compatibility, but fall back to Row if
 # running against an older build that does not expose RapRow explicitly.
@@ -94,6 +95,7 @@ __all__: List[str] = [
     "OperationalError",
     "ProgrammingError",
     "IntegrityError",
+    "ValueError",
 ]
 
 

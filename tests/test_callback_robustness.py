@@ -449,22 +449,31 @@ async def test_authorizer_selective_deny(test_db):
 
 @pytest.mark.asyncio
 async def test_authorizer_exception_handling(test_db):
-    """Test authorizer that raises exceptions."""
+    """Test authorizer that raises exceptions.
+
+    Note: Exceptions in authorizer callbacks default to DENY (fail-secure)
+    for security. This test verifies that exceptions are handled and operations
+    are denied when the callback raises.
+    """
     async with connect(test_db) as db:
         call_count = [0]
 
         def authorizer(action, arg1, arg2, arg3, arg4):
             call_count[0] += 1
+            # Raise exception on second call (during CREATE TABLE)
+            # This verifies that exceptions are caught and default to DENY
             if call_count[0] == 2:
                 raise ValueError("Authorizer error")
-            return 0  # Default to allow
+            return 0  # SQLITE_OK - allow
 
         await db.set_authorizer(authorizer)
 
-        # Should handle exception gracefully (default to allow)
-        await db.execute("CREATE TABLE test (id INTEGER)")
-        await db.execute("INSERT INTO test VALUES (1)")
-        await db.execute("INSERT INTO test VALUES (2)")
+        # CREATE TABLE should fail because authorizer raises exception on second call
+        # (exceptions default to DENY for security)
+        with pytest.raises(
+            (OperationalError, DatabaseError), match="(not authorized|denied)"
+        ):
+            await db.execute("CREATE TABLE test (id INTEGER)")
 
         assert call_count[0] >= 2
 
