@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{c_char, CStr};
 use std::sync::{Arc, Mutex as StdMutex};
 
 /// Detect if a query is a SELECT query (for determining execution strategy).
@@ -196,8 +196,8 @@ pub(crate) fn parse_connection_string(uri: &str) -> PyResult<(String, Vec<(Strin
     }
 }
 
-/// Helper function to work around Rust version differences in CStr::from_ptr.
-/// The signature of CStr::from_ptr varies by Rust version and platform.
+/// Convert a C string pointer to &CStr. Uses *const c_char so it works on both
+/// platforms where c_char is i8 (e.g. x86) and u8 (e.g. aarch64 manylinux).
 ///
 /// # Safety
 ///
@@ -208,9 +208,7 @@ pub(crate) fn parse_connection_string(uri: &str) -> PyResult<(String, Vec<(Strin
 ///   SQLite API call (for error messages) or for the lifetime of the program
 ///   (for static strings like sqlite3_libversion())
 #[inline]
-pub(crate) unsafe fn cstr_from_i8_ptr(ptr: *const i8) -> &'static CStr {
-    // In Rust 1.93.0+, CStr::from_ptr accepts *const i8 directly
-    // This helper provides a consistent interface across Rust versions
+pub(crate) unsafe fn cstr_from_c_char_ptr(ptr: *const c_char) -> &'static CStr {
     CStr::from_ptr(ptr)
 }
 

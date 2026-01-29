@@ -39,7 +39,8 @@ use crate::query::{
 };
 use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
 use crate::utils::{
-    cstr_from_i8_ptr, is_select_query, parse_connection_string, track_query_usage, validate_path,
+    cstr_from_c_char_ptr, is_select_query, parse_connection_string, track_query_usage,
+    validate_path,
 };
 use crate::OperationalError;
 use crate::{
@@ -2236,9 +2237,10 @@ impl Connection {
                 if result != SQLITE_OK {
                     let error_msg = if !errmsg.is_null() {
                         // Safety: errmsg is a pointer returned by sqlite3_load_extension.
-                        // We check for null before dereferencing. cstr_from_i8_ptr safely
+                        // We check for null before dereferencing. cstr_from_c_char_ptr
                         // converts the C string to a Rust CStr reference.
-                        let cstr = unsafe { cstr_from_i8_ptr(errmsg as *const i8) };
+                        let cstr =
+                            unsafe { cstr_from_c_char_ptr(errmsg as *const std::ffi::c_char) };
                         let msg = cstr.to_string_lossy().to_string();
                         // Safety: errmsg was allocated by SQLite and must be freed with
                         // sqlite3_free. We've already copied the string, so it's safe to free.
@@ -2703,9 +2705,9 @@ impl Connection {
 
                         // Extract the SQL string from x
                         // For SQLITE_TRACE_STMT, x points to the SQL text
-                        let sql_cstr = x as *const i8;
+                        let sql_ptr = x as *const std::ffi::c_char;
                         let sql_str: String =
-                            cstr_from_i8_ptr(sql_cstr).to_string_lossy().into_owned();
+                            cstr_from_c_char_ptr(sql_ptr).to_string_lossy().into_owned();
 
                         // Get the Python callback from the context (pCtx)
                         let callback_ptr = ctx as *mut Py<PyAny>;
@@ -2885,15 +2887,15 @@ impl Connection {
                 extern "C" fn authorizer_trampoline(
                     ctx: *mut std::ffi::c_void,
                     action: std::ffi::c_int,
-                    arg1: *const i8,
-                    arg2: *const i8,
-                    arg3: *const i8,
-                    arg4: *const i8,
+                    arg1: *const std::ffi::c_char,
+                    arg2: *const std::ffi::c_char,
+                    arg3: *const std::ffi::c_char,
+                    arg4: *const std::ffi::c_char,
                 ) -> std::ffi::c_int {
                     // Safety: ctx is a pointer to the Python callback (Box<Py<PyAny>>)
                     // that was set when registering the authorizer callback. The arg1-arg4
                     // pointers are C strings provided by SQLite; we check for null and
-                    // safely convert them using cstr_from_i8_ptr. The callback is called
+                    // safely convert them using cstr_from_c_char_ptr. The callback is called
                     // synchronously from SQLite's execution context.
                     unsafe {
                         if ctx.is_null() {
@@ -2904,22 +2906,22 @@ impl Connection {
                         let arg1_str: Option<String> = if arg1.is_null() {
                             None
                         } else {
-                            Some(cstr_from_i8_ptr(arg1).to_string_lossy().into_owned())
+                            Some(cstr_from_c_char_ptr(arg1).to_string_lossy().into_owned())
                         };
                         let arg2_str: Option<String> = if arg2.is_null() {
                             None
                         } else {
-                            Some(cstr_from_i8_ptr(arg2).to_string_lossy().into_owned())
+                            Some(cstr_from_c_char_ptr(arg2).to_string_lossy().into_owned())
                         };
                         let arg3_str: Option<String> = if arg3.is_null() {
                             None
                         } else {
-                            Some(cstr_from_i8_ptr(arg3).to_string_lossy().into_owned())
+                            Some(cstr_from_c_char_ptr(arg3).to_string_lossy().into_owned())
                         };
                         let arg4_str: Option<String> = if arg4.is_null() {
                             None
                         } else {
-                            Some(cstr_from_i8_ptr(arg4).to_string_lossy().into_owned())
+                            Some(cstr_from_c_char_ptr(arg4).to_string_lossy().into_owned())
                         };
 
                         // Get the Python callback from the context
@@ -5176,10 +5178,10 @@ impl Connection {
 
                     // Check SQLite library version compatibility (debug info).
                     // Safety: sqlite3_libversion() returns a static C string that is
-                    // valid for the lifetime of the program. cstr_from_i8_ptr safely
-                    // converts it to a Rust CStr reference.
+                    // valid for the lifetime of the program. cstr_from_c_char_ptr
+                    // converts it to a Rust CStr reference (works for both i8/u8 c_char).
                     let source_libversion = unsafe {
-                        cstr_from_i8_ptr(sqlite3_libversion())
+                        cstr_from_c_char_ptr(sqlite3_libversion() as *const std::ffi::c_char)
                             .to_string_lossy()
                             .to_string()
                     };
@@ -5226,7 +5228,9 @@ impl Connection {
                             } else {
                                 // Safety: msg_ptr is a pointer to a static C string returned
                                 // by sqlite3_errmsg, valid until the next SQLite API call.
-                                cstr_from_i8_ptr(msg_ptr).to_string_lossy().to_string()
+                                cstr_from_c_char_ptr(msg_ptr as *const std::ffi::c_char)
+                                    .to_string_lossy()
+                                    .to_string()
                             }
                         };
 
