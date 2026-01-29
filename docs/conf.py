@@ -49,7 +49,7 @@ autodoc_default_options = {
 autodoc_member_order = "bysource"
 autoclass_content = "both"  # Include both class and __init__ docstrings
 
-# Don't mock rapsqlite - we install it from PyPI (prebuilt wheel, fast)
+# Don't mock rapsqlite - Read the Docs installs this repo (builds extension)
 autodoc_mock_imports = []
 
 # Templates
