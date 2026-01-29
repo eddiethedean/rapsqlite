@@ -19,46 +19,50 @@ async def test_concurrent_begin_attempts(test_db):
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 
-        begin_events = []
-        commit_events = []
+        started = asyncio.Event()
+        release = asyncio.Event()
 
-        async def attempt_begin(worker_id):
+        async def holder_transaction() -> None:
+            # Hold an active transaction open so concurrent begin() calls are forced to fail.
+            await db.begin()
+            started.set()
+            await release.wait()
+            await db.execute("INSERT INTO t DEFAULT VALUES")
+            await db.commit()
+
+        async def attempt_begin_while_active() -> bool:
+            await started.wait()
             try:
-                begin_events.append(worker_id)
                 await db.begin()
-                # Add small delay to ensure transactions overlap
-                await asyncio.sleep(0.01)
-                await db.execute("INSERT INTO t DEFAULT VALUES")
-                await db.commit()
-                commit_events.append(worker_id)
+                # If this succeeds, we must clean up to avoid leaking an open tx.
+                await db.rollback()
                 return True
-            except rapsqlite.OperationalError as e:
-                if "already in progress" in str(e):
-                    return False  # Expected - another transaction is active
+            except rapsqlite.Error as e:
+                # Depending on timing/implementation, we may see:
+                # - rapsqlite.OperationalError: "already in progress"
+                # - Database error: "cannot start a transaction within a transaction"
+                msg = str(e).lower()
+                if "already in progress" in msg or "cannot start a transaction within a transaction" in msg:
+                    return False
                 raise
 
-        # Try to start multiple transactions concurrently
-        results = await asyncio.gather(
-            *[attempt_begin(i) for i in range(10)], return_exceptions=True
+        holder = asyncio.create_task(holder_transaction())
+        attempts = await asyncio.gather(
+            *[attempt_begin_while_active() for _ in range(10)],
+            return_exceptions=True,
         )
+        release.set()
+        await holder
 
-        # Verify that transactions were serialized
-        # When multiple begin() calls happen concurrently, only one can succeed at a time
-        # The others will get "already in progress" errors and should retry or fail gracefully
-        successes = sum(1 for r in results if r is True)
+        unexpected = [x for x in attempts if isinstance(x, Exception)]
+        assert not unexpected, f"Unexpected exceptions from begin attempts: {unexpected!r}"
 
-        # In concurrent execution, only one transaction can start at a time
-        # The others will fail with "already in progress" - this is expected behavior
-        # We expect at least one to succeed, and the rest may fail (which is correct)
-        assert successes >= 1, "At least one transaction should succeed"
-        # Note: In parallel test execution, timing can cause more failures
-        # The important thing is that concurrent begin() calls are properly rejected
+        # All concurrent attempts should be rejected while the holder tx is active.
+        assert all(x is False for x in attempts), f"Expected all attempts to fail, got: {attempts!r}"
 
-        # Verify all successful transactions committed
+        # Verify the holder transaction committed exactly one insert.
         rows = await db.fetch_all("SELECT COUNT(*) FROM t")
-        assert rows[0][0] == successes, (
-            f"Expected {successes} rows (one per successful transaction), got {rows[0][0]}"
-        )
+        assert rows[0][0] == 1
 
 
 @pytest.mark.asyncio
@@ -67,65 +71,45 @@ async def test_concurrent_transaction_context_managers(test_db):
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 
-        async def attempt_transaction(worker_id):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def holder_transaction_cm() -> None:
+            async with db.transaction():
+                started.set()
+                await release.wait()
+                await db.execute("INSERT INTO t DEFAULT VALUES")
+
+        async def attempt_transaction_while_active() -> bool:
+            await started.wait()
             try:
                 async with db.transaction():
-                    # Add small delay to ensure transactions overlap
-                    await asyncio.sleep(0.01)
-                    await db.execute("INSERT INTO t DEFAULT VALUES")
-                return True
-            except (rapsqlite.OperationalError, Exception) as e:
-                # In parallel test execution, various exceptions can occur:
-                # - "already in progress" (expected)
-                # - Other OperationalErrors from race conditions
-                # - Any other exception should be treated as a failure
-                error_str = str(e).lower()
-                if "already in progress" in error_str or "database is locked" in error_str:
-                    return False  # Expected if transactions overlap or database is busy
-                # Re-raise unexpected exceptions
-                if isinstance(e, rapsqlite.OperationalError):
-                    return False  # Treat all OperationalErrors as expected failures
+                    # If this succeeds, insert is not expected; ensure we exit cleanly.
+                    return True
+            except rapsqlite.Error as e:
+                msg = str(e).lower()
+                if (
+                    "already in progress" in msg
+                    or "cannot start a transaction within a transaction" in msg
+                ):
+                    return False
                 raise
 
-        # Try to start multiple transactions concurrently
-        # Use a retry mechanism to ensure at least one succeeds
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            results = await asyncio.gather(
-                *[attempt_transaction(i) for i in range(10)], return_exceptions=True
-            )
-
-            # Filter out exceptions and count successes
-            successes = sum(1 for r in results if r is True)
-            
-            # If we got at least one success, we're done
-            if successes >= 1:
-                break
-            
-            # If this is the last attempt and we still have no successes, 
-            # wait a bit longer and try once more with sequential execution
-            if attempt == max_attempts - 1:
-                # Try sequential execution as a fallback to ensure at least one succeeds
-                for i in range(10):
-                    result = await attempt_transaction(i)
-                    if result is True:
-                        successes = 1
-                        break
-
-        # Transactions should be serialized
-        # When multiple transaction context managers start concurrently, only one can succeed at a time
-        # The others will get "already in progress" errors - this is expected behavior
-        # In parallel test execution, timing can cause more failures, but we should get at least one success
-        assert successes >= 1, (
-            f"At least one transaction should succeed after {max_attempts} attempts. "
-            f"Results: {results}"
+        holder = asyncio.create_task(holder_transaction_cm())
+        attempts = await asyncio.gather(
+            *[attempt_transaction_while_active() for _ in range(10)],
+            return_exceptions=True,
         )
+        release.set()
+        await holder
 
-        # Verify all successful transactions committed
+        unexpected = [x for x in attempts if isinstance(x, Exception)]
+        assert not unexpected, f"Unexpected exceptions from transaction attempts: {unexpected!r}"
+        assert all(x is False for x in attempts), f"Expected all attempts to fail, got: {attempts!r}"
+
+        # Verify the holder transaction committed exactly one insert.
         rows = await db.fetch_all("SELECT COUNT(*) FROM t")
-        assert rows[0][0] == successes, (
-            f"Expected {successes} rows (one per successful transaction), got {rows[0][0]}"
-        )
+        assert rows[0][0] == 1
 
 
 @pytest.mark.asyncio
