@@ -2536,7 +2536,8 @@ impl Connection {
                                                     );
                                                     libsqlite3_sys::sqlite3_result_error(
                                                         ctx,
-                                                        error_msg.as_ptr() as *const std::ffi::c_char,
+                                                        error_msg.as_ptr()
+                                                            as *const std::ffi::c_char,
                                                         error_msg.len() as i32,
                                                     );
                                                     return;
