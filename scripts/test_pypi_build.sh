@@ -3,6 +3,10 @@
 
 set -e
 
+# If rustup is installed but no default toolchain is configured, cargo invocations
+# (including those done by maturin) will fail. Default to stable for local builds.
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
+
 echo "🧹 Cleaning previous builds..."
 rm -rf dist/ target/wheels/
 
@@ -50,13 +54,12 @@ with zipfile.ZipFile(wheel_file, 'r') as z:
     print(metadata_content)
     print('=' * 80)
     
-    # Check for problematic fields
+    # License-File is valid in modern Core Metadata (e.g., Metadata-Version: 2.4).
+    # Keep it as a warning so this script stays useful across older toolchains.
     if 'License-File:' in metadata_content or 'license-file:' in metadata_content.lower():
-        print('\n❌ ERROR: Found license-file field in metadata!')
-        print('This will cause PyPI upload to fail.')
-        sys.exit(1)
+        print('\n⚠️  NOTE: Found License-File field in metadata (expected for modern builds).')
     else:
-        print('\n✅ No license-file field found in metadata')
+        print('\n✅ No License-File field found in metadata')
 "
 
 echo ""
@@ -91,13 +94,11 @@ with tarfile.open(sdist_file, 'r:gz') as tar:
     print(pkg_info_content)
     print('=' * 80)
     
-    # Check for problematic fields
+    # License-File is valid in modern Core Metadata (e.g., Metadata-Version: 2.4).
     if 'License-File:' in pkg_info_content or 'license-file:' in pkg_info_content.lower():
-        print('\n❌ ERROR: Found license-file field in PKG-INFO!')
-        print('This will cause PyPI upload to fail.')
-        sys.exit(1)
+        print('\n⚠️  NOTE: Found License-File field in PKG-INFO (expected for modern builds).')
     else:
-        print('\n✅ No license-file field found in PKG-INFO')
+        print('\n✅ No License-File field found in PKG-INFO')
 "
 
 echo ""

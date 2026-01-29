@@ -68,7 +68,7 @@ rapsqlite supports both async iteration and await-to-list:
        ...
 
    # rapsqlite (backwards compatible)
-   lines = await db.iterdump()  # Returns List[str] directly
+   lines = await db.iterdump()  # Returns List[str]
 
 9. ``init_hook`` parameter
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

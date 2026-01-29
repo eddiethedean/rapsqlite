@@ -108,7 +108,7 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 ### Added - Phase 2.8: Database Dump
 
 - **`Connection.iterdump()`** — Dump database schema and data as SQL statements
-  - Returns `List[str]` matching aiosqlite API
+  - Supports both async iteration (`async for line in conn.iterdump()`) and await-to-list (`lines = await conn.iterdump()`)
   - Handles tables, indexes, triggers, and views
   - Proper SQL escaping for strings and BLOB data (hex encoding)
   - Preserves all data types (INTEGER, REAL, TEXT, BLOB, NULL)
@@ -320,6 +320,7 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - Fixed transaction connection management with callbacks (connection returned to callback pool on commit/rollback)
 - Fixed `test_set_pragma` assertion to match SQLite's documented behavior (PRAGMA synchronous NORMAL = 1, not 2)
 - Fixed Python object lifetime management in backup operations (connections now properly kept alive during async backup)
+- Fixed exception inheritance to match DB-API expectations (e.g., `OperationalError` subclasses `DatabaseError`/`Error`)
 - **Fixed deadlock in `init_hook` with `begin()` and `transaction()`** — Resolved deadlock that occurred when `init_hook` called `conn.execute()` while `begin()` or `transaction()` context manager was acquiring the transaction connection. The fix releases the `transaction_state` lock before calling `execute_init_hook_if_needed()`, allowing init_hook operations to check transaction state without deadlocking. Both `Connection.begin()` and `TransactionContextManager.__aenter__()` now properly handle init_hook execution without blocking.
 
 ### Added - Phase 2.14: aiosqlite Compatibility Completion
@@ -421,7 +422,7 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 
 ### Known Limitations
 
-- **Backup to `sqlite3.Connection` not supported**: The `Connection.backup()` method only supports backing up to another `rapsqlite.Connection`. Backing up to Python's standard `sqlite3.Connection` is not supported due to SQLite library instance incompatibility (Python's sqlite3 module and rapsqlite's libsqlite3-sys may use different SQLite library instances, causing handles to be incompatible). This is a fundamental limitation, not a bug. See README.md for workarounds.
+- **Backup to `sqlite3.Connection` is file-backed only**: `Connection.backup()` supports backing up to a `sqlite3.Connection` target only when the source database is file-backed. `:memory:` databases and non-file URIs are not supported for sqlite3 targets. (This avoids unsafe cross-library handle sharing; the implementation uses Python's sqlite3 backup API on the on-disk database file.)
 
 ### Changed
 

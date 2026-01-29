@@ -20,13 +20,3 @@ Example
        cursor = conn.cursor()
        await cursor.execute("SELECT * FROM users")
        rows = await cursor.fetchall()
-
-Methods
--------
-
-.. automethod:: rapsqlite.Cursor.execute
-.. automethod:: rapsqlite.Cursor.executemany
-.. automethod:: rapsqlite.Cursor.executescript
-.. automethod:: rapsqlite.Cursor.fetchone
-.. automethod:: rapsqlite.Cursor.fetchmany
-.. automethod:: rapsqlite.Cursor.fetchall

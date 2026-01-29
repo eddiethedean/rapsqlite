@@ -1,6 +1,9 @@
 """Type stubs for _rapsqlite Rust extension module."""
 
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Type
+from __future__ import annotations
+
+import builtins
+from typing import Any, Callable, Coroutine, Dict, Iterator, List, Optional, Protocol, Type, TypeVar
 
 # Type alias for init_hook callback
 InitHook = Callable[["Connection"], Coroutine[Any, Any, None]]
@@ -28,6 +31,24 @@ class ProgrammingError(DatabaseError):
 class IntegrityError(DatabaseError):
     """Exception raised for integrity constraint violations."""
     def __init__(self, message: str) -> None: ...
+
+class ValueError(builtins.ValueError):
+    """Exception raised for invalid argument values."""
+    def __init__(self, message: str) -> None: ...
+
+_T_co = TypeVar("_T_co", covariant=True)
+
+class _AwaitableAsyncIterator(Protocol[_T_co]):
+    """A value that can be awaited and also async-iterated.
+
+    Used for APIs like iterdump() which support both:
+    - `async for x in obj`
+    - `xs = await obj`
+    """
+
+    def __aiter__(self) -> "_AwaitableAsyncIterator[_T_co]": ...
+    def __anext__(self) -> Coroutine[Any, Any, _T_co]: ...
+    def __await__(self) -> Iterator[Any]: ...
 
 class Connection:
     """Async SQLite connection."""
@@ -134,7 +155,7 @@ class Connection:
     def set_progress_handler(
         self, n: int, callback: Optional[Any]
     ) -> Coroutine[Any, Any, None]: ...
-    def iterdump(self) -> Coroutine[Any, Any, List[str]]: ...
+    def iterdump(self) -> _AwaitableAsyncIterator[str]: ...
     def backup(
         self,
         target: Any,

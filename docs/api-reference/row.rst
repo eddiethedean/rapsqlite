@@ -25,10 +25,3 @@ Example
        print(rows[0][0])
        # Get column names
        print(rows[0].keys())
-
-Methods
--------
-
-.. automethod:: rapsqlite.Row.keys
-.. automethod:: rapsqlite.Row.values
-.. automethod:: rapsqlite.Row.items

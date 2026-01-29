@@ -134,28 +134,28 @@ impl Connection {
     ///
     /// # Example
     ///
-    /// ```python
-    /// from rapsqlite import Connection
+    /// .. code-block:: python
     ///
-    /// # Basic connection
-    /// async with Connection("example.db") as conn:
-    ///     await conn.execute("CREATE TABLE test (id INTEGER)")
+    ///     from rapsqlite import Connection
     ///
-    /// # With PRAGMA settings
-    /// async with Connection("example.db", pragmas={
-    ///     "journal_mode": "WAL",
-    ///     "foreign_keys": True
-    /// }) as conn:
-    ///     await conn.execute("CREATE TABLE test (id INTEGER)")
+    ///     # Basic connection
+    ///     async with Connection("example.db") as conn:
+    ///         await conn.execute("CREATE TABLE test (id INTEGER)")
     ///
-    /// # With initialization hook
-    /// async def init_db(conn):
-    ///     await conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER)")
+    ///     # With PRAGMA settings
+    ///     async with Connection("example.db", pragmas={
+    ///         "journal_mode": "WAL",
+    ///         "foreign_keys": True
+    ///     }) as conn:
+    ///         await conn.execute("CREATE TABLE test (id INTEGER)")
     ///
-    /// async with Connection("example.db", init_hook=init_db) as conn:
-    ///     # Database is already initialized
-    ///     pass
-    /// ```
+    ///     # With initialization hook
+    ///     async def init_db(conn):
+    ///         await conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER)")
+    ///
+    ///     async with Connection("example.db", init_hook=init_db) as conn:
+    ///         # Database is already initialized
+    ///         pass
     #[new]
     #[pyo3(signature = (path, *, pragmas = None, init_hook = None, timeout = 5.0))]
     fn new(
@@ -257,11 +257,11 @@ impl Connection {
     ///
     /// # Example
     ///
-    /// ```python
-    /// await conn.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
-    /// await conn.execute("INSERT INTO users (name) VALUES (?)", ["Bob"])
-    /// changes = await conn.total_changes()  # Returns 2
-    /// ```
+    /// .. code-block:: python
+    ///
+    ///     await conn.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
+    ///     await conn.execute("INSERT INTO users (name) VALUES (?)", ["Bob"])
+    ///     changes = await conn.total_changes()  # Returns 2
     fn total_changes(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
@@ -400,13 +400,13 @@ impl Connection {
     ///
     /// # Example
     ///
-    /// ```python
-    /// in_tx = await conn.in_transaction()  # False
-    /// await conn.begin()
-    /// in_tx = await conn.in_transaction()  # True
-    /// await conn.commit()
-    /// in_tx = await conn.in_transaction()  # False
-    /// ```
+    /// .. code-block:: python
+    ///
+    ///     in_tx = await conn.in_transaction()  # False
+    ///     await conn.begin()
+    ///     in_tx = await conn.in_transaction()  # True
+    ///     await conn.commit()
+    ///     in_tx = await conn.in_transaction()  # False
     fn in_transaction(&self) -> PyResult<Py<PyAny>> {
         let transaction_state = Arc::clone(&self.transaction_state);
 
@@ -1013,23 +1013,23 @@ impl Connection {
     ///
     /// # Example
     ///
-    /// ```python
-    /// # Simple query
-    /// await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+    /// .. code-block:: python
     ///
-    /// # With positional parameters
-    /// await conn.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
+    ///     # Simple query
+    ///     await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
     ///
-    /// # With named parameters
-    /// await conn.execute(
-    ///     "INSERT INTO users (name, email) VALUES (:name, :email)",
-    ///     {"name": "Bob", "email": "bob@example.com"}
-    /// )
+    ///     # With positional parameters
+    ///     await conn.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
     ///
-    /// # Using as context manager (returns cursor)
-    /// async with conn.execute("SELECT * FROM users") as cursor:
-    ///     rows = await cursor.fetchall()
-    /// ```
+    ///     # With named parameters
+    ///     await conn.execute(
+    ///         "INSERT INTO users (name, email) VALUES (:name, :email)",
+    ///         {"name": "Bob", "email": "bob@example.com"}
+    ///     )
+    ///
+    ///     # Using as context manager (returns cursor)
+    ///     async with conn.execute("SELECT * FROM users") as cursor:
+    ///         rows = await cursor.fetchall()
     #[pyo3(signature = (query, parameters = None))]
     fn execute(
         self_: PyRef<Self>,
@@ -1368,19 +1368,19 @@ impl Connection {
     ///
     /// # Example
     ///
-    /// ```python
-    /// # Default (list format)
-    /// rows = await conn.fetch_all("SELECT * FROM users")
-    /// # rows = [[1, "Alice"], [2, "Bob"]]
+    /// .. code-block:: python
     ///
-    /// # With dict factory
-    /// conn.row_factory = "dict"
-    /// rows = await conn.fetch_all("SELECT * FROM users")
-    /// # rows = [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+    ///     # Default (list format)
+    ///     rows = await conn.fetch_all("SELECT * FROM users")
+    ///     # rows = [[1, "Alice"], [2, "Bob"]]
     ///
-    /// # With parameters
-    /// rows = await conn.fetch_all("SELECT * FROM users WHERE id > ?", [5])
-    /// ```
+    ///     # With dict factory
+    ///     conn.row_factory = "dict"
+    ///     rows = await conn.fetch_all("SELECT * FROM users")
+    ///     # rows = [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+    ///
+    ///     # With parameters
+    ///     rows = await conn.fetch_all("SELECT * FROM users WHERE id > ?", [5])
     #[pyo3(signature = (query, parameters = None))]
     fn fetch_all(
         self_: PyRef<Self>,
@@ -1550,17 +1550,17 @@ impl Connection {
     ///
     /// # Example
     ///
-    /// ```python
-    /// # Fetch user by ID (expects exactly one)
-    /// user = await conn.fetch_one("SELECT * FROM users WHERE id = ?", [1])
-    /// # user = [1, "Alice"]  # or dict/Row depending on row_factory
+    /// .. code-block:: python
     ///
-    /// # This will raise if user doesn't exist
-    /// try:
-    ///     user = await conn.fetch_one("SELECT * FROM users WHERE id = ?", [999])
-    /// except ProgrammingError:
-    ///     print("User not found")
-    /// ```
+    ///     # Fetch user by ID (expects exactly one)
+    ///     user = await conn.fetch_one("SELECT * FROM users WHERE id = ?", [1])
+    ///     # user = [1, "Alice"]  # or dict/Row depending on row_factory
+    ///
+    ///     # This will raise if user doesn't exist
+    ///     try:
+    ///         user = await conn.fetch_one("SELECT * FROM users WHERE id = ?", [999])
+    ///     except ProgrammingError:
+    ///         print("User not found")
     #[pyo3(signature = (query, parameters = None))]
     fn fetch_one(
         self_: PyRef<Self>,
@@ -1716,20 +1716,20 @@ impl Connection {
     ///
     /// # Example
     ///
-    /// ```python
-    /// # Fetch user by ID (may not exist)
-    /// user = await conn.fetch_optional("SELECT * FROM users WHERE id = ?", [1])
-    /// if user:
-    ///     print(f"Found: {user}")
-    /// else:
-    ///     print("User not found")
+    /// .. code-block:: python
     ///
-    /// # Safe for optional lookups
-    /// user = await conn.fetch_optional(
-    ///     "SELECT * FROM users WHERE email = ?",
-    ///     ["alice@example.com"]
-    /// )
-    /// ```
+    ///     # Fetch user by ID (may not exist)
+    ///     user = await conn.fetch_optional("SELECT * FROM users WHERE id = ?", [1])
+    ///     if user:
+    ///         print(f"Found: {user}")
+    ///     else:
+    ///         print("User not found")
+    ///
+    ///     # Safe for optional lookups
+    ///     user = await conn.fetch_optional(
+    ///         "SELECT * FROM users WHERE email = ?",
+    ///         ["alice@example.com"]
+    ///     )
     #[pyo3(signature = (query, parameters = None))]
     fn fetch_optional(
         self_: PyRef<Self>,

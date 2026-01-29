@@ -169,8 +169,7 @@ exceptions in your Python callbacks are handled automatically:
 **User-Defined Functions:**
 - Exceptions are converted to SQLite errors
 - The query will fail with an ``OperationalError`` containing the Python exception message
-- Example: If your function raises ``ValueError("Invalid input")``, the query fails with
-  "Python function error: ValueError: Invalid input"
+- Example: If your function raises ``ValueError("Invalid input")``, the query fails with ``Python function error: ValueError: Invalid input``
 
 **Trace Callbacks:**
 - Exceptions are silently ignored to prevent trace callback failures from affecting database operations

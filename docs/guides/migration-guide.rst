@@ -30,7 +30,7 @@ Migration Steps
 ---------------
 
 1. Install rapsqlite
-~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
@@ -172,7 +172,7 @@ Known Differences
           ...
 
       # rapsqlite (backwards compatible)
-      lines = await db.iterdump()  # Returns List[str] directly
+      lines = await db.iterdump()  # Returns List[str]
 
 3. **``init_hook`` parameter**: This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
 
