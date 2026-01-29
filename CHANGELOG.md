@@ -37,6 +37,31 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 
 - Version bump to **0.3.0-dev** — Phase 3 development (advanced features, ecosystem integration) toward v1.0.0.
 
+### Added - Phase 3.9: API Completeness (aiosqlite compatibility)
+
+- **`Connection.execute_fetchall(sql, parameters=None)`** — Execute a SELECT and return all rows (delegates to `fetch_all`).
+- **`Connection.execute_insert(sql, parameters=None)`** — Execute INSERT/UPDATE/DELETE and return `last_insert_rowid()`; rejects SELECT.
+- **`Connection.explain_query_plan(sql, parameters=None)`** — Run `EXPLAIN QUERY PLAN` for the given SQL and return result rows (Phase 3.1).
+- **`Connection.pool_health()`** — Minimal health check (`SELECT 1`); returns `True` on success, raises on failure (Phase 3.2).
+- **`Connection.isolation_level`** getter/setter — Transaction isolation: `None` | `"DEFERRED"` | `"IMMEDIATE"` | `"EXCLUSIVE"`. Applied to `BEGIN` in `begin()` and `transaction()`.
+- **`Connection.__await__`** — Support `await conn` pattern (enter connection and return self).
+- **`Connection.interrupt()`** — Stub only; raises `NotImplementedError` when awaited (full implementation deferred).
+
+### Added - Phase 3.9: Cursor properties and methods
+
+- **`Cursor.arraysize`** (r/w, default 1) — Default size for `fetchmany()` when `size` is omitted.
+- **`Cursor.connection`** (r/o) — Reference to parent `Connection`.
+- **`Cursor.description`** (r/o) — Column metadata (7-tuples) after execute/fetch.
+- **`Cursor.lastrowid`** (r/o) / **`Cursor.rowcount`** (r/o) — Set from last execute (SELECT: -1; INSERT/UPDATE/DELETE: from result).
+- **`Cursor.row_factory`** (r/w) — Per-cursor override; falls back to connection’s `row_factory`.
+- **`Cursor.close()`** — Async; clears cached results, description, lastrowid, rowcount.
+- **`Cursor.fetchmany(size=None)`** — `size` optional; uses `arraysize` when omitted.
+
+### Added - Testing and tooling
+
+- **`tests/test_phase3_api.py`** — Tests for Phase 3.9 APIs (execute_fetchall, execute_insert, Cursor props, close, isolation_level, __await__, interrupt stub, explain_query_plan, pool_health).
+- **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; baseline documented in `docs/AIOSQLITE_TEST_RESULTS.md` (some failures remain, e.g. "No transaction in progress").
+
 ## [0.2.0] - 2026-01-26 (Updated 2026-01-28)
 
 ### Added - Phase 2.1: Parameterized Queries

@@ -10,7 +10,7 @@ use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
-use crate::conversion::row_to_py_with_factory;
+use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{ensure_callback_connection, get_or_create_pool, has_callbacks};
 use crate::query::{
@@ -48,6 +48,12 @@ pub(crate) struct Cursor {
     pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) progress_handler: ProgressHandler,
+    // Phase 3.9: aiosqlite-compatible cursor state
+    pub(crate) arraysize: Arc<StdMutex<usize>>,
+    pub(crate) description: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) lastrowid: Arc<StdMutex<i64>>,
+    pub(crate) rowcount: Arc<StdMutex<i64>>,
+    pub(crate) row_factory_override: Arc<StdMutex<Option<Py<PyAny>>>>,
 }
 
 #[pymethods]
@@ -73,6 +79,11 @@ impl Cursor {
         {
             *self.current_index.lock().unwrap() = 0;
             *self.results.lock().unwrap() = None;
+            *self.description.lock().unwrap() = None;
+        }
+        {
+            *self.lastrowid.lock().unwrap() = -1;
+            *self.rowcount.lock().unwrap() = -1;
         }
 
         // Execute via Connection (no results cached yet - will fetch on first fetch call)
@@ -100,6 +111,65 @@ impl Cursor {
             conn.call_method1("execute_many", (query, parameters))
                 .map(|bound| bound.unbind())
         })
+    }
+
+    /// Internal: update lastrowid/rowcount after execute (called from ExecuteContextManager).
+    fn _update_last_result(&self, rowid: i64, rowcount: i64) -> PyResult<()> {
+        *self.lastrowid.lock().unwrap() = rowid;
+        *self.rowcount.lock().unwrap() = rowcount;
+        Ok(())
+    }
+
+    #[getter(arraysize)]
+    fn arraysize(&self) -> PyResult<usize> {
+        Ok(*self.arraysize.lock().unwrap())
+    }
+
+    #[setter(arraysize)]
+    fn set_arraysize(&self, value: usize) -> PyResult<()> {
+        *self.arraysize.lock().unwrap() = value;
+        Ok(())
+    }
+
+    #[getter(connection)]
+    fn connection(&self, py: Python<'_>) -> PyResult<Py<Connection>> {
+        Ok(self.connection.clone_ref(py))
+    }
+
+    #[getter(description)]
+    fn description(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let guard = self.description.lock().unwrap();
+        match guard.as_ref() {
+            Some(t) => Ok(t.clone_ref(py)),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[getter(lastrowid)]
+    fn lastrowid(&self) -> PyResult<i64> {
+        Ok(*self.lastrowid.lock().unwrap())
+    }
+
+    #[getter(rowcount)]
+    fn rowcount(&self) -> PyResult<i64> {
+        Ok(*self.rowcount.lock().unwrap())
+    }
+
+    #[getter(row_factory)]
+    fn row_factory(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let override_guard = self.row_factory_override.lock().unwrap();
+        if let Some(ref v) = *override_guard {
+            return Ok(v.clone_ref(py));
+        }
+        let conn = self.connection.bind(py);
+        conn.getattr("row_factory").map(|b| b.unbind())
+    }
+
+    #[setter(row_factory)]
+    fn set_row_factory(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut guard = self.row_factory_override.lock().unwrap();
+        *guard = Some(value.clone().unbind());
+        Ok(())
     }
 
     /// Fetch one row.
@@ -130,6 +200,8 @@ impl Cursor {
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
+        let description = Arc::clone(&self.description);
+        let row_factory_override = Arc::clone(&self.row_factory_override);
 
         Python::attach(|py| {
             let future = async move {
@@ -234,15 +306,24 @@ impl Cursor {
                             .await?
                     };
 
-                    // Note: Python::with_gil is used here for sync result caching in async context.
-                    // The deprecation warning is acceptable as this is a sync operation within async.
                     #[allow(deprecated)]
                     let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
-                        let guard = row_factory.lock().unwrap();
-                        let factory_opt = guard.as_ref();
                         let tf_guard = text_factory.lock().unwrap();
                         let tf_opt = tf_guard.as_ref();
                         let mut vec = Vec::new();
+                        let o_guard = row_factory_override.lock().unwrap();
+                        let factory_opt = if o_guard.is_some() {
+                            o_guard.as_ref()
+                        } else {
+                            drop(o_guard);
+                            let c_guard = row_factory.lock().unwrap();
+                            for row in rows.iter() {
+                                let out =
+                                    row_to_py_with_factory(py, row, c_guard.as_ref(), tf_opt)?;
+                                vec.push(out.unbind());
+                            }
+                            return Ok(vec);
+                        };
                         for row in rows.iter() {
                             let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
                             vec.push(out.unbind());
@@ -253,6 +334,14 @@ impl Cursor {
                     {
                         let mut results_guard = results.lock().unwrap();
                         *results_guard = Some(cached_results);
+                    }
+                    if let Some(first) = rows.first() {
+                        #[allow(deprecated)]
+                        let desc = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                            let t = build_description_tuple(py, first)?;
+                            Ok(t.unbind().into())
+                        })?;
+                        *description.lock().unwrap() = Some(desc);
                     }
                     *current_index.lock().unwrap() = 0;
                 }
@@ -311,6 +400,8 @@ impl Cursor {
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
+        let description = Arc::clone(&self.description);
+        let row_factory_override = Arc::clone(&self.row_factory_override);
 
         // Check if this is a non-SELECT query - if so and results are None,
         // it means the query was already executed in __aenter__ and we should
@@ -486,15 +577,24 @@ impl Cursor {
                             .await?
                         };
 
-                        // Note: Python::with_gil is used here for sync result caching in async context.
-                        // The deprecation warning is acceptable as this is a sync operation within async.
                         #[allow(deprecated)]
                         let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
-                            let guard = row_factory.lock().unwrap();
-                            let factory_opt = guard.as_ref();
                             let tf_guard = text_factory.lock().unwrap();
                             let tf_opt = tf_guard.as_ref();
                             let mut vec = Vec::new();
+                            let o_guard = row_factory_override.lock().unwrap();
+                            let factory_opt = if o_guard.is_some() {
+                                o_guard.as_ref()
+                            } else {
+                                drop(o_guard);
+                                let c_guard = row_factory.lock().unwrap();
+                                for row in rows.iter() {
+                                    let out =
+                                        row_to_py_with_factory(py, row, c_guard.as_ref(), tf_opt)?;
+                                    vec.push(out.unbind());
+                                }
+                                return Ok(vec);
+                            };
                             for row in rows.iter() {
                                 let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
                                 vec.push(out.unbind());
@@ -505,6 +605,14 @@ impl Cursor {
                         {
                             let mut results_guard = results.lock().unwrap();
                             *results_guard = Some(cached_results);
+                        }
+                        if let Some(first) = rows.first() {
+                            #[allow(deprecated)]
+                            let desc = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                                let t = build_description_tuple(py, first)?;
+                                Ok(t.unbind().into())
+                            })?;
+                            *description.lock().unwrap() = Some(desc);
                         }
                     }
                 }
@@ -543,6 +651,8 @@ impl Cursor {
     /// Fetch many rows with size-based slicing.
     /// Phase 2.2: Properly implements size parameter by fetching all results,
     /// caching them, and returning appropriate slices.
+    /// When size is omitted, uses cursor.arraysize (default 1).
+    #[pyo3(signature = (size = None))]
     fn fetchmany(&self, size: Option<usize>) -> PyResult<Py<PyAny>> {
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
@@ -569,6 +679,9 @@ impl Cursor {
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
+        let arraysize = Arc::clone(&self.arraysize);
+        let description = Arc::clone(&self.description);
+        let row_factory_override = Arc::clone(&self.row_factory_override);
 
         Python::attach(|py| {
             let future = async move {
@@ -679,16 +792,25 @@ impl Cursor {
                             .await?
                     };
 
-                    // Cache results as Python objects
-                    // Note: Python::with_gil is used here for sync result caching in async context.
-                    // The deprecation warning is acceptable as this is a sync operation within async.
+                    // Cache results as Python objects; resolve row_factory (override else connection)
                     #[allow(deprecated)]
                     let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
-                        let guard = row_factory.lock().unwrap();
-                        let factory_opt = guard.as_ref();
                         let tf_guard = text_factory.lock().unwrap();
                         let tf_opt = tf_guard.as_ref();
                         let mut vec = Vec::new();
+                        let o_guard = row_factory_override.lock().unwrap();
+                        let factory_opt = if o_guard.is_some() {
+                            o_guard.as_ref()
+                        } else {
+                            drop(o_guard);
+                            let c_guard = row_factory.lock().unwrap();
+                            for row in rows.iter() {
+                                let out =
+                                    row_to_py_with_factory(py, row, c_guard.as_ref(), tf_opt)?;
+                                vec.push(out.unbind());
+                            }
+                            return Ok(vec);
+                        };
                         for row in rows.iter() {
                             let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
                             vec.push(out.unbind());
@@ -696,17 +818,25 @@ impl Cursor {
                         Ok(vec)
                     })?;
 
-                    // Store cached results
+                    // Store cached results and description (Phase 3.9)
                     {
                         let mut results_guard = results.lock().unwrap();
                         *results_guard = Some(cached_results);
+                    }
+                    if let Some(first) = rows.first() {
+                        #[allow(deprecated)]
+                        let desc = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                            let t = build_description_tuple(py, first)?;
+                            Ok(t.unbind().into())
+                        })?;
+                        *description.lock().unwrap() = Some(desc);
                     }
 
                     // Reset index
                     *current_index.lock().unwrap() = 0;
                 }
 
-                // Get slice based on size
+                // Get slice based on size (use arraysize when size is None)
                 // Note: Python::with_gil is used here for sync context manager creation before async execution.
                 // The deprecation warning is acceptable as this is a sync context.
                 #[allow(deprecated)]
@@ -722,7 +852,7 @@ impl Cursor {
                     };
 
                     let start = *index_guard;
-                    let fetch_size = size.unwrap_or(1);
+                    let fetch_size = size.unwrap_or_else(|| *arraysize.lock().unwrap());
                     let end = std::cmp::min(start + fetch_size, results_vec.len());
 
                     // Create result slice
@@ -736,6 +866,26 @@ impl Cursor {
 
                     Ok(result_list.into())
                 })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Close the cursor (Phase 3.9). Clears cached results and resets state.
+    fn close(&self) -> PyResult<Py<PyAny>> {
+        let results = Arc::clone(&self.results);
+        let current_index = Arc::clone(&self.current_index);
+        let description = Arc::clone(&self.description);
+        let lastrowid = Arc::clone(&self.lastrowid);
+        let rowcount = Arc::clone(&self.rowcount);
+        Python::attach(|py| {
+            let future = async move {
+                *results.lock().unwrap() = None;
+                *current_index.lock().unwrap() = 0;
+                *description.lock().unwrap() = None;
+                *lastrowid.lock().unwrap() = -1;
+                *rowcount.lock().unwrap() = -1;
+                Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })

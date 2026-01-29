@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
-use sqlx::{Column, Row};
+use sqlx::{Column, Row, TypeInfo};
 
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{sqlite3_context, sqlite3_value};
@@ -337,4 +337,31 @@ pub(crate) fn row_to_py_with_factory<'py>(
     let list = row_to_py_list(py, row, text_factory)?;
     let result = f.call1((list,))?;
     Ok(result)
+}
+
+/// Build a cursor description tuple from a SQLite row (aiosqlite/sqlite3 compatible).
+/// Returns a Python tuple of 7-tuples: (name, type_code, display_size, internal_size, precision, scale, null_ok).
+pub(crate) fn build_description_tuple<'py>(
+    py: Python<'py>,
+    row: &sqlx::sqlite::SqliteRow,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let mut col_tuples = Vec::with_capacity(row.len());
+    for i in 0..row.len() {
+        let name = row.columns()[i].name().to_string();
+        let type_name = row.columns()[i].type_info().name().to_ascii_uppercase();
+        let seven = PyTuple::new(
+            py,
+            [
+                PyString::new(py, &name).into(),
+                PyString::new(py, &type_name).into(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+            ],
+        )?;
+        col_tuples.push(seven.into_any());
+    }
+    Ok(PyTuple::new(py, col_tuples)?)
 }

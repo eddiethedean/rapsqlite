@@ -258,6 +258,53 @@ Connection._iterdump_raw = _raw_iterdump  # type: ignore[attr-defined]
 Connection.iterdump = _iterdump  # type: ignore[assignment]
 
 
+async def _execute_fetchall(
+    self: "Connection",  # type: ignore[valid-type]
+    sql: str,
+    parameters: Optional[Any] = None,
+) -> List[Any]:
+    """Execute a SELECT and return all rows (aiosqlite-compatible helper)."""
+    return await self.fetch_all(sql, parameters)  # type: ignore[union-attr]
+
+
+Connection.execute_fetchall = _execute_fetchall  # type: ignore[attr-defined]
+
+
+async def _explain_query_plan(
+    self: "Connection",  # type: ignore[valid-type]
+    sql: str,
+    parameters: Optional[Any] = None,
+) -> List[Any]:
+    """Run EXPLAIN QUERY PLAN for the given SQL and return result rows (Phase 3.1)."""
+    prepended = f"EXPLAIN QUERY PLAN {sql}"
+    return await self.fetch_all(prepended, parameters)  # type: ignore[union-attr]
+
+
+Connection.explain_query_plan = _explain_query_plan  # type: ignore[attr-defined]
+
+
+async def _pool_health(self: "Connection") -> bool:  # type: ignore[valid-type]
+    """Run a minimal health check (SELECT 1) and return True (Phase 3.2). Raises on failure."""
+    await self.fetch_all("SELECT 1")  # type: ignore[union-attr]
+    return True
+
+
+Connection.pool_health = _pool_health  # type: ignore[attr-defined]
+
+
+def _connection_await(self: "Connection"):  # type: ignore[valid-type]
+    """Support `await conn` (aiosqlite-compatible). Enters connection and returns self."""
+
+    async def _inner() -> "Connection":
+        await self.__aenter__()  # type: ignore[union-attr]
+        return self  # type: ignore[return-value]
+
+    return _inner().__await__()
+
+
+Connection.__await__ = _connection_await  # type: ignore[attr-defined]
+
+
 async def _backup(
     self: "Connection",  # type: ignore[valid-type]
     target: Any,

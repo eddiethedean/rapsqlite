@@ -2,6 +2,7 @@
 
 #![allow(non_local_definitions)] // False positive from pyo3 macros
 
+use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
@@ -83,6 +84,8 @@ pub(crate) struct Connection {
     include_query_in_errors: Arc<StdMutex<bool>>, // If false, exclude query strings from error messages
     // SQLite busy_timeout (aiosqlite compatibility) - timeout in seconds for database locks
     timeout: Arc<StdMutex<f64>>, // Default: 5.0 seconds (matches sqlite3 default)
+    // Phase 3.9: transaction isolation level (None | "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE")
+    isolation_level: Arc<StdMutex<Option<String>>>,
 }
 
 // Note: We do not implement Drop for Connection because:
@@ -216,6 +219,7 @@ impl Connection {
             progress_handler: Arc::new(StdMutex::new(None)),
             include_query_in_errors: Arc::new(StdMutex::new(true)), // Default: include queries for debugging
             timeout: Arc::new(StdMutex::new(timeout)), // SQLite busy_timeout in seconds (aiosqlite compatibility)
+            isolation_level: Arc::new(StdMutex::new(None)), // Phase 3.9: None | DEFERRED | IMMEDIATE | EXCLUSIVE
         })
     }
 
@@ -536,6 +540,37 @@ impl Connection {
         Ok(())
     }
 
+    /// Get the transaction isolation level (Phase 3.9). None | "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE".
+    #[getter(isolation_level)]
+    fn isolation_level(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let guard = self.isolation_level.lock().unwrap();
+        match guard.as_deref() {
+            Some(s) => Ok(PyString::new(py, s).into()),
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Set the transaction isolation level. Use None for default (DEFERRED when beginning transactions).
+    #[setter(isolation_level)]
+    fn set_isolation_level(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut guard = self.isolation_level.lock().unwrap();
+        *guard = if value.is_none() {
+            None
+        } else {
+            let s = value.extract::<String>()?;
+            let u = s.to_uppercase();
+            match u.as_str() {
+                "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE" => Some(u),
+                _ => {
+                    return Err(ValueError::new_err(
+                        "isolation_level must be None, 'DEFERRED', 'IMMEDIATE', or 'EXCLUSIVE'",
+                    ));
+                }
+            }
+        };
+        Ok(())
+    }
+
     #[setter(connection_timeout)]
     fn set_connection_timeout(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let mut guard = self.connection_timeout_secs.lock().unwrap();
@@ -726,6 +761,7 @@ impl Connection {
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let timeout = Arc::clone(&self_.timeout);
+        let isolation_level = Arc::clone(&self_.isolation_level);
         let connection_self = self_.into();
         Python::attach(|py| {
             let future = async move {
@@ -823,12 +859,16 @@ impl Connection {
                         .await
                         .map_err(|e| map_sqlx_error(e, &path, &busy_timeout_query))?;
 
-                    // Execute BEGIN IMMEDIATE on this specific connection
-                    // BEGIN IMMEDIATE acquires the write lock upfront, preventing "database is locked" errors
-                    sqlx::query("BEGIN IMMEDIATE")
+                    let level = isolation_level
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| "IMMEDIATE".to_string());
+                    let begin_sql = format!("BEGIN {level}");
+                    sqlx::query(&begin_sql)
                         .execute(&mut **conn)
                         .await
-                        .map_err(|e| map_sqlx_error(e, &path, "BEGIN IMMEDIATE"))?;
+                        .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
 
                     // Store the connection for reuse in all transaction operations
                     {
@@ -1142,6 +1182,11 @@ impl Connection {
                 trace_callback: Arc::clone(&trace_callback),
                 authorizer_callback: Arc::clone(&authorizer_callback),
                 progress_handler: Arc::clone(&progress_handler),
+                arraysize: Arc::new(StdMutex::new(1)),
+                description: Arc::new(StdMutex::new(None)),
+                lastrowid: Arc::new(StdMutex::new(-1)),
+                rowcount: Arc::new(StdMutex::new(-1)),
+                row_factory_override: Arc::new(StdMutex::new(None)),
             };
             Py::new(py, cursor)
         })?;
@@ -1877,6 +1922,126 @@ impl Connection {
         })
     }
 
+    /// Execute an INSERT/UPDATE/DELETE and return the last insert row ID (aiosqlite-compatible helper).
+    ///
+    /// Runs the statement, updates `last_rowid`/`changes`, and returns `last_insert_rowid()`.
+    /// Use for INSERTs; for UPDATE/DELETE the returned rowid is typically 0.
+    #[pyo3(signature = (query, parameters = None))]
+    fn execute_insert(
+        self_: PyRef<Self>,
+        query: String,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+        let last_rowid = Arc::clone(&self_.last_rowid);
+        let last_changes = Arc::clone(&self_.last_changes);
+
+        #[allow(deprecated)]
+        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+            let Some(params) = parameters else {
+                return Ok((query, Vec::new()));
+            };
+            let params = params.as_borrowed();
+            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
+                return process_named_parameters(&query, &dict);
+            }
+            if let Ok(list) = params.cast::<PyList>() {
+                let params_vec = process_positional_parameters(&list)?;
+                return Ok((query, params_vec));
+            }
+            let param = SqliteParam::from_py(&params)?;
+            Ok((query, vec![param]))
+        })?;
+
+        if is_select_query(&processed_query) {
+            return Err(ProgrammingError::new_err(
+                "execute_insert expects INSERT/UPDATE/DELETE, not SELECT",
+            ));
+        }
+
+        Python::attach(|py| {
+            let future = async move {
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+
+                let result = if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                    )
+                    .await?;
+
+                    if has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    ) {
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Callback connection not available")
+                        })?;
+                        bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
+                            .await?
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                        )
+                        .await?;
+                        bind_and_execute(&processed_query, &param_values, &pool_clone, &path)
+                            .await?
+                    }
+                } else {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                        OperationalError::new_err("Transaction connection not available")
+                    })?;
+                    bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
+                        .await?
+                };
+
+                let rowid = result.last_insert_rowid();
+                let changes = result.rows_affected();
+                *last_rowid.lock().await = rowid;
+                *last_changes.lock().await = changes;
+
+                Ok(rowid)
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
     /// Get the last insert row ID.
     fn last_insert_rowid(&self) -> PyResult<Py<PyAny>> {
         let last_rowid = Arc::clone(&self.last_rowid);
@@ -1935,6 +2100,11 @@ impl Connection {
             trace_callback,
             authorizer_callback,
             progress_handler,
+            arraysize: Arc::new(StdMutex::new(1)),
+            description: Arc::new(StdMutex::new(None)),
+            lastrowid: Arc::new(StdMutex::new(-1)),
+            rowcount: Arc::new(StdMutex::new(-1)),
+            row_factory_override: Arc::new(StdMutex::new(None)),
         })
     }
 
@@ -1983,6 +2153,11 @@ impl Connection {
             trace_callback,
             authorizer_callback,
             progress_handler,
+            arraysize: Arc::new(StdMutex::new(1)),
+            description: Arc::new(StdMutex::new(None)),
+            lastrowid: Arc::new(StdMutex::new(-1)),
+            rowcount: Arc::new(StdMutex::new(-1)),
+            row_factory_override: Arc::new(StdMutex::new(None)),
         })
     }
 
@@ -1999,6 +2174,7 @@ impl Connection {
         let init_hook = Arc::clone(&slf.init_hook);
         let init_hook_called = Arc::clone(&slf.init_hook_called);
         let timeout = Arc::clone(&slf.timeout);
+        let isolation_level = Arc::clone(&slf.isolation_level);
         let connection: Py<Connection> = slf.into();
         Ok(TransactionContextManager {
             path,
@@ -2012,6 +2188,7 @@ impl Connection {
             init_hook,
             init_hook_called,
             timeout,
+            isolation_level,
         })
     }
 
@@ -2093,6 +2270,19 @@ impl Connection {
                     .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
 
                 Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Interrupt a long-running query (Phase 3.9, aiosqlite-compatible).
+    /// Stub: not yet implemented. Raises NotImplementedError.
+    fn interrupt(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let future = async move {
+                Err::<(), _>(PyNotImplementedError::new_err(
+                    "Connection.interrupt() is not yet implemented",
+                ))
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })

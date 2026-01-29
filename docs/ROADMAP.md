@@ -36,10 +36,17 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ SQLite busy_timeout support (`timeout` parameter matching aiosqlite)
 - ✅ Comprehensive documentation and benchmarking
 
-**Test Coverage**: 432+ tests passing (6 skipped)  
-**API Compatibility**: ~95% with aiosqlite  
+**Test Coverage**: 493+ tests passing (8 skipped)  
+**API Compatibility**: ~95% with aiosqlite (Phase 3.9 additions improve compatibility)  
 **Python Support**: 3.8–3.14  
 **Code Quality**: Full mypy type checking and Ruff formatting/linting
+
+**Phase 3 (v0.3.0-dev) — In progress:**
+- ✅ **3.9 API completeness**: `execute_fetchall`, `execute_insert`, Cursor properties (`arraysize`, `connection`, `description`, `lastrowid`, `rowcount`, `row_factory`), `Cursor.close()`, `isolation_level`, `__await__`, `interrupt` (stub)
+- ✅ **3.1**: `explain_query_plan` helper
+- ✅ **3.2**: `pool_health` helper
+- ✅ **3.3**: `isolation_level` applied to transactions
+- ✅ aiosqlite test suite runner; `tests/test_phase3_api.py` for Phase 3 APIs
 
 ---
 
@@ -58,7 +65,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ⏳ Automatic index recommendations
 - ⏳ Query result caching strategies
 - ⏳ Lazy query execution patterns
-- ⏳ EXPLAIN QUERY PLAN integration
+- ✅ **`Connection.explain_query_plan(sql, parameters=None)`** — Runs `EXPLAIN QUERY PLAN` and returns result rows
 
 #### Result Handling
 - ⏳ Streaming query results for large datasets
@@ -88,6 +95,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Pool Management
 - ⏳ Dynamic pool sizing (scale up/down based on load)
+- ✅ **`Connection.pool_health()`** — Minimal health check (`SELECT 1`); raises on failure
 - ⏳ Connection health monitoring and automatic recovery
 - ⏳ Idle connection management (timeout and cleanup)
 - ⏳ Pool monitoring and metrics (connection count, wait times, etc.)
@@ -114,7 +122,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Transaction Features
 - ⏳ Nested transaction handling (savepoints)
-- ⏳ Transaction isolation level configuration
+- ✅ **`Connection.isolation_level`** — Get/set `None` | `"DEFERRED"` | `"IMMEDIATE"` | `"EXCLUSIVE"`; applied to `BEGIN`
 - ⏳ Deadlock detection and automatic retry
 - ⏳ Transaction timeout handling
 - ⏳ Long-running transaction monitoring
@@ -259,6 +267,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 #### Test Coverage
 - ⏳ Complete edge case coverage
 - ⏳ Fake Async Detector validation passes under load
+- ✅ **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; baseline documented; some failures remain (e.g. "No transaction in progress")
 - ⏳ Pass 100% of aiosqlite test suite as drop-in replacement validation
 - ⏳ Stress testing and performance regression tests
 - ⏳ Cross-platform testing (Linux, macOS, Windows)
@@ -281,43 +290,37 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Focus**: Complete aiosqlite API compatibility to achieve 100% drop-in replacement status
 
 #### Connection Helper Methods
-- ⏳ `Connection.execute_fetchall(sql, parameters=None)` - Helper to execute query and fetch all rows
-- ⏳ `Connection.execute_insert(sql, parameters=None)` - Helper to insert and get last_insert_rowid
-- These convenience methods improve API compatibility and reduce boilerplate code
+- ✅ **`Connection.execute_fetchall(sql, parameters=None)`** — Execute SELECT and return all rows (delegates to `fetch_all`)
+- ✅ **`Connection.execute_insert(sql, parameters=None)`** — Execute INSERT/UPDATE/DELETE and return `last_insert_rowid()`; rejects SELECT
 
 #### Connection Control Methods
-- ⏳ `Connection.interrupt()` - Interrupt pending queries (async method)
+- ✅ **`Connection.interrupt()`** — Stub only; raises `NotImplementedError` (full implementation deferred)
 - ⏳ `Connection.stop()` - Stop background thread (for API compatibility, though less relevant for rapsqlite's architecture)
-- Query interruption is important for long-running operations and timeout handling
 
 #### Connection Properties
-- ⏳ `Connection.isolation_level` - Property to get/set transaction isolation level
-- Currently missing but present in aiosqlite API
+- ✅ **`Connection.isolation_level`** — Get/set `None` | `"DEFERRED"` | `"IMMEDIATE"` | `"EXCLUSIVE"`; applied to `BEGIN`
 
 #### Connection Await Support
-- ⏳ `Connection.__await__()` - Support for `await conn` pattern (aiosqlite supports this)
-- Enables direct await on connection objects for compatibility
+- ✅ **`Connection.__await__()`** — Support for `await conn` pattern (enter connection and return self)
 
-#### Cursor Properties (All Missing)
-- ⏳ `Cursor.arraysize` - Default size for fetchmany() (int, default 1, read-write property)
-- ⏳ `Cursor.connection` - Reference to parent Connection object (read-only property)
-- ⏳ `Cursor.description` - Column metadata tuple (read-only property, reflects last executed query)
-- ⏳ `Cursor.lastrowid` - Last inserted row ID (read-only property, reflects last executed query)
-- ⏳ `Cursor.rowcount` - Number of rows affected by last operation (read-only property)
-- ⏳ `Cursor.row_factory` - Row factory for this cursor (getter/setter property)
-- These properties are essential for aiosqlite compatibility and provide important query metadata
+#### Cursor Properties
+- ✅ **`Cursor.arraysize`** — Default size for `fetchmany()` (int, default 1, read-write)
+- ✅ **`Cursor.connection`** — Reference to parent Connection (read-only)
+- ✅ **`Cursor.description`** — Column metadata 7-tuples after execute/fetch (read-only)
+- ✅ **`Cursor.lastrowid`** / **`Cursor.rowcount`** — From last execute (read-only)
+- ✅ **`Cursor.row_factory`** — Per-cursor override (getter/setter)
+- ✅ **`Cursor.fetchmany(size=None)`** — `size` optional; uses `arraysize` when omitted
 
 #### Cursor Methods
-- ⏳ `Cursor.close()` - Explicit cursor cleanup (async method)
-- Provides explicit resource management for cursors
+- ✅ **`Cursor.close()`** — Async; clears cached results, description, lastrowid, rowcount
 
 **Success Criteria**:
-- All aiosqlite Connection helper methods implemented and tested
-- All aiosqlite Cursor properties implemented and tested
-- Connection interrupt functionality works correctly
-- Cursor properties accurately reflect query state
-- 100% aiosqlite API compatibility achieved (up from ~95%)
-- All new methods/properties have comprehensive test coverage
+- ✅ Connection helper methods (`execute_fetchall`, `execute_insert`) implemented and tested
+- ✅ Cursor properties and `close()` implemented and tested
+- ⏳ `Connection.interrupt()` full implementation (stub in place)
+- ✅ Cursor properties reflect query state; isolation_level applied to transactions
+- ⏳ 100% aiosqlite API compatibility (progress toward ~95%+)
+- ✅ New methods/properties covered in `tests/test_phase3_api.py`
 
 ---
 
@@ -375,14 +378,14 @@ Following semantic versioning:
 
 ### Must Have (Blocking v1.0.0)
 - ✅ Phase 1 and Phase 2 complete (achieved in v0.2.0)
-- ⏳ Phase 3.1 (Query Optimization) — High priority features complete
-- ⏳ Phase 3.2 (Advanced Pooling) — High priority features complete
+- ⏳ Phase 3.1 (Query Optimization) — `explain_query_plan` added; streaming, FTS, etc. pending
+- ⏳ Phase 3.2 (Advanced Pooling) — `pool_health` added; metrics, dynamic sizing pending
 - ⏳ Phase 3.4 (ORM Integration) — At least SQLAlchemy and FastAPI integration complete
-- ⏳ Phase 3.8 (Testing) — 100% aiosqlite test suite passes
-- ⏳ Phase 3.9 (API Completeness) — All high-priority API gaps filled, 100% aiosqlite compatibility
+- ⏳ Phase 3.8 (Testing) — aiosqlite suite runnable; 100% pass not yet achieved
+- ⏳ Phase 3.9 (API Completeness) — Helpers, Cursor props, isolation_level, __await__ done; `interrupt` stub only
 
 ### Should Have (Target for v1.0.0)
-- ⏳ Phase 3.3 (Advanced Transactions) — Core features complete
+- ⏳ Phase 3.3 (Advanced Transactions) — `isolation_level` done; savepoints, retry pending
 - ⏳ Phase 3.5 (Observability) — Basic monitoring and metrics
 - ⏳ Phase 3.6 (Developer Experience) — Core tools and documentation
 - ⏳ Phase 3.10 (Type System) — Core type conversion features complete
@@ -427,4 +430,4 @@ We welcome contributions! See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelin
 
 ---
 
-*Last Updated: 2026-01-28*
+*Last Updated: 2026-01-29*

@@ -186,6 +186,15 @@ impl ExecuteContextManager {
                     *last_rowid.lock().await = rowid;
                     *last_changes.lock().await = changes;
 
+                    // Update cursor lastrowid/rowcount (Phase 3.9)
+                    #[allow(deprecated)]
+                    let _ = Python::with_gil(|py| -> pyo3::PyResult<()> {
+                        cursor
+                            .bind(py)
+                            .call_method1("_update_last_result", (rowid, changes as i64))?;
+                        Ok(())
+                    });
+
                     // Mark cursor results as cached (empty for non-SELECT) to prevent re-execution
                     // The fetchall() method will check if it's non-SELECT and results are None,
                     // and return empty results without executing. This is handled in fetchall().
@@ -298,6 +307,7 @@ pub(crate) struct TransactionContextManager {
     pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
     pub(crate) init_hook_called: Arc<StdMutex<bool>>,       // Track if init_hook has been executed
     pub(crate) timeout: Arc<StdMutex<f64>>,                 // SQLite busy_timeout in seconds
+    pub(crate) isolation_level: Arc<StdMutex<Option<String>>>, // Phase 3.9: None | DEFERRED | IMMEDIATE | EXCLUSIVE
 }
 
 #[pymethods]
@@ -316,6 +326,7 @@ impl TransactionContextManager {
             let init_hook = Arc::clone(&slf.borrow(py).init_hook);
             let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
             let timeout = Arc::clone(&slf.borrow(py).timeout);
+            let isolation_level = Arc::clone(&slf.borrow(py).isolation_level);
             let future = async move {
                 // Check if transaction is already active (before doing any work)
                 {
@@ -378,10 +389,16 @@ impl TransactionContextManager {
                         .execute(&mut *conn)
                         .await
                         .map_err(|e| map_sqlx_error(e, &path, &busy_timeout_query))?;
-                    sqlx::query("BEGIN IMMEDIATE")
+                    let level = isolation_level
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| "IMMEDIATE".to_string());
+                    let begin_sql = format!("BEGIN {level}");
+                    sqlx::query(&begin_sql)
                         .execute(&mut *conn)
                         .await
-                        .map_err(|e| map_sqlx_error(e, &path, "BEGIN IMMEDIATE"))?;
+                        .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
                     {
                         let mut conn_guard = transaction_connection.lock().await;
                         *conn_guard = Some(conn);
