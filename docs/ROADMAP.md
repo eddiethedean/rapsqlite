@@ -4,10 +4,10 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 ## Current Status
 
-**Current Version: v0.2.0** ✅  
+**Current Version: v0.3.0-dev** 🚧  
 **Phase 1: Complete** ✅  
 **Phase 2: Complete** ✅  
-**Phase 3: In Planning** ⏳
+**Phase 3: In Development** ⏳
 
 ### What's Complete
 
@@ -367,7 +367,7 @@ Following semantic versioning:
 - **v0.3.x+**: Phase 3 (advanced features, ecosystem integration) ⏳ In Progress
 - **v1.0.0**: Stable API release after Phase 3 completion, production-ready ⏳ Planned
 
-**Current Version: v0.2.0** — Phase 1 and Phase 2 complete. Phase 3 will lead to v1.0.0 release.
+**Current Version: v0.3.0-dev** — Phase 1 and Phase 2 complete. Phase 3 in development, leading to v1.0.0 release.
 
 ---
 

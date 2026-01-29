@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Versioning Strategy
 
 - **v0.1.x**: Phase 1 development (MVP and core features)
-- **v0.2.x**: Phase 2 development and release (feature-complete drop-in replacement) - **Current: v0.2.0**
-- **v0.3.x+**: Phase 3 development (advanced features, ecosystem integration)
+- **v0.2.x**: Phase 2 development and release (feature-complete drop-in replacement)
+- **v0.3.x+**: Phase 3 development (advanced features, ecosystem integration) - **Current: v0.3.0-dev**
 - **v1.0.0**: Stable API release after Phase 3 completion, production-ready
 
 ## [1.0.0] - TBA (After Phase 3 Completion)
@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Production stability validated
 
 _Note: v1.0.0 release details will be added after Phase 3 completion._
+
+## [0.3.0-dev] - Unreleased
+
+### Changed
+
+- Version bump to **0.3.0-dev** — Phase 3 development (advanced features, ecosystem integration) toward v1.0.0.
 
 ## [0.2.0] - 2026-01-26 (Updated 2026-01-28)
 

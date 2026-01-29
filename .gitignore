@@ -23,6 +23,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+posts/
 
 # Rust
 # Note: For library crates, Cargo.lock should typically be committed

@@ -42,7 +42,7 @@ The benchmark suite includes:
 **System**: macOS (Darwin arm64)  
 **Python Version**: 3.9.6  
 **SQLite Version**: 3.51.0  
-**rapsqlite Version**: 0.2.0
+**rapsqlite Version**: 0.3.0-dev
 
 *Note: Actual benchmark results will vary based on system configuration, load, and SQLite version. Run the benchmarks on your system for accurate measurements.*
 

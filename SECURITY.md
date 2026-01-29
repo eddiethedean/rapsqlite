@@ -1,6 +1,6 @@
 # Security Audit Report - rapsqlite
 
-**Version:** 0.2.0  
+**Version:** 0.3.0-dev  
 **Last Audit Date:** January 27, 2026
 
 ## Security Status

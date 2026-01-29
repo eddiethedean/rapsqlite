@@ -89,7 +89,7 @@ except AttributeError:
         f"Available attributes: {[x for x in dir(_ext) if not x.startswith('_')]}"
     ) from None
 
-__version__: str = "0.2.0"
+__version__: str = "0.3.0-dev"
 __all__: List[str] = [
     "Connection",
     "Cursor",
