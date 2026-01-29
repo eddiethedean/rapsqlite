@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 
 mod exceptions;
 use exceptions::{
-    DatabaseError, Error, IntegrityError, OperationalError, ProgrammingError, Warning,
+    DatabaseError, Error, IntegrityError, OperationalError, ProgrammingError, ValueError, Warning,
 };
 
 mod types;
@@ -51,6 +51,7 @@ fn _rapsqlite(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("OperationalError", py.get_type::<OperationalError>())?;
     m.add("ProgrammingError", py.get_type::<ProgrammingError>())?;
     m.add("IntegrityError", py.get_type::<IntegrityError>())?;
+    m.add("ValueError", py.get_type::<ValueError>())?;
 
     Ok(())
 }

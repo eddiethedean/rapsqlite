@@ -38,6 +38,7 @@ class Connection:
         *,
         pragmas: Optional[Dict[str, Any]] = None,
         init_hook: Optional[InitHook] = None,
+        timeout: float = 5.0,
     ) -> "Connection":
         """Create a new async SQLite connection.
         
@@ -47,6 +48,10 @@ class Connection:
             init_hook: Optional async callable that receives Connection and runs initialization code.
                 The hook is called once when the connection pool is first used.
                 Example: async def init_hook(conn): await conn.execute("CREATE TABLE ...")
+            timeout: How long to wait (in seconds) when the database is locked by another
+                process/thread before raising an error. Default: 5.0 seconds.
+                This sets SQLite's busy_timeout PRAGMA. Set to 0.0 to disable timeout.
+                This matches aiosqlite and sqlite3's timeout parameter.
                 
         Note:
             init_hook is a rapsqlite-specific enhancement and is not available in aiosqlite.
@@ -108,6 +113,14 @@ class Connection:
     def connection_timeout(self) -> Optional[int]: ...
     @connection_timeout.setter
     def connection_timeout(self, value: Optional[int]) -> None: ...
+    @property
+    def timeout(self) -> float:
+        """Get the SQLite busy_timeout value (in seconds). Default: 5.0."""
+        ...
+    @timeout.setter
+    def timeout(self, value: float) -> None:
+        """Set the SQLite busy_timeout value (in seconds). Must be >= 0.0."""
+        ...
     def enable_load_extension(self, enabled: bool) -> Coroutine[Any, Any, None]: ...
     def load_extension(self, name: str) -> Coroutine[Any, Any, None]: ...
     """Load a SQLite extension from the specified file. Extension loading must be enabled first."""

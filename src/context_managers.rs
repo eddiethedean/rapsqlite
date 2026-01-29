@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::pool::{
     ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
+    pool_acquisition_error,
 };
 use crate::query::{bind_and_execute, bind_and_execute_on_connection};
 use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
@@ -268,6 +269,7 @@ pub(crate) struct TransactionContextManager {
     pub(crate) connection: Py<Connection>,
     pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
     pub(crate) init_hook_called: Arc<StdMutex<bool>>,       // Track if init_hook has been executed
+    pub(crate) timeout: Arc<StdMutex<f64>>,                 // SQLite busy_timeout in seconds
 }
 
 #[pymethods]
@@ -285,6 +287,7 @@ impl TransactionContextManager {
             let connection = slf.borrow(py).connection.clone_ref(py);
             let init_hook = Arc::clone(&slf.borrow(py).init_hook);
             let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
+            let timeout = Arc::clone(&slf.borrow(py).timeout);
             let future = async move {
                 // Atomically reserve the transaction slot to prevent concurrent begin().
                 {
@@ -314,13 +317,28 @@ impl TransactionContextManager {
                     execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook)
                         .await?;
 
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = pool_clone.acquire().await.map_err(|e| {
-                        OperationalError::new_err(format!("Failed to acquire connection: {e}"))
+                        pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
                     })?;
-                    sqlx::query("PRAGMA busy_timeout = 5000")
+                    // Set PRAGMA busy_timeout on this connection to handle lock contention
+                    // Convert timeout from seconds (float) to milliseconds (integer) for SQLite
+                    let timeout_ms = {
+                        let timeout_guard = timeout.lock().unwrap();
+                        (*timeout_guard * 1000.0) as i64
+                    };
+                    let busy_timeout_query = format!("PRAGMA busy_timeout = {}", timeout_ms);
+                    sqlx::query(&busy_timeout_query)
                         .execute(&mut *conn)
                         .await
-                        .map_err(|e| map_sqlx_error(e, &path, "PRAGMA busy_timeout = 5000"))?;
+                        .map_err(|e| map_sqlx_error(e, &path, &busy_timeout_query))?;
                     sqlx::query("BEGIN IMMEDIATE")
                         .execute(&mut *conn)
                         .await

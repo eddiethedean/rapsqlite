@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Note: v1.0.0 release details will be added after Phase 3 completion._
 
-## [0.2.0] - 2026-01-26 (Updated 2026-01-27)
+## [0.2.0] - 2026-01-26 (Updated 2026-01-28)
 
 ### Added - Phase 2.1: Parameterized Queries
 
@@ -386,6 +386,39 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - Best practices and anti-patterns covered
 - Production-ready documentation available
 
+### Added - Phase 2.16: SQLite busy_timeout Support (aiosqlite Compatibility)
+
+- **`timeout` parameter in `connect()` and `Connection.__new__()`** — Set SQLite busy_timeout when creating connections
+  - Default: 5.0 seconds (matching sqlite3/aiosqlite default)
+  - Controls how long SQLite waits when database is locked by another process/thread
+  - Set to 0.0 to disable timeout
+  - Applied via `PRAGMA busy_timeout` in transactions
+- **`Connection.timeout` property** — Getter/setter for SQLite busy_timeout value
+  - Get current timeout: `db.timeout` (returns float in seconds)
+  - Set timeout: `db.timeout = 10.0` (sets timeout to 10 seconds)
+  - Validates timeout >= 0.0 (raises `ValueError` for negative values)
+  - Changes apply to new transactions
+- **Timeout integration** — Timeout is automatically applied when:
+  - Starting transactions via `begin()` method
+  - Using transaction context managers (`async with db.transaction()`)
+  - Timeout value is converted from seconds to milliseconds for SQLite PRAGMA
+- **Comprehensive test suite** — `tests/test_timeout.py` with 15 tests covering:
+  - Default timeout value (5.0 seconds)
+  - Setting timeout via connect() parameter
+  - Timeout property getter/setter
+  - Validation (negative values raise ValueError)
+  - Timeout applied in transactions and transaction context managers
+  - Zero timeout (disables busy_timeout)
+  - Float values and large timeout values
+  - Multiple connections with independent timeouts
+  - Timeout working with PRAGMA settings
+  - Timeout conversion verification (seconds to milliseconds)
+
+**Compatibility improvements:**
+- Full aiosqlite compatibility for timeout parameter
+- Matches sqlite3 standard library timeout behavior
+- Seamless migration from aiosqlite with timeout support
+
 ### Known Limitations
 
 - **Backup to `sqlite3.Connection` not supported**: The `Connection.backup()` method only supports backing up to another `rapsqlite.Connection`. Backing up to Python's standard `sqlite3.Connection` is not supported due to SQLite library instance incompatibility (Python's sqlite3 module and rapsqlite's libsqlite3-sys may use different SQLite library instances, causing handles to be incompatible). This is a fundamental limitation, not a bug. See README.md for workarounds.
@@ -395,12 +428,13 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - Updated date to 2026-01-26
 - Enhanced backup error messages with SQLite error codes and diagnostic information
 - Improved documentation for backup functionality with clear limitations and workarounds
-- Updated test suite count from 276 to 432 passing tests (36 new init_hook tests, deadlock fix validation, prepared statement tests, 76 new comprehensive test suite tests)
+- Updated test suite count from 276 to 432 passing tests (36 new init_hook tests, deadlock fix validation, prepared statement tests, 76 new comprehensive test suite tests, 15 new timeout tests)
 - **Major aiosqlite compatibility improvements** — Implemented all high-priority compatibility features, increasing compatibility from ~85% to ~95%
 - Updated compatibility analysis and migration guide to reflect new features
-- **Phase 2 Complete** — All phases 2.1-2.15 now complete (100% of Phase 2)
+- **Phase 2 Complete** — All phases 2.1-2.16 now complete (100% of Phase 2)
 - **Prepared statement caching verified and documented** — sqlx automatically handles prepared statement caching per connection
 - **Benchmarks documented** — Actual benchmark results published with performance analysis
+- **SQLite busy_timeout support added** — Full aiosqlite/sqlite3 compatibility for timeout parameter
 - **Comprehensive documentation** — All features documented with examples, best practices, and performance tuning guides
 
 ---
