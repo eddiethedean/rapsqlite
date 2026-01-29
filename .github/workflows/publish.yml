@@ -169,13 +169,16 @@ jobs:
             DOCKER_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
           fi
           # Under QEMU (aarch64 on x86), limit parallel Rust jobs to avoid OOM/timeouts
-          CARGO_JOBS="$([ "${{ matrix.architecture }}" = 'aarch64' ] && echo '2' || echo '')"
+          CARGO_ENV=()
+          if [ "${{ matrix.architecture }}" = "aarch64" ]; then
+            CARGO_ENV=(-e CARGO_BUILD_JOBS=2)
+          fi
           docker run --rm \
             --platform linux/${{ matrix.architecture }} \
             -v "$PWD:/io" \
             -e PYO3_USE_ABI3_FORWARD_COMPATIBILITY="${{ (matrix.python == '3.13' || matrix.python == '3.14') && '1' || '' }}" \
             -e PYTHON_TAG="${PYTHON_TAG}" \
-            -e CARGO_BUILD_JOBS="${CARGO_JOBS}" \
+            "${CARGO_ENV[@]}" \
             -w /io \
             ${DOCKER_IMAGE} \
             /bin/bash -c "
