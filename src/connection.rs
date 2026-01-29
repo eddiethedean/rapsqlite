@@ -2215,8 +2215,9 @@ impl Connection {
                 })?;
 
                 // Call sqlite3_load_extension
-                // Use NULL for entry point - SQLite will try sqlite3_extension_init first
-                let mut errmsg: *mut i8 = std::ptr::null_mut();
+                // Use NULL for entry point - SQLite will try sqlite3_extension_init first.
+                // errmsg as *mut u8: libsqlite3-sys uses *mut u8 for char* on some targets (e.g. aarch64).
+                let mut errmsg: *mut u8 = std::ptr::null_mut();
                 // Safety: raw_db is a valid sqlite3* pointer obtained from
                 // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
                 // for the lifetime of the handle lock. name_cstr is a valid CString.
@@ -2226,8 +2227,8 @@ impl Connection {
                     sqlite3_load_extension(
                         raw_db,
                         name_cstr.as_ptr(),
-                        std::ptr::null(), // NULL entry point - SQLite will auto-detect
-                        &mut errmsg,
+                        std::ptr::null::<std::ffi::c_char>(),
+                        &mut errmsg as *mut *mut u8 as *mut *mut std::ffi::c_char,
                     )
                 };
 
@@ -2237,7 +2238,7 @@ impl Connection {
                         // Safety: errmsg is a pointer returned by sqlite3_load_extension.
                         // We check for null before dereferencing. cstr_from_i8_ptr safely
                         // converts the C string to a Rust CStr reference.
-                        let cstr = unsafe { cstr_from_i8_ptr(errmsg) };
+                        let cstr = unsafe { cstr_from_i8_ptr(errmsg as *const i8) };
                         let msg = cstr.to_string_lossy().to_string();
                         // Safety: errmsg was allocated by SQLite and must be freed with
                         // sqlite3_free. We've already copied the string, so it's safe to free.
@@ -2441,7 +2442,7 @@ impl Connection {
                                                 format!("Error converting argument {i}: {e}");
                                             libsqlite3_sys::sqlite3_result_error(
                                                 ctx,
-                                                error_msg.as_ptr() as *const i8,
+                                                error_msg.as_ptr() as *const std::ffi::c_char,
                                                 error_msg.len() as i32,
                                             );
                                             return;
@@ -2505,7 +2506,7 @@ impl Connection {
                                                     format!("Error creating argument tuple: {e}");
                                                 libsqlite3_sys::sqlite3_result_error(
                                                     ctx,
-                                                    error_msg.as_ptr() as *const i8,
+                                                    error_msg.as_ptr() as *const std::ffi::c_char,
                                                     error_msg.len() as i32,
                                                 );
                                                 return;
@@ -2517,10 +2518,11 @@ impl Connection {
                                         ) {
                                             Ok(s) => s,
                                             Err(_) => {
+                                                const MSG: &[u8] = b"Error creating CString";
                                                 libsqlite3_sys::sqlite3_result_error(
                                                     ctx,
-                                                    c"Error creating CString".as_ptr(),
-                                                    22,
+                                                    MSG.as_ptr() as *const std::ffi::c_char,
+                                                    MSG.len() as i32,
                                                 );
                                                 return;
                                             }
@@ -2534,7 +2536,7 @@ impl Connection {
                                                     );
                                                     libsqlite3_sys::sqlite3_result_error(
                                                         ctx,
-                                                        error_msg.as_ptr() as *const i8,
+                                                        error_msg.as_ptr() as *const std::ffi::c_char,
                                                         error_msg.len() as i32,
                                                     );
                                                     return;
@@ -2554,7 +2556,7 @@ impl Connection {
                                                     format!("Error converting result: {e}");
                                                 libsqlite3_sys::sqlite3_result_error(
                                                     ctx,
-                                                    error_msg.as_ptr() as *const i8,
+                                                    error_msg.as_ptr() as *const std::ffi::c_char,
                                                     error_msg.len() as i32,
                                                 );
                                             }
@@ -2565,7 +2567,7 @@ impl Connection {
                                         let error_msg = format!("Python function error: {e}");
                                         libsqlite3_sys::sqlite3_result_error(
                                             ctx,
-                                            error_msg.as_ptr() as *const i8,
+                                            error_msg.as_ptr() as *const std::ffi::c_char,
                                             error_msg.len() as i32,
                                         );
                                     }
