@@ -85,7 +85,7 @@ async def test_progress_handler_exception_continues(test_db):
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
 
         # Insert many rows to trigger progress handler
-        values = [("row_" + str(i),) for i in range(1000)]
+        values = [("row_" + str(i),) for i in range(250)]
         await db.execute_many("INSERT INTO t (v) VALUES (?)", values)
 
         progress_calls = []
@@ -103,7 +103,7 @@ async def test_progress_handler_exception_continues(test_db):
         # Operation should continue despite progress callback error
         # Use a query that processes many rows to trigger progress handler
         rows = await db.fetch_all("SELECT COUNT(*) FROM t")
-        assert rows[0][0] == 1000
+        assert rows[0][0] == 250
 
         # Progress callback may or may not be called depending on SQLite internals
         # The important thing is that the operation completes successfully

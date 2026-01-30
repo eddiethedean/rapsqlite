@@ -8,6 +8,9 @@ import pytest
 
 from rapsqlite import Connection, connect, OperationalError, DatabaseError
 
+# Run on one worker when using pytest-xdist --dist loadgroup to avoid pool/timeout flakiness
+pytestmark = [pytest.mark.asyncio, pytest.mark.xdist_group("concurrency")]
+
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
@@ -141,36 +144,37 @@ async def test_race_condition_connection_acquisition(test_db):
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
-async def test_database_locked_error(test_db):
+async def test_database_locked_error(test_db_file):
     """Test database locked error handling."""
-    async with connect(test_db) as db:
+    async with connect(test_db_file) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
 
     # Start a long transaction
-    db1 = Connection(test_db)
-    await db1.begin()
-    await db1.execute("INSERT INTO t (value) VALUES (?)", [1])
-
-    # Try to access from another connection - should handle lock gracefully
-    db2 = Connection(test_db)
-
-    # This might timeout or raise OperationalError
+    db1 = Connection(test_db_file)
+    db2 = Connection(test_db_file)
     try:
+        await db1.begin()
+        await db1.execute("INSERT INTO t (value) VALUES (?)", [1])
+
+        # This might timeout or raise OperationalError
+        try:
+            await db2.execute("INSERT INTO t (value) VALUES (?)", [2])
+        except (OperationalError, DatabaseError) as e:
+            # Expected - database is locked
+            assert "locked" in str(e).lower() or "timeout" in str(e).lower()
+
+        # Commit first transaction
+        await db1.commit()
+    finally:
+        await db1.close()
+        await db2.close()
+
+    # Final insert in a fresh connection so it is committed and closed properly
+    async with connect(test_db_file) as db2:
         await db2.execute("INSERT INTO t (value) VALUES (?)", [2])
-    except (OperationalError, DatabaseError) as e:
-        # Expected - database is locked
-        assert "locked" in str(e).lower() or "timeout" in str(e).lower()
-
-    # Commit first transaction
-    await db1.commit()
-    await db1.close()
-
-    # Now second connection should work
-    await db2.execute("INSERT INTO t (value) VALUES (?)", [2])
-    await db2.close()
 
     # Verify both inserts succeeded
-    async with connect(test_db) as db:
+    async with connect(test_db_file) as db:
         rows = await db.fetch_all("SELECT value FROM t ORDER BY value")
         assert len(rows) == 2
 

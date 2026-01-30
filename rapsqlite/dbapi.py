@@ -68,7 +68,7 @@ class AsyncCursor:
 
     @property
     def lastrowid(self) -> int:
-        return self._raw.lastrowid
+        return getattr(self._raw, "lastrowid", -1)
 
     @property
     def arraysize(self) -> int:
@@ -104,7 +104,10 @@ class AsyncCursor:
 
     async def close(self) -> None:
         async def _do() -> None:
-            await self._raw.close()
+            close_fn = getattr(self._raw, "close", None)
+            if callable(close_fn):
+                await close_fn()
+            # else: no-op when raw Cursor lacks close (e.g. older build)
 
         await self._with_lock(_do)
 

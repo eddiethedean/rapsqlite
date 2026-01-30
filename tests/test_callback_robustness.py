@@ -4,35 +4,25 @@ These tests cover edge cases, error scenarios, and complex usage patterns
 that might differ between rapsqlite and aiosqlite implementations.
 """
 
-import pytest
-import tempfile
 import os
 import sys
+import tempfile
+
+import pytest
 
 from rapsqlite import connect, DatabaseError, OperationalError
 
 
-def cleanup_db(test_db: str) -> None:
-    """Helper to clean up database file."""
-    if os.path.exists(test_db):
+def _cleanup_db(path: str) -> None:
+    """Helper to clean up database file (used by backup tests for target_path)."""
+    if os.path.exists(path):
         try:
-            os.unlink(test_db)
+            os.unlink(path)
         except (PermissionError, OSError):
             if sys.platform == "win32":
                 pass
             else:
                 raise
-
-
-@pytest.fixture
-def test_db():
-    """Create a temporary database file for testing."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
-    try:
-        yield db_path
-    finally:
-        cleanup_db(db_path)
 
 
 # ============================================================================
@@ -418,6 +408,8 @@ async def test_authorizer_all_action_codes(test_db):
 async def test_authorizer_selective_deny(test_db):
     """Test authorizer denying specific operations."""
     async with connect(test_db) as db:
+        db.connection_timeout = 60
+        db.pool_size = 2
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)")
         await db.execute("INSERT INTO test VALUES (1, 'test')")
 
@@ -592,6 +584,7 @@ async def test_progress_handler_exception_handling(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_empty_database(test_db):
     """Test iterdump on an empty database."""
     async with connect(test_db) as db:
@@ -603,6 +596,7 @@ async def test_iterdump_empty_database(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_indexes(test_db):
     """Test iterdump includes indexes."""
     async with connect(test_db) as db:
@@ -620,6 +614,7 @@ async def test_iterdump_with_indexes(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_triggers(test_db):
     """Test iterdump includes triggers."""
     async with connect(test_db) as db:
@@ -642,6 +637,7 @@ async def test_iterdump_with_triggers(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_views(test_db):
     """Test iterdump includes views."""
     async with connect(test_db) as db:
@@ -660,6 +656,7 @@ async def test_iterdump_with_views(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_blobs(test_db):
     """Test iterdump handles BLOB data correctly."""
     async with connect(test_db) as db:
@@ -677,6 +674,7 @@ async def test_iterdump_with_blobs(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_special_characters(test_db):
     """Test iterdump handles special characters in data."""
     async with connect(test_db) as db:
@@ -695,6 +693,7 @@ async def test_iterdump_with_special_characters(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_quotes_identifiers(tmp_path):
     """iterdump should quote identifiers so dumps are replayable for weird names."""
     src_db = tmp_path / "src.db"
@@ -720,6 +719,7 @@ async def test_iterdump_quotes_identifiers(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_multiple_tables(test_db):
     """Test iterdump with multiple tables."""
     async with connect(test_db) as db:
@@ -738,6 +738,7 @@ async def test_iterdump_multiple_tables(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_preserves_data_types(test_db):
     """Test iterdump preserves different data types correctly."""
     async with connect(test_db) as db:
@@ -765,6 +766,7 @@ async def test_iterdump_preserves_data_types(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_transactions(test_db):
     """Test iterdump works correctly when database has transaction state."""
     async with connect(test_db) as db:
@@ -912,17 +914,18 @@ async def test_callbacks_with_cursor(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_basic(test_db):
+@pytest.mark.slow
+async def test_backup_basic(test_db_file):
     """Test basic backup functionality."""
     import rapsqlite
     import os
 
-    source_conn = rapsqlite.Connection(test_db)
+    source_conn = rapsqlite.Connection(test_db_file)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -944,16 +947,17 @@ async def test_backup_basic(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_target_in_transaction_raises(test_db):
+@pytest.mark.slow
+async def test_backup_target_in_transaction_raises(test_db_file):
     """Backup should fail cleanly if target connection has an active transaction."""
     import rapsqlite
     import os
 
-    source_conn = rapsqlite.Connection(test_db)
+    source_conn = rapsqlite.Connection(test_db_file)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
-    target_path = test_db + ".backup_txn"
+    target_path = test_db_file + ".backup_txn"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -977,15 +981,16 @@ async def test_backup_target_in_transaction_raises(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_empty_database(test_db):
+@pytest.mark.slow
+async def test_backup_empty_database(test_db_file):
     """Test backing up an empty database."""
     import rapsqlite
     import os
 
-    source_conn = rapsqlite.Connection(test_db)
+    source_conn = rapsqlite.Connection(test_db_file)
     # No tables created
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -1007,18 +1012,19 @@ async def test_backup_empty_database(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_progress_callback(test_db):
+@pytest.mark.slow
+async def test_backup_progress_callback(test_db_file):
     """Test backup with progress callback."""
     import rapsqlite
     import os
 
-    source_conn = rapsqlite.Connection(test_db)
+    source_conn = rapsqlite.Connection(test_db_file)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)")
     # Insert some data to make backup non-trivial
     for i in range(10):
         await source_conn.execute("INSERT INTO test (data) VALUES (?)", [f"data{i}"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -1052,17 +1058,18 @@ async def test_backup_progress_callback(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_with_pages_parameter(test_db):
+@pytest.mark.slow
+async def test_backup_with_pages_parameter(test_db_file):
     """Test backup with pages parameter to copy incrementally."""
     import rapsqlite
     import os
 
-    source_conn = rapsqlite.Connection(test_db)
+    source_conn = rapsqlite.Connection(test_db_file)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)")
     for i in range(5):
         await source_conn.execute("INSERT INTO test (data) VALUES (?)", [f"data{i}"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -1083,16 +1090,17 @@ async def test_backup_with_pages_parameter(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_with_custom_name(test_db):
+@pytest.mark.slow
+async def test_backup_with_custom_name(test_db_file):
     """Test backup with custom database name."""
     import rapsqlite
     import os
 
-    source_conn = rapsqlite.Connection(test_db)
+    source_conn = rapsqlite.Connection(test_db_file)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -1113,12 +1121,13 @@ async def test_backup_with_custom_name(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_multiple_tables(test_db):
+@pytest.mark.slow
+async def test_backup_multiple_tables(test_db_file):
     """Test backing up database with multiple tables."""
     import rapsqlite
     import os
 
-    source_conn = rapsqlite.Connection(test_db)
+    source_conn = rapsqlite.Connection(test_db_file)
     await source_conn.execute("CREATE TABLE table1 (id INTEGER PRIMARY KEY, name TEXT)")
     await source_conn.execute(
         "CREATE TABLE table2 (id INTEGER PRIMARY KEY, value INTEGER)"
@@ -1126,7 +1135,7 @@ async def test_backup_multiple_tables(test_db):
     await source_conn.execute("INSERT INTO table1 (name) VALUES (?)", ["test1"])
     await source_conn.execute("INSERT INTO table2 (value) VALUES (?)", [42])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -1150,17 +1159,18 @@ async def test_backup_multiple_tables(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_with_indexes(test_db):
+@pytest.mark.slow
+async def test_backup_with_indexes(test_db_file):
     """Test backing up database with indexes."""
     import rapsqlite
     import os
 
-    source_conn = rapsqlite.Connection(test_db)
+    source_conn = rapsqlite.Connection(test_db_file)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
     await source_conn.execute("CREATE INDEX idx_name ON test(name)")
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -1182,16 +1192,17 @@ async def test_backup_with_indexes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_progress_callback_exception(test_db):
+@pytest.mark.slow
+async def test_backup_progress_callback_exception(test_db_file):
     """Test that exceptions in progress callback don't abort backup."""
     import rapsqlite
     import os
 
-    source_conn = rapsqlite.Connection(test_db)
+    source_conn = rapsqlite.Connection(test_db_file)
     await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
     await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):

@@ -18,6 +18,26 @@ async def test_module_level_contract():
 
 
 @pytest.mark.asyncio
+async def test_raw_cursor_has_close_and_lastrowid():
+    """Verify raw Cursor from cursor() and execute() exposes close and lastrowid (or DBAPI fallbacks work)."""
+    conn = await dbapi.connect(":memory:")
+    # From cursor()
+    cur = await conn.cursor()
+    raw = cur._raw
+    assert hasattr(raw, "close"), "raw Cursor from cursor() must have close"
+    assert callable(getattr(raw, "close", None)), "raw close must be callable"
+    assert hasattr(raw, "lastrowid"), "raw Cursor from cursor() must have lastrowid"
+    await cur.close()
+    # From execute()
+    exec_cur = await conn.execute("SELECT 1")
+    raw_exec = exec_cur._raw
+    assert hasattr(raw_exec, "close"), "raw Cursor from execute() must have close"
+    assert hasattr(raw_exec, "lastrowid"), "raw Cursor from execute() must have lastrowid"
+    await exec_cur.close()
+    await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_exception_hierarchy():
     assert issubclass(dbapi.InterfaceError, dbapi.Error)
     assert issubclass(dbapi.DataError, dbapi.DatabaseError)
@@ -72,6 +92,26 @@ async def test_executemany(unique_table_prefix):
     assert len(rows) == 3
     await cur.close()
     await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_commit_reproducer(test_db, unique_table_prefix):
+    """Minimal reproducer: connect -> CREATE -> INSERT -> commit -> close; reconnect and verify row."""
+    tbl = unique_table_prefix
+    path = test_db
+    conn = await dbapi.connect(path)
+    await conn.execute(f"CREATE TABLE {tbl} (a INT)")
+    await conn.execute(f"INSERT INTO {tbl} VALUES (1)")
+    await conn.commit()
+    await conn.close()
+
+    conn2 = await dbapi.connect(path)
+    cur = await conn2.execute(f"SELECT * FROM {tbl}")
+    rows = await cur.fetchall()
+    await cur.close()
+    await conn2.close()
+    assert len(rows) == 1
+    assert rows[0][0] == 1
 
 
 @pytest.mark.asyncio

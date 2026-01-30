@@ -36,14 +36,55 @@ def cleanup_db(test_db: str) -> None:
                 raise
 
 
-@pytest.fixture
-def test_db() -> Generator[str, None, None]:
-    """Create a temporary database file for testing.
+def _unique_memory_uri(request: Any) -> str:
+    """Return a unique in-memory SQLite URI per test (file:mem_<hash>?mode=memory&cache=shared).
 
-    Yields a unique path per test. The database file is cleaned up after the test.
+    Note: Requires Rust/sqlx to pass full URI to SQLite; currently unused in favor of
+    unique temp files for test_db so each test gets its own DB without Rust changes.
     """
+    h = hashlib.sha256(request.node.name.encode()).hexdigest()[:16]
+    return f"file:mem_{h}?mode=memory&cache=shared"
+
+
+@pytest.fixture
+def isolated_memory_db(request: Any) -> str:
+    """Unique in-memory database URI per test (for future use when backend supports it)."""
+    return _unique_memory_uri(request)
+
+
+@pytest.fixture
+def test_db_file() -> Generator[str, None, None]:
+    """Temporary database *file* for tests that need a real path (backup, locking, etc.)."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
+    try:
+        yield db_path
+    finally:
+        cleanup_db(db_path)
+
+
+@pytest.fixture
+def target_db_file() -> Generator[str, None, None]:
+    """Second temporary database file for backup tests (source + target)."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    try:
+        yield db_path
+    finally:
+        cleanup_db(db_path)
+
+
+@pytest.fixture
+def test_db(request: Any) -> Generator[str, None, None]:
+    """Database for testing: unique temp file per test for full isolation.
+
+    Each test gets its own database file (path includes test name hash) so tests
+    do not share state and run safely in parallel. Use test_db_file when a
+    second file is needed (e.g. backup target, database_locked_error).
+    """
+    h = hashlib.sha256(request.node.name.encode()).hexdigest()[:16]
+    fd, db_path = tempfile.mkstemp(suffix=".db", prefix=f"rapsqlite_{h}_")
+    os.close(fd)
     try:
         yield db_path
     finally:
@@ -76,6 +117,20 @@ def dbapi_test_db(tmp_path):
     """Isolated temp DB path for dbapi tests (unique per test, uses pytest tmp_path)."""
     db_path = tmp_path / "dbapi_isolated.db"
     yield str(db_path)
+    cleanup_db(str(db_path))
+
+
+@pytest.fixture
+def isolated_init_hook_db(tmp_path):
+    """Isolated DB path for init_hook tests (unique per test, uses tmp_path).
+
+    Yields (path, connection_timeout). Use path for Connection; set
+    conn.connection_timeout = connection_timeout before first use so pool
+    acquire does not timeout under parallel load.
+    """
+    db_path = tmp_path / "init_hook.db"
+    db_path.touch()
+    yield str(db_path), 60
     cleanup_db(str(db_path))
 
 
@@ -116,3 +171,14 @@ def pytest_configure(config):
     )
     config.addinivalue_line("markers", "property: Property-based tests")
     config.addinivalue_line("markers", "slow: Slow-running tests")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Apply longer timeout (120s) to tests marked slow when pytest-timeout is active."""
+    try:
+        import pytest_timeout
+    except ImportError:
+        return
+    for item in items:
+        if item.get_closest_marker("slow"):
+            item.add_marker(pytest.mark.timeout(120))

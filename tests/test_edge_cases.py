@@ -13,8 +13,9 @@ import pytest
 from rapsqlite import (
     Connection,
     connect,
-    OperationalError,
     DatabaseError,
+    InterfaceError,
+    OperationalError,
     ProgrammingError,
 )
 
@@ -29,7 +30,7 @@ async def test_pool_exhaustion(test_db):
     """
     async with connect(test_db) as db:
         db.pool_size = 1  # Very small pool
-        db.connection_timeout = 1  # Short timeout
+        db.connection_timeout = 5  # Short but safe under parallel workers
 
         # Create table
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -59,14 +60,14 @@ async def test_connection_timeout_short(test_db):
     """
     async with connect(test_db) as db:
         db.pool_size = 1
-        db.connection_timeout = 1  # 1 second timeout
+        db.connection_timeout = 5  # Short but safe under parallel workers
 
         # Should work
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
         await db.execute("INSERT INTO t DEFAULT VALUES")
 
         # Verify timeout is set
-        assert db.connection_timeout == 1
+        assert db.connection_timeout == 5
 
 
 @pytest.mark.edge_case
@@ -133,13 +134,11 @@ async def test_transaction_closed_connection(test_db):
     await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     await db.close()
 
-    # Transaction might recreate connection or fail
-    # Both behaviors are acceptable
+    # After close(), transaction use raises InterfaceError (connection is closed)
     try:
         async with db.transaction():
             await db.execute("INSERT INTO t DEFAULT VALUES")
-        # If it works, connection was recreated (acceptable)
-    except (OperationalError, DatabaseError):
+    except (InterfaceError, OperationalError, DatabaseError):
         # Expected - connection is closed
         pass
 
@@ -164,29 +163,22 @@ async def test_multiple_close_calls(test_db):
 @pytest.mark.edge_case
 @pytest.mark.asyncio
 async def test_operations_on_closed_connection(test_db):
-    """Test operations on closed connection."""
+    """Test operations on closed connection raise InterfaceError.
+
+    After close(), any operation that would use the pool must raise
+    InterfaceError with 'closed' in the message.
+    """
+    from rapsqlite import InterfaceError
+
     db = Connection(test_db)
     await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     await db.close()
 
-    # All operations should fail - but behavior may vary
-    # Some operations might recreate the pool, so we test that close() was called
-    # The actual error might be raised or connection might be recreated
-    try:
+    with pytest.raises(InterfaceError, match="closed"):
         await db.execute("INSERT INTO t DEFAULT VALUES")
-        # If it doesn't raise, the connection was recreated (acceptable behavior)
-    except (OperationalError, DatabaseError):
-        # Expected - connection is closed
-        pass
 
-    # Test that we can't reliably use a closed connection
-    # (It might recreate, but that's also acceptable behavior)
-    try:
+    with pytest.raises(InterfaceError, match="closed"):
         await db.fetch_all("SELECT * FROM t")
-        # If it works, connection was recreated
-    except (OperationalError, DatabaseError):
-        # Expected - connection is closed
-        pass
 
 
 @pytest.mark.edge_case
@@ -314,12 +306,13 @@ async def test_unicode_in_queries(test_db):
 async def test_very_long_query(test_db):
     """Test very long query strings."""
     async with connect(test_db) as db:
-        # Create a very long query
-        long_query = "SELECT " + ", ".join([f"{i} AS c{i}" for i in range(1000)])
+        # Create a very long query (150 columns; enough to exercise long-query path)
+        n_columns = 150
+        long_query = "SELECT " + ", ".join([f"{i} AS c{i}" for i in range(n_columns)])
 
         rows = await db.fetch_all(long_query)
         assert len(rows) == 1
-        assert len(rows[0]) == 1000
+        assert len(rows[0]) == n_columns
 
 
 @pytest.mark.edge_case

@@ -72,7 +72,7 @@ jobs:
 
     - name: Install test dependencies
       shell: bash
-      run: pip install pytest pytest-asyncio pytest-cov pytest-xdist hypothesis
+      run: pip install pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout hypothesis
 
     - name: Test package import
       shell: bash
@@ -129,7 +129,7 @@ jobs:
           # process will have the correct event loop policy. Windows uses spawn (not fork)
           # which is better for asyncio. If parallel execution fails, fallback to sequential.
           # Using limited workers (2) instead of auto to reduce risk of event loop conflicts
-          python -m pytest "$WORKSPACE/tests/" -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" -n 2 || python -m pytest "$WORKSPACE/tests/" -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml"
+          python -m pytest "$WORKSPACE/tests/" -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" -n 2 --timeout 90 --dist loadgroup || python -m pytest "$WORKSPACE/tests/" -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" --timeout 90
         else
           cd /tmp
           # Ensure coverage XML directory exists and is writable
@@ -137,7 +137,7 @@ jobs:
           COV_XML="${{ github.workspace }}/coverage.xml"
           # Run tests with parallel execution
           # If pytest-xdist fails (e.g., on macOS Python 3.10), fallback to sequential execution
-          python -m pytest ${{ github.workspace }}/tests/ -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML" -n auto || python -m pytest ${{ github.workspace }}/tests/ -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML"
+          python -m pytest ${{ github.workspace }}/tests/ -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML" -n auto --timeout 90 --dist loadgroup || python -m pytest ${{ github.workspace }}/tests/ -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$COV_XML" --timeout 90
         fi
 
     - name: Upload coverage to Codecov

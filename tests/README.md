@@ -83,6 +83,15 @@ python -m pytest tests/ -m "not slow and not stress and not performance"
 python -m pytest tests/ -n 10
 ```
 
+For high parallelism (e.g. `-n 12`) with timeout and grouped workers to reduce flakiness:
+```bash
+pip install -r requirements-test.txt   # includes pytest-timeout
+python -m pytest tests/ -n 12 --timeout 60 --dist loadgroup
+```
+A default per-test timeout (90s) is set in `pyproject.toml`; tests marked `@pytest.mark.slow` get a 120s timeout via conftest. `--dist loadgroup` runs tests in the same `xdist_group` on one worker (e.g. init_hook, pool_exhaustion, concurrency), avoiding pool/DB contention and timeout flakiness.
+
+**CI** uses pytest-timeout, `--timeout 90`, and `--dist loadgroup` for stable parallel runs.
+
 Tests use unique table names per test (via the `unique_table_prefix` fixture) so parallel runs avoid table-name collisions. Use this fixture for any new tests that create tables.
 
 ### Run Specific Test Categories

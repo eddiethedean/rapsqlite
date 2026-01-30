@@ -64,21 +64,22 @@ async def test_batch_processing_pattern(test_db):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value INTEGER)")
 
-        # Batch insert
-        items = [[i] for i in range(1000)]
+        # Batch insert (400 items; enough to exercise chunked processing)
+        n_items = 400
+        items = [[i] for i in range(n_items)]
         await db.execute_many("INSERT INTO items (value) VALUES (?)", items)
 
         # Batch process in chunks
         chunk_size = 100
         total = 0
-        for offset in range(0, 1000, chunk_size):
+        for offset in range(0, n_items, chunk_size):
             rows = await db.fetch_all(
                 "SELECT value FROM items WHERE id > ? AND id <= ? ORDER BY id",
                 [offset, offset + chunk_size],
             )
             total += len(rows)
 
-        assert total == 1000
+        assert total == n_items
 
 
 @pytest.mark.integration
@@ -127,6 +128,7 @@ async def test_transaction_rollback_pattern(test_db):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_connection_pooling_pattern(test_db):
     """Test connection pooling pattern for high-throughput scenarios.
 

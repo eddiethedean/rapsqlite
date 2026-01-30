@@ -35,6 +35,15 @@ dependencies = []
 
 [project.optional-dependencies]
 sqlalchemy = ["sqlalchemy>=2.0"]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-xdist",
+    "pytest-timeout",
+    "hypothesis",
+    "fastapi",
+    "sqlalchemy>=2.0",
+]
 
 [tool.maturin]
 module-name = "rapsqlite._rapsqlite"
@@ -47,6 +56,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+# Default per-test timeout (seconds); slow-marked tests get 120s via conftest
+timeout = 90
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",
@@ -56,6 +67,7 @@ markers = [
     "performance: Performance tests",
     "property: Property-based tests",
     "slow: Slow-running tests",
+    "xdist_group(name): group name for pytest-xdist loadgroup (tests in same group run on same worker)",
 ]
 addopts = "-v --tb=short"
 

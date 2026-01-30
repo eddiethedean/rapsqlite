@@ -3,13 +3,14 @@
 #![allow(non_local_definitions)]
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyList, PyString, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::pool::PoolConnection;
 use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
+use crate::connection::ensure_not_closed;
 use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{ensure_callback_connection, get_or_create_pool, has_callbacks};
@@ -51,51 +52,39 @@ pub(crate) struct Cursor {
     // Phase 3.9: aiosqlite-compatible cursor state
     pub(crate) arraysize: Arc<StdMutex<usize>>,
     pub(crate) description: Arc<StdMutex<Option<Py<PyAny>>>>,
+    /// Description set lazily on first fetch (so description is None until fetchone/fetchall).
+    pub(crate) pending_description: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) lastrowid: Arc<StdMutex<i64>>,
     pub(crate) rowcount: Arc<StdMutex<i64>>,
     pub(crate) row_factory_override: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) closed: Arc<StdMutex<bool>>,
 }
 
 #[pymethods]
 impl Cursor {
-    /// Execute a SQL query.
+    /// Execute a SQL query. When awaited, returns self (aiosqlite-compatible chaining).
     #[pyo3(signature = (query, parameters = None))]
     fn execute(
-        &mut self,
+        self_: PyRef<Self>,
         query: String,
         parameters: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        self.query = query.clone();
-
-        // Store parameters
-        let params_for_storage = parameters.map(|params| params.clone().unbind());
-
-        {
-            let mut params_guard = self.parameters.lock().unwrap();
-            *params_guard = params_for_storage;
-        }
-
-        // Reset cursor state for new query
-        {
-            *self.current_index.lock().unwrap() = 0;
-            *self.results.lock().unwrap() = None;
-            *self.description.lock().unwrap() = None;
-        }
-        {
-            *self.lastrowid.lock().unwrap() = -1;
-            *self.rowcount.lock().unwrap() = -1;
-        }
-
-        // Execute via Connection (no results cached yet - will fetch on first fetch call)
-        Python::attach(|py| {
-            let conn = self.connection.bind(py);
-            if let Some(params) = parameters {
-                conn.call_method1("execute", (query, params))
-                    .map(|bound| bound.unbind())
+        let connection = self_.connection.clone_ref(self_.py());
+        let ptr = self_.as_ptr();
+        let params_py = parameters.map(|p| p.clone().unbind());
+        drop(self_); // release borrow so Connection.execute can borrow_mut the cursor
+        Python::attach(move |py| {
+            let conn = connection.bind(py);
+            let self_py: Py<Cursor> = unsafe { Py::<PyAny>::from_borrowed_ptr(py, ptr) }
+                .cast_bound::<Cursor>(py)?
+                .clone()
+                .unbind();
+            let result = if let Some(p) = params_py {
+                conn.call_method1("execute", (query, p, self_py))
             } else {
-                conn.call_method1("execute", (query, py.None()))
-                    .map(|bound| bound.unbind())
-            }
+                conn.call_method1("execute", (query, py.None(), self_py))
+            };
+            result.map(|bound: Bound<'_, PyAny>| bound.unbind())
         })
     }
 
@@ -121,13 +110,19 @@ impl Cursor {
     }
 
     /// Internal: store fetched SELECT results and description (eager execution from ExecuteContextManager).
+    /// Description is stored in pending_description so cursor.description is None until first fetch (lazy).
     fn _set_select_results(&self, rows: &Bound<'_, PyList>, description: &Bound<'_, PyAny>) -> PyResult<()> {
         let mut vec = Vec::with_capacity(rows.len());
         for item in rows.iter() {
             vec.push(item.clone().unbind());
         }
         *self.results.lock().unwrap() = Some(vec);
-        *self.description.lock().unwrap() = Some(description.clone().unbind());
+        *self.description.lock().unwrap() = None; // Lazy: set on first fetch
+        *self.pending_description.lock().unwrap() = if description.is_none() {
+            None
+        } else {
+            Some(description.clone().unbind())
+        };
         Ok(())
     }
 
@@ -224,10 +219,13 @@ impl Cursor {
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         let description = Arc::clone(&self.description);
+        let pending_description = Arc::clone(&self.pending_description);
         let row_factory_override = Arc::clone(&self.row_factory_override);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Ensure results are cached (same logic as fetchmany)
                 let needs_fetch = {
                     let results_guard = results.lock().unwrap();
@@ -364,19 +362,24 @@ impl Cursor {
                             let t = build_description_tuple(py, first)?;
                             Ok(t.unbind().into())
                         })?;
-                        *description.lock().unwrap() = Some(desc);
+                        *pending_description.lock().unwrap() = Some(desc);
                     }
                     *current_index.lock().unwrap() = 0;
                 }
 
-                // Get first element or None
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
+                // Get first element or None (from cache)
                 #[allow(deprecated)]
                 Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    // Lazy description: set from pending on first fetch
+                    {
+                        let mut desc_guard = description.lock().unwrap();
+                        if desc_guard.is_none() {
+                            let mut pending = pending_description.lock().unwrap();
+                            if let Some(pd) = pending.take() {
+                                *desc_guard = Some(pd);
+                            }
+                        }
+                    }
                     let mut index_guard = current_index.lock().unwrap();
                     let results_guard = results.lock().unwrap();
 
@@ -388,9 +391,21 @@ impl Cursor {
                         return Ok(py.None());
                     }
 
-                    let row = results_vec[*index_guard].clone_ref(py);
+                    let mut row = results_vec[*index_guard].clone_ref(py);
                     *index_guard += 1;
 
+                    // Apply row_factory_override "tuple" when returning from cache (user set after execute)
+                    let o_guard = row_factory_override.lock().unwrap();
+                    if let Some(ref f) = *o_guard {
+                        if let Ok(s) = f.bind(py).downcast::<PyString>() {
+                            if s.to_str().map_or(false, |n| n == "tuple") {
+                                if let Ok(list) = row.downcast_bound::<PyList>(py) {
+                                    let items: Vec<pyo3::Bound<'_, PyAny>> = list.iter().collect();
+                                    row = PyTuple::new(py, items)?.into_any().unbind();
+                                }
+                            }
+                        }
+                    }
                     Ok(row)
                 })
             };
@@ -424,6 +439,7 @@ impl Cursor {
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         let description = Arc::clone(&self.description);
+        let pending_description = Arc::clone(&self.pending_description);
         let row_factory_override = Arc::clone(&self.row_factory_override);
 
         // Check if this is a non-SELECT query - if so and results are None,
@@ -450,9 +466,11 @@ impl Cursor {
         // Clone processed parameters for use in async future
         let stored_proc_query = self.processed_query.clone();
         let stored_proc_params = self.processed_params.clone();
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Ensure results are cached
                 let needs_fetch = {
                     let results_guard = results.lock().unwrap();
@@ -635,19 +653,24 @@ impl Cursor {
                                 let t = build_description_tuple(py, first)?;
                                 Ok(t.unbind().into())
                             })?;
-                            *description.lock().unwrap() = Some(desc);
+                            *pending_description.lock().unwrap() = Some(desc);
                         }
                     }
                 }
 
-                // Return all remaining results
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
+                // Return all remaining results (from cache)
                 #[allow(deprecated)]
                 Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    // Lazy description: set from pending on first fetch
+                    {
+                        let mut desc_guard = description.lock().unwrap();
+                        if desc_guard.is_none() {
+                            let mut pending = pending_description.lock().unwrap();
+                            if let Some(pd) = pending.take() {
+                                *desc_guard = Some(pd);
+                            }
+                        }
+                    }
                     let mut index_guard = current_index.lock().unwrap();
                     let results_guard = results.lock().unwrap();
 
@@ -657,8 +680,21 @@ impl Cursor {
 
                     let start = *index_guard;
                     let result_list = PyList::empty(py);
+                    let o_guard = row_factory_override.lock().unwrap();
+                    let use_tuple = o_guard.as_ref().and_then(|f| {
+                        f.bind(py).downcast::<PyString>().ok().and_then(|s| {
+                            s.to_str().ok().filter(|n| *n == "tuple")
+                        })
+                    }).is_some();
                     for row in &results_vec[start..] {
-                        result_list.append(row.clone_ref(py))?;
+                        let mut r = row.clone_ref(py);
+                        if use_tuple {
+                            if let Ok(list) = r.downcast_bound::<PyList>(py) {
+                                let items: Vec<pyo3::Bound<'_, PyAny>> = list.iter().collect();
+                                r = PyTuple::new(py, items)?.into_any().unbind();
+                            }
+                        }
+                        result_list.append(r)?;
                     }
 
                     // Update index to end
@@ -704,10 +740,13 @@ impl Cursor {
         let progress_handler = Arc::clone(&self.progress_handler);
         let arraysize = Arc::clone(&self.arraysize);
         let description = Arc::clone(&self.description);
+        let pending_description = Arc::clone(&self.pending_description);
         let row_factory_override = Arc::clone(&self.row_factory_override);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Check if results need to be fetched
                 let needs_fetch = {
                     let results_guard = results.lock().unwrap();
@@ -841,7 +880,7 @@ impl Cursor {
                         Ok(vec)
                     })?;
 
-                    // Store cached results and description (Phase 3.9)
+                    // Store cached results; keep description lazy (set on first read from cache)
                     {
                         let mut results_guard = results.lock().unwrap();
                         *results_guard = Some(cached_results);
@@ -852,7 +891,7 @@ impl Cursor {
                             let t = build_description_tuple(py, first)?;
                             Ok(t.unbind().into())
                         })?;
-                        *description.lock().unwrap() = Some(desc);
+                        *pending_description.lock().unwrap() = Some(desc);
                     }
 
                     // Reset index
@@ -867,6 +906,16 @@ impl Cursor {
                 // The deprecation warning is acceptable as this is a sync operation within async.
                 #[allow(deprecated)]
                 Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    // Lazy description: set from pending on first fetch
+                    {
+                        let mut desc_guard = description.lock().unwrap();
+                        if desc_guard.is_none() {
+                            let mut pending = pending_description.lock().unwrap();
+                            if let Some(pd) = pending.take() {
+                                *desc_guard = Some(pd);
+                            }
+                        }
+                    }
                     let mut index_guard = current_index.lock().unwrap();
                     let results_guard = results.lock().unwrap();
 
@@ -878,10 +927,22 @@ impl Cursor {
                     let fetch_size = size.unwrap_or_else(|| *arraysize.lock().unwrap());
                     let end = std::cmp::min(start + fetch_size, results_vec.len());
 
-                    // Create result slice
+                    let o_guard = row_factory_override.lock().unwrap();
+                    let use_tuple = o_guard.as_ref().and_then(|f| {
+                        f.bind(py).downcast::<PyString>().ok().and_then(|s| {
+                            s.to_str().ok().filter(|n| *n == "tuple")
+                        })
+                    }).is_some();
                     let result_list = PyList::empty(py);
                     for row in &results_vec[start..end] {
-                        result_list.append(row.clone_ref(py))?;
+                        let mut r = row.clone_ref(py);
+                        if use_tuple {
+                            if let Ok(list) = r.downcast_bound::<PyList>(py) {
+                                let items: Vec<pyo3::Bound<'_, PyAny>> = list.iter().collect();
+                                r = PyTuple::new(py, items)?.into_any().unbind();
+                            }
+                        }
+                        result_list.append(r)?;
                     }
 
                     // Update index for next call
@@ -899,6 +960,7 @@ impl Cursor {
         let results = Arc::clone(&self.results);
         let current_index = Arc::clone(&self.current_index);
         let description = Arc::clone(&self.description);
+        let pending_description = Arc::clone(&self.pending_description);
         let lastrowid = Arc::clone(&self.lastrowid);
         let rowcount = Arc::clone(&self.rowcount);
         Python::attach(|py| {
@@ -906,6 +968,7 @@ impl Cursor {
                 *results.lock().unwrap() = None;
                 *current_index.lock().unwrap() = 0;
                 *description.lock().unwrap() = None;
+                *pending_description.lock().unwrap() = None;
                 *lastrowid.lock().unwrap() = -1;
                 *rowcount.lock().unwrap() = -1;
                 Ok(())
@@ -953,9 +1016,11 @@ impl Cursor {
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Parse script into individual statements
                 // Simple approach: split by semicolon, but be careful about semicolons in strings
                 // For now, use a simple split - more sophisticated parsing can be added later
@@ -1035,28 +1100,54 @@ impl Cursor {
     fn __anext__(&self) -> PyResult<Py<PyAny>> {
         let results = Arc::clone(&self.results);
         let current_index = Arc::clone(&self.current_index);
+        let description = Arc::clone(&self.description);
+        let pending_description = Arc::clone(&self.pending_description);
+        let row_factory_override = Arc::clone(&self.row_factory_override);
 
         Python::attach(|py| {
-            let result: Result<Py<PyAny>, PyErr> = {
-                let results_guard = results.lock().unwrap();
-                let results_opt = results_guard.as_ref();
-                if results_opt.is_none() {
-                    Err(ProgrammingError::new_err(
-                        "Cursor not executed. Call execute() first.",
-                    ))
-                } else {
-                    let results_vec = results_opt.unwrap();
-                    let mut index_guard = current_index.lock().unwrap();
-                    if *index_guard >= results_vec.len() {
-                        Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(""))
-                    } else {
-                        let row = results_vec[*index_guard].clone_ref(py);
-                        *index_guard += 1;
-                        Ok(row)
+            let future = async move {
+                #[allow(deprecated)]
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    // Lazy description: set from pending on first iteration
+                    {
+                        let mut desc_guard = description.lock().unwrap();
+                        if desc_guard.is_none() {
+                            let mut pending = pending_description.lock().unwrap();
+                            if let Some(pd) = pending.take() {
+                                *desc_guard = Some(pd);
+                            }
+                        }
                     }
-                }
+                    let results_guard = results.lock().unwrap();
+                    let results_opt = results_guard.as_ref();
+                    let result = if let Some(results_vec) = results_opt {
+                        let mut index_guard = current_index.lock().unwrap();
+                        if *index_guard >= results_vec.len() {
+                            Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(""))
+                        } else {
+                            let mut row = results_vec[*index_guard].clone_ref(py);
+                            *index_guard += 1;
+                            let o_guard = row_factory_override.lock().unwrap();
+                            if let Some(ref f) = *o_guard {
+                                if let Ok(s) = f.bind(py).downcast::<PyString>() {
+                                    if s.to_str().map_or(false, |n| n == "tuple") {
+                                        if let Ok(list) = row.downcast_bound::<PyList>(py) {
+                                            let items: Vec<pyo3::Bound<'_, PyAny>> = list.iter().collect();
+                                            row = PyTuple::new(py, items)?.into_any().unbind();
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(row)
+                        }
+                    } else {
+                        Err(ProgrammingError::new_err(
+                            "Cursor not executed. Call execute() first.",
+                        ))
+                    };
+                    result
+                })
             };
-            let future = async move { result };
             future_into_py(py, future).map(|bound| bound.unbind())
         })
     }

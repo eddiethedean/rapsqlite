@@ -32,10 +32,10 @@ async def test_create_table():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
-        # If no exception is raised, test passes
-        assert os.path.exists(test_db), "Database file should exist"
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+            # If no exception is raised, test passes
+            assert os.path.exists(test_db), "Database file should exist"
     finally:
         cleanup_db(test_db)
 
@@ -47,16 +47,16 @@ async def test_insert_data():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute(
-            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)"
-        )
-        await conn.execute(
-            "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')"
-        )
-        await conn.execute(
-            "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')"
-        )
+        async with connect(test_db) as conn:
+            await conn.execute(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)"
+            )
+            await conn.execute(
+                "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')"
+            )
+            await conn.execute(
+                "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')"
+            )
     finally:
         cleanup_db(test_db)
 
@@ -68,20 +68,20 @@ async def test_fetch_all():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute(
-            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)"
-        )
-        await conn.execute(
-            "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')"
-        )
-        await conn.execute(
-            "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')"
-        )
+        async with connect(test_db) as conn:
+            await conn.execute(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)"
+            )
+            await conn.execute(
+                "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')"
+            )
+            await conn.execute(
+                "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')"
+            )
 
-        rows = await conn.fetch_all("SELECT * FROM users")
-        assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
-        assert len(rows[0]) == 3, f"Expected 3 columns, got {len(rows[0])}"
+            rows = await conn.fetch_all("SELECT * FROM users")
+            assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
+            assert len(rows[0]) == 3, f"Expected 3 columns, got {len(rows[0])}"
     finally:
         cleanup_db(test_db)
 
@@ -93,20 +93,20 @@ async def test_fetch_all_with_filter():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute(
-            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)"
-        )
-        await conn.execute(
-            "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')"
-        )
-        await conn.execute(
-            "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')"
-        )
+        async with connect(test_db) as conn:
+            await conn.execute(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)"
+            )
+            await conn.execute(
+                "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')"
+            )
+            await conn.execute(
+                "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')"
+            )
 
-        rows = await conn.fetch_all("SELECT * FROM users WHERE name = 'Alice'")
-        assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
-        assert rows[0][1] == "Alice", f"Expected name 'Alice', got '{rows[0][1]}'"
+            rows = await conn.fetch_all("SELECT * FROM users WHERE name = 'Alice'")
+            assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
+            assert rows[0][1] == "Alice", f"Expected name 'Alice', got '{rows[0][1]}'"
     finally:
         cleanup_db(test_db)
 
@@ -118,25 +118,25 @@ async def test_multiple_operations():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        # Create table
-        await conn.execute("CREATE TABLE data (id INTEGER PRIMARY KEY, value INTEGER)")
+        async with connect(test_db) as conn:
+            # Create table
+            await conn.execute("CREATE TABLE data (id INTEGER PRIMARY KEY, value INTEGER)")
 
-        # Insert multiple rows
-        for i in range(5):
-            await conn.execute(f"INSERT INTO data (value) VALUES ({i})")
+            # Insert multiple rows
+            for i in range(5):
+                await conn.execute(f"INSERT INTO data (value) VALUES ({i})")
 
-        # Fetch all
-        rows = await conn.fetch_all("SELECT * FROM data")
-        assert len(rows) == 5, f"Expected 5 rows, got {len(rows)}"
+            # Fetch all
+            rows = await conn.fetch_all("SELECT * FROM data")
+            assert len(rows) == 5, f"Expected 5 rows, got {len(rows)}"
 
-        # Update
-        await conn.execute("UPDATE data SET value = 100 WHERE id = 1")
+            # Update
+            await conn.execute("UPDATE data SET value = 100 WHERE id = 1")
 
-        # Fetch updated row
-        rows = await conn.fetch_all("SELECT * FROM data WHERE id = 1")
-        assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
-        assert rows[0][1] == 100, f"Expected value 100, got '{rows[0][1]}'"
+            # Fetch updated row
+            rows = await conn.fetch_all("SELECT * FROM data WHERE id = 1")
+            assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
+            assert rows[0][1] == 100, f"Expected value 100, got '{rows[0][1]}'"
     finally:
         cleanup_db(test_db)
 
@@ -148,11 +148,11 @@ async def test_empty_result():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE empty (id INTEGER PRIMARY KEY, name TEXT)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE empty (id INTEGER PRIMARY KEY, name TEXT)")
 
-        rows = await conn.fetch_all("SELECT * FROM empty")
-        assert len(rows) == 0, f"Expected 0 rows, got {len(rows)}"
+            rows = await conn.fetch_all("SELECT * FROM empty")
+            assert len(rows) == 0, f"Expected 0 rows, got {len(rows)}"
     finally:
         cleanup_db(test_db)
 
@@ -165,14 +165,14 @@ async def test_type_integer():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
-        await conn.execute("INSERT INTO test (value) VALUES (42)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute("INSERT INTO test (value) VALUES (42)")
 
-        rows = await conn.fetch_all("SELECT * FROM test")
-        assert len(rows) == 1
-        assert isinstance(rows[0][1], int), f"Expected int, got {type(rows[0][1])}"
-        assert rows[0][1] == 42
+            rows = await conn.fetch_all("SELECT * FROM test")
+            assert len(rows) == 1
+            assert isinstance(rows[0][1], int), f"Expected int, got {type(rows[0][1])}"
+            assert rows[0][1] == 42
     finally:
         cleanup_db(test_db)
 
@@ -184,14 +184,14 @@ async def test_type_real():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value REAL)")
-        await conn.execute("INSERT INTO test (value) VALUES (3.14)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value REAL)")
+            await conn.execute("INSERT INTO test (value) VALUES (3.14)")
 
-        rows = await conn.fetch_all("SELECT * FROM test")
-        assert len(rows) == 1
-        assert isinstance(rows[0][1], float), f"Expected float, got {type(rows[0][1])}"
-        assert abs(rows[0][1] - 3.14) < 0.001
+            rows = await conn.fetch_all("SELECT * FROM test")
+            assert len(rows) == 1
+            assert isinstance(rows[0][1], float), f"Expected float, got {type(rows[0][1])}"
+            assert abs(rows[0][1] - 3.14) < 0.001
     finally:
         cleanup_db(test_db)
 
@@ -203,14 +203,14 @@ async def test_type_text():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
-        await conn.execute("INSERT INTO test (value) VALUES ('hello')")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
+            await conn.execute("INSERT INTO test (value) VALUES ('hello')")
 
-        rows = await conn.fetch_all("SELECT * FROM test")
-        assert len(rows) == 1
-        assert isinstance(rows[0][1], str), f"Expected str, got {type(rows[0][1])}"
-        assert rows[0][1] == "hello"
+            rows = await conn.fetch_all("SELECT * FROM test")
+            assert len(rows) == 1
+            assert isinstance(rows[0][1], str), f"Expected str, got {type(rows[0][1])}"
+            assert rows[0][1] == "hello"
     finally:
         cleanup_db(test_db)
 
@@ -222,13 +222,13 @@ async def test_type_null():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
-        await conn.execute("INSERT INTO test (value) VALUES (NULL)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
+            await conn.execute("INSERT INTO test (value) VALUES (NULL)")
 
-        rows = await conn.fetch_all("SELECT * FROM test")
-        assert len(rows) == 1
-        assert rows[0][1] is None, f"Expected None, got {rows[0][1]}"
+            rows = await conn.fetch_all("SELECT * FROM test")
+            assert len(rows) == 1
+            assert rows[0][1] is None, f"Expected None, got {rows[0][1]}"
     finally:
         cleanup_db(test_db)
 
@@ -241,16 +241,16 @@ async def test_transaction_commit():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
 
-        await conn.begin()
-        await conn.execute("INSERT INTO test (value) VALUES (1)")
-        await conn.execute("INSERT INTO test (value) VALUES (2)")
-        await conn.commit()
+            await conn.begin()
+            await conn.execute("INSERT INTO test (value) VALUES (1)")
+            await conn.execute("INSERT INTO test (value) VALUES (2)")
+            await conn.commit()
 
-        rows = await conn.fetch_all("SELECT * FROM test")
-        assert len(rows) == 2
+            rows = await conn.fetch_all("SELECT * FROM test")
+            assert len(rows) == 2
     finally:
         cleanup_db(test_db)
 
@@ -262,15 +262,15 @@ async def test_transaction_rollback():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
 
-        await conn.begin()
-        await conn.execute("INSERT INTO test (value) VALUES (1)")
-        await conn.rollback()
+            await conn.begin()
+            await conn.execute("INSERT INTO test (value) VALUES (1)")
+            await conn.rollback()
 
-        rows = await conn.fetch_all("SELECT * FROM test")
-        assert len(rows) == 0
+            rows = await conn.fetch_all("SELECT * FROM test")
+            assert len(rows) == 0
     finally:
         cleanup_db(test_db)
 
@@ -330,13 +330,13 @@ async def test_fetch_one():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
-        await conn.execute("INSERT INTO test (value) VALUES (42)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute("INSERT INTO test (value) VALUES (42)")
 
-        row = await conn.fetch_one("SELECT * FROM test WHERE id = 1")
-        assert len(row) == 2
-        assert row[1] == 42
+            row = await conn.fetch_one("SELECT * FROM test WHERE id = 1")
+            assert len(row) == 2
+            assert row[1] == 42
     finally:
         cleanup_db(test_db)
 
@@ -348,18 +348,18 @@ async def test_fetch_optional():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
 
-        # Test with no rows
-        result = await conn.fetch_optional("SELECT * FROM test WHERE id = 999")
-        assert result is None
+            # Test with no rows
+            result = await conn.fetch_optional("SELECT * FROM test WHERE id = 999")
+            assert result is None
 
-        # Test with one row
-        await conn.execute("INSERT INTO test (value) VALUES (42)")
-        result = await conn.fetch_optional("SELECT * FROM test WHERE id = 1")
-        assert result is not None
-        assert result[1] == 42
+            # Test with one row
+            await conn.execute("INSERT INTO test (value) VALUES (42)")
+            result = await conn.fetch_optional("SELECT * FROM test WHERE id = 1")
+            assert result is not None
+            assert result[1] == 42
     finally:
         cleanup_db(test_db)
 
@@ -371,12 +371,12 @@ async def test_last_insert_rowid():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
-        await conn.execute("INSERT INTO test (value) VALUES (42)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute("INSERT INTO test (value) VALUES (42)")
 
-        rowid = await conn.last_insert_rowid()
-        assert rowid == 1
+            rowid = await conn.last_insert_rowid()
+            assert rowid == 1
     finally:
         cleanup_db(test_db)
 
@@ -388,14 +388,14 @@ async def test_changes():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
-        await conn.execute("INSERT INTO test (value) VALUES (1)")
-        await conn.execute("INSERT INTO test (value) VALUES (2)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute("INSERT INTO test (value) VALUES (1)")
+            await conn.execute("INSERT INTO test (value) VALUES (2)")
 
-        await conn.execute("UPDATE test SET value = 99 WHERE id = 1")
-        changes = await conn.changes()
-        assert changes == 1
+            await conn.execute("UPDATE test SET value = 99 WHERE id = 1")
+            changes = await conn.changes()
+            assert changes == 1
     finally:
         cleanup_db(test_db)
 
@@ -408,14 +408,14 @@ async def test_cursor_execute():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
 
-        cursor = conn.cursor()
-        await cursor.execute("INSERT INTO test (value) VALUES (42)")
+            cursor = conn.cursor()
+            await cursor.execute("INSERT INTO test (value) VALUES (42)")
 
-        rows = await conn.fetch_all("SELECT * FROM test")
-        assert len(rows) == 1
+            rows = await conn.fetch_all("SELECT * FROM test")
+            assert len(rows) == 1
     finally:
         cleanup_db(test_db)
 
@@ -427,15 +427,15 @@ async def test_cursor_fetchone():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
-        await conn.execute("INSERT INTO test (value) VALUES (42)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute("INSERT INTO test (value) VALUES (42)")
 
-        cursor = conn.cursor()
-        await cursor.execute("SELECT * FROM test WHERE id = 1")
-        row = await cursor.fetchone()
-        assert row is not None
-        assert row[1] == 42
+            cursor = conn.cursor()
+            await cursor.execute("SELECT * FROM test WHERE id = 1")
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[1] == 42
     finally:
         cleanup_db(test_db)
 
@@ -447,27 +447,28 @@ async def test_cursor_fetchall():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
-        await conn.execute("INSERT INTO test (value) VALUES (1)")
-        await conn.execute("INSERT INTO test (value) VALUES (2)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute("INSERT INTO test (value) VALUES (1)")
+            await conn.execute("INSERT INTO test (value) VALUES (2)")
 
-        cursor = conn.cursor()
-        await cursor.execute("SELECT * FROM test")
-        rows = await cursor.fetchall()
-        assert len(rows) == 2
+            cursor = conn.cursor()
+            await cursor.execute("SELECT * FROM test")
+            rows = await cursor.fetchall()
+            assert len(rows) == 2
     finally:
         cleanup_db(test_db)
 
-    @pytest.mark.asyncio
-    async def test_cursor_fetchmany():
-        """Test cursor fetchmany method."""
-        # Phase 2: fetchmany now supports size-based slicing
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            test_db = f.name
 
-        try:
-            conn = Connection(test_db)
+@pytest.mark.asyncio
+async def test_cursor_fetchmany():
+    """Test cursor fetchmany method."""
+    # Phase 2: fetchmany now supports size-based slicing
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        test_db = f.name
+
+    try:
+        async with connect(test_db) as conn:
             await conn.execute(
                 "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
             )
@@ -489,8 +490,8 @@ async def test_cursor_fetchall():
             # Third call should return empty list
             rows = await cursor.fetchmany(2)
             assert len(rows) == 0
-        finally:
-            cleanup_db(test_db)
+    finally:
+        cleanup_db(test_db)
 
 
 # Context manager tests
@@ -508,9 +509,9 @@ async def test_connection_context_manager():
             await conn.execute("INSERT INTO test (value) VALUES (42)")
 
         # Connection should be closed, but we can still verify the data was written
-        conn2 = Connection(test_db)
-        rows = await conn2.fetch_all("SELECT * FROM test")
-        assert len(rows) == 1
+        async with connect(test_db) as conn2:
+            rows = await conn2.fetch_all("SELECT * FROM test")
+            assert len(rows) == 1
     finally:
         cleanup_db(test_db)
 
@@ -522,14 +523,14 @@ async def test_cursor_context_manager():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+        async with connect(test_db) as conn:
+            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
 
-        async with conn.cursor() as cursor:
-            await cursor.execute("INSERT INTO test (value) VALUES (42)")
+            async with conn.cursor() as cursor:
+                await cursor.execute("INSERT INTO test (value) VALUES (42)")
 
-        rows = await conn.fetch_all("SELECT * FROM test")
-        assert len(rows) == 1
+            rows = await conn.fetch_all("SELECT * FROM test")
+            assert len(rows) == 1
     finally:
         cleanup_db(test_db)
 
@@ -564,15 +565,15 @@ async def test_integrity_error():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        await conn.execute(
-            "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER UNIQUE)"
-        )
-        await conn.execute("INSERT INTO test (value) VALUES (42)")
-
-        # Try to insert duplicate value
-        with pytest.raises(Exception):  # Should raise IntegrityError
+        async with connect(test_db) as conn:
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER UNIQUE)"
+            )
             await conn.execute("INSERT INTO test (value) VALUES (42)")
+
+            # Try to insert duplicate value
+            with pytest.raises(Exception):  # Should raise IntegrityError
+                await conn.execute("INSERT INTO test (value) VALUES (42)")
     finally:
         cleanup_db(test_db)
 
@@ -584,8 +585,8 @@ async def test_programming_error():
         test_db = f.name
 
     try:
-        conn = Connection(test_db)
-        with pytest.raises(Exception):  # Should raise ProgrammingError or DatabaseError
-            await conn.execute("INVALID SQL STATEMENT")
+        async with connect(test_db) as conn:
+            with pytest.raises(Exception):  # Should raise ProgrammingError or DatabaseError
+                await conn.execute("INVALID SQL STATEMENT")
     finally:
         cleanup_db(test_db)

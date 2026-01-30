@@ -19,7 +19,7 @@ cd rapsqlite
 
 3. Install development dependencies (use the same Python you will use for build and tests):
 ```bash
-python -m pip install maturin pytest pytest-asyncio pytest-cov pytest-xdist hypothesis
+python -m pip install maturin pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout hypothesis
 ```
 
 4. Build the package in development mode:
