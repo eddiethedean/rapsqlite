@@ -11,19 +11,19 @@ use sqlx::{Column, Row, SqlitePool};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{
     sqlite3, sqlite3_backup_finish, sqlite3_backup_init, sqlite3_backup_pagecount,
-    sqlite3_backup_remaining, sqlite3_backup_step, sqlite3_context, sqlite3_create_function_v2,
-    sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg, sqlite3_free,
-    sqlite3_get_autocommit, sqlite3_libversion, sqlite3_load_extension, sqlite3_progress_handler,
-    sqlite3_result_null, sqlite3_set_authorizer, sqlite3_total_changes, sqlite3_trace_v2,
-    sqlite3_user_data, sqlite3_value, SQLITE_BUSY, SQLITE_DENY, SQLITE_DONE, SQLITE_LOCKED,
-    sqlite3_interrupt, sqlite3_libversion_number, SQLITE_OK, SQLITE_TRACE_STMT, SQLITE_UTF8,
-    SQLITE_DETERMINISTIC,
+    sqlite3_backup_remaining, sqlite3_backup_step, sqlite3_busy_timeout, sqlite3_context,
+    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg,
+    sqlite3_free, sqlite3_get_autocommit, sqlite3_libversion, sqlite3_load_extension,
+    sqlite3_progress_handler, sqlite3_result_null, sqlite3_set_authorizer, sqlite3_total_changes,
+    sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_BUSY, SQLITE_DENY, SQLITE_DONE,
+    SQLITE_LOCKED, sqlite3_interrupt, sqlite3_libversion_number, SQLITE_OK, SQLITE_TRACE_STMT,
+    SQLITE_UTF8, SQLITE_DETERMINISTIC,
 };
 
 use crate::conversion::{py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py};
@@ -248,6 +248,11 @@ impl Connection {
             explicit_transaction: Arc::new(Mutex::new(false)),
             closed: Arc::new(StdMutex::new(false)),
         })
+    }
+
+    #[getter(path)]
+    fn path(&self) -> &str {
+        &self.path
     }
 
     #[getter(row_factory)]
@@ -5682,10 +5687,6 @@ impl Connection {
                             .to_string()
                     };
 
-                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                        OperationalError::new_err(format!("Invalid database name: {e}"))
-                    })?;
-
                     // SQLite backup requires destination to not have active transactions.
                     // Safety: target_handle.0 is a valid sqlite3* pointer obtained from
                     // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
@@ -5699,11 +5700,22 @@ impl Connection {
                         ));
                     }
 
-                    // Initialize backup.
-                    // Safety: target_handle.0 and source_handle.0 are valid sqlite3* pointers
-                    // obtained from lock_handle().as_raw_handle().as_ptr() and are guaranteed
-                    // to be valid for the lifetime of the handle locks. name_cstr is a valid
-                    // CString. sqlite3_backup_init returns a backup handle or null on error.
+                    // Set busy timeout on source and target so SQLite retries internally before returning BUSY.
+                    let backup_busy_timeout_secs: u64 = connection_timeout_secs
+                        .lock()
+                        .unwrap()
+                        .unwrap_or(5)
+                        .max(5)
+                        .min(120);
+                    let timeout_ms: std::ffi::c_int = (backup_busy_timeout_secs * 1000) as std::ffi::c_int;
+                    unsafe {
+                        sqlite3_busy_timeout(source_handle.0, timeout_ms);
+                        sqlite3_busy_timeout(target_handle.0, timeout_ms);
+                    }
+
+                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                        OperationalError::new_err(format!("Invalid database name: {e}"))
+                    })?;
                     let backup_handle: SendPtr<libsqlite3_sys::sqlite3_backup> = SendPtr(unsafe {
                         sqlite3_backup_init(
                             target_handle.0,
@@ -5714,22 +5726,17 @@ impl Connection {
                     });
 
                     if backup_handle.0.is_null() {
-                        // Safety: target_handle.0 is a valid sqlite3* pointer. sqlite3_errcode
-                        // and sqlite3_errmsg are read-only operations that return error information.
                         let error_code = unsafe { sqlite3_errcode(target_handle.0) };
                         let error_msg = unsafe {
                             let msg_ptr = sqlite3_errmsg(target_handle.0);
                             if msg_ptr.is_null() {
                                 "Unknown error (null error message)".to_string()
                             } else {
-                                // Safety: msg_ptr is a pointer to a static C string returned
-                                // by sqlite3_errmsg, valid until the next SQLite API call.
                                 cstr_from_c_char_ptr(msg_ptr as *const std::ffi::c_char)
                                     .to_string_lossy()
                                     .to_string()
                             }
                         };
-
                         return Err(OperationalError::new_err(format!(
                             "Failed to initialize backup: SQLite error code {error_code}, message: '{error_msg}'. \
                             Source libversion: {source_libversion}. \
@@ -5737,24 +5744,31 @@ impl Connection {
                         )));
                     }
 
-                    // Backup loop.
+                    let backup_start = Instant::now();
                     loop {
                         let pages_to_copy = if pages == 0 { -1 } else { pages };
-                        // Safety: backup_handle.0 is a valid sqlite3_backup* pointer returned
-                        // by sqlite3_backup_init. It remains valid until sqlite3_backup_finish
-                        // is called. sqlite3_backup_step is thread-safe for the backup handle.
                         let step_result = unsafe { sqlite3_backup_step(backup_handle.0, pages_to_copy) };
 
                         match step_result {
                             SQLITE_OK | SQLITE_BUSY | SQLITE_LOCKED => {
+                                if step_result == SQLITE_BUSY || step_result == SQLITE_LOCKED {
+                                    if backup_start.elapsed()
+                                        > Duration::from_secs(backup_busy_timeout_secs)
+                                    {
+                                        unsafe {
+                                            sqlite3_backup_finish(backup_handle.0);
+                                        }
+                                        return Err(OperationalError::new_err(format!(
+                                            "Backup timed out: database busy or locked after {} seconds",
+                                            backup_busy_timeout_secs
+                                        )));
+                                    }
+                                }
+
                                 if let Some(ref progress_cb) = progress_callback {
-                                    // Safety: backup_handle.0 is a valid sqlite3_backup* pointer.
-                                    // sqlite3_backup_remaining and sqlite3_backup_pagecount are
-                                    // read-only operations that return backup progress information.
                                     let remaining = unsafe { sqlite3_backup_remaining(backup_handle.0) };
                                     let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
                                     let pages_copied = page_count - remaining;
-
                                     #[allow(deprecated)]
                                     Python::with_gil(|py| {
                                         let callback = progress_cb.bind(py);
@@ -5773,14 +5787,33 @@ impl Connection {
                                     });
                                 }
 
-                                tokio::time::sleep(Duration::from_secs_f64(sleep)).await;
+                                if step_result == SQLITE_BUSY || step_result == SQLITE_LOCKED {
+                                    tokio::time::sleep(Duration::from_secs_f64(sleep)).await;
+                                }
                             }
-                            SQLITE_DONE => break,
+                            SQLITE_DONE => {
+                                if let Some(ref progress_cb) = progress_callback {
+                                    let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
+                                    #[allow(deprecated)]
+                                    Python::with_gil(|py| {
+                                        let callback = progress_cb.bind(py);
+                                        let remaining_py: Py<PyAny> =
+                                            PyInt::new(py, 0i64).into_any().unbind();
+                                        let page_count_py: Py<PyAny> =
+                                            PyInt::new(py, page_count as i64).into_any().unbind();
+                                        let pages_copied_py: Py<PyAny> =
+                                            PyInt::new(py, page_count as i64).into_any().unbind();
+                                        if let Ok(args) = PyTuple::new(
+                                            py,
+                                            &[remaining_py, page_count_py, pages_copied_py],
+                                        ) {
+                                            let _ = callback.call1(args);
+                                        }
+                                    });
+                                }
+                                break;
+                            }
                             _ => {
-                                // Safety: backup_handle.0 is a valid sqlite3_backup* pointer.
-                                // sqlite3_backup_finish must be called to clean up the backup
-                                // handle, even on error. After this call, backup_handle.0 is
-                                // no longer valid.
                                 unsafe {
                                     sqlite3_backup_finish(backup_handle.0);
                                 }
@@ -5791,9 +5824,6 @@ impl Connection {
                         }
                     }
 
-                    // Safety: backup_handle.0 is a valid sqlite3_backup* pointer.
-                    // sqlite3_backup_finish must be called to clean up the backup handle.
-                    // After this call, backup_handle.0 is no longer valid.
                     let final_result = unsafe { sqlite3_backup_finish(backup_handle.0) };
                     if final_result != SQLITE_OK {
                         return Err(OperationalError::new_err(format!(

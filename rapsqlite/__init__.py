@@ -47,6 +47,7 @@ Example:
                 await conn.rollback()
 """
 
+import asyncio
 from typing import Any, List, Optional
 
 import builtins as _builtins
@@ -64,6 +65,32 @@ except ImportError:  # pragma: no cover - fallback for editable installs/alt lay
 
 # Re-export symbols from the extension module.
 Connection = _ext.Connection
+
+
+def _connection_del(self: "Connection") -> None:  # type: ignore[valid-type]
+    """Best-effort: schedule close() on the running event loop to avoid Tokio panic during GC.
+
+    If a Connection is dropped without close(), Python GC can drop the Rust object;
+    sqlx's PoolConnection::Drop then calls Tokio spawn, which panics when no runtime
+    is current. Scheduling close() here (when a loop exists) runs cleanup under Tokio.
+    This is best-effort only; always use async with or await conn.close().
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    try:
+        def _schedule_close() -> None:
+            try:
+                asyncio.create_task(self.close())  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        loop.call_soon_threadsafe(_schedule_close)
+    except Exception:
+        pass
+
+
+Connection.__del__ = _connection_del  # type: ignore[assignment]
 Cursor = _ext.Cursor
 Error = _ext.Error
 Warning = _ext.Warning
@@ -397,15 +424,22 @@ async def _backup(
 
     # sqlite3.Connection target: use file-based backup via sqlite3 API.
     if isinstance(target, sqlite3.Connection):
-        # Ensure we are working with a file-backed database.
-        rows = await self.fetch_all("PRAGMA database_list")  # type: ignore[attr-defined]
-        main_row = next((row for row in rows if row[1] == "main"), None)
-        if not main_row or not main_row[2]:
-            raise OperationalError(
-                "backup to sqlite3.Connection is only supported for file-backed "
-                "databases (got in-memory or unsupported URI)."
-            )
-        db_filename = main_row[2]
+        import os
+
+        # Get file path: prefer Connection.path (same file we opened), fallback to PRAGMA.
+        conn_path = getattr(self, "path", None)
+        if conn_path and conn_path != ":memory:" and (conn_path.strip() or "") != "":
+            db_filename = os.path.abspath(conn_path)
+        else:
+            rows = await self.fetch_all("PRAGMA database_list")  # type: ignore[attr-defined]
+            main_row = next((row for row in rows if row[1] == "main"), None)
+            if not main_row or not main_row[2]:
+                raise OperationalError(
+                    "backup to sqlite3.Connection is only supported for file-backed "
+                    "databases (got in-memory or unsupported URI)."
+                )
+            db_filename = main_row[2]
+            db_filename = os.path.abspath(db_filename)
 
         # Best-effort flush of WAL to ensure committed state is visible on disk.
         try:
@@ -421,8 +455,9 @@ async def _backup(
                 "Cannot backup to sqlite3.Connection while it has an active transaction."
             )
 
-        # Open a temporary sqlite3.Connection to the same file and delegate the
-        # actual copy to sqlite3's own backup implementation.
+        # Open a temporary sqlite3.Connection to the same file and run backup in the
+        # same thread (sqlite3 connections must be used in the thread that created them;
+        # target was created by the caller so we run backup here).
         source_sqlite3 = sqlite3.connect(db_filename)
         try:
             source_sqlite3.backup(

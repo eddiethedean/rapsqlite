@@ -77,6 +77,9 @@
 - ✅ Input validation on all user-provided paths
 - ✅ Enhanced error handling with operation context
 
+### Resource Cleanup
+- Always use ``async with connect(...) as conn:`` or explicitly ``await conn.close()``. Abandoning a connection without closing it can cause a panic during Python GC (``this functionality requires a Tokio context``) because the underlying pool cleanup requires a Tokio runtime. See ``docs/reference/tokio-panic-investigation.md`` for details.
+
 ### Dependency Management
 - 🔄 Regular security audits recommended via `cargo audit`
 - 🔄 Monitor for dependency updates

@@ -7,6 +7,7 @@ Table of Contents
 -----------------
 
 * :ref:`connection-pooling`
+* :ref:`resource-cleanup`
 * :ref:`transaction-patterns`
 * :ref:`error-handling-strategies`
 * :ref:`performance-tuning`
@@ -47,6 +48,21 @@ Pool Size Guidelines
 * **Large (10+)**: Only for high-concurrency scenarios, be mindful of SQLite's write serialization
 
 **Note**: SQLite serializes writes, so increasing pool size mainly helps with concurrent reads.
+
+.. _resource-cleanup:
+
+Resource Cleanup and Connection Lifetime
+-----------------------------------------
+
+Always close connections under async control (Option A): use ``async with connect(...) as conn:`` or explicitly ``await conn.close()``. Do not rely on garbage collection to close connections.
+
+If a ``Connection`` is dropped without calling ``close()`` (e.g. you keep no reference and never use ``async with``), Python's garbage collector may eventually drop the Rust connection object. The underlying sqlx pool then tries to return connections using Tokio's spawn, but **no Tokio runtime is active during GC**, which can cause a panic: ``this functionality requires a Tokio context``. To avoid this:
+
+* **Use ``async with``**: Preferred. The context manager calls ``close()`` when exiting, so the pool is closed under Tokio.
+* **Call ``close()`` explicitly**: If you cannot use a context manager, call ``await conn.close()`` when done.
+* **Best-effort ``__del__``**: The Python wrapper schedules ``close()`` on the running event loop when the connection is GC'd, if a loop exists. This is best-effort only (no guarantees about finalizer order or loop lifetime) and does not replace ``async with`` or explicit ``close()``.
+
+See ``docs/reference/tokio-panic-investigation.md`` in the source tree for technical details and reproduction steps.
 
 .. _transaction-patterns:
 

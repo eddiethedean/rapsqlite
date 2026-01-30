@@ -1204,49 +1204,47 @@ async def test_backup_with_pages_and_progress(test_db_file):
                 "INSERT INTO test (name) VALUES (?)", [f"name_{i}"]
             )
 
-        target_path = test_db_file + ".backup_pages"
-        if os.path.exists(target_path):
-            os.remove(target_path)
-        # Ensure file exists so platforms/filesystems that expect it are happy
-        with open(target_path, "w"):
-            pass
-
-        target_conn = rapsqlite.Connection(target_path)
-
-        def progress(remaining, page_count, pages_copied):
-            progress_calls.append((remaining, page_count, pages_copied))
-
-        try:
-            await source_conn.backup(target_conn, pages=1, progress=progress)
-            rows = await target_conn.fetch_all("SELECT COUNT(*) FROM test")
-            assert rows[0][0] == 10
-        finally:
-            await target_conn.close()
-            if os.path.exists(target_path):
-                os.remove(target_path)
-
-    # We expect progress to have been reported at least once for a paged backup
-    assert len(progress_calls) >= 1
-
-    # Create empty target database file first
+    target_path = test_db_file + ".backup_pages"
+    if os.path.exists(target_path):
+        os.remove(target_path)
     with open(target_path, "w"):
         pass
 
     target_conn = rapsqlite.Connection(target_path)
 
-    # Perform backup (source still has 10 rows)
-    await source_conn.backup(target_conn)
+    def progress(remaining, page_count, pages_copied):
+        progress_calls.append((remaining, page_count, pages_copied))
 
-    # Verify data in target (should have all 10 rows from source)
-    rows = await target_conn.fetch_all("SELECT * FROM test ORDER BY id")
-    assert len(rows) == 10
-    assert rows[0][1] == "name_0"
-    assert rows[9][1] == "name_9"
+    try:
+        # Use a fresh source connection for backup so the backup connection wasn't just used for writes.
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn, pages=1, progress=progress)
+        rows = await target_conn.fetch_all("SELECT COUNT(*) FROM test")
+        assert rows[0][0] == 10
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
-    await source_conn.close()
-    await target_conn.close()
+    # We expect progress to have been reported at least once for a paged backup
+    assert len(progress_calls) >= 1
 
-    # Cleanup
+    # Second backup: re-open source (previous source_conn was closed by async with)
+    # and backup again to the same target path to verify full backup path.
+    with open(target_path, "w"):
+        pass
+
+    target_conn = rapsqlite.Connection(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn)
+        rows = await target_conn.fetch_all("SELECT * FROM test ORDER BY id")
+        assert len(rows) == 10
+        assert rows[0][1] == "name_0"
+        assert rows[9][1] == "name_9"
+    finally:
+        await target_conn.close()
+
     if os.path.exists(target_path):
         os.remove(target_path)
 
@@ -1270,12 +1268,15 @@ async def test_backup_sqlite(test_db_file):
 
     target_conn = sqlite3.connect(target_path)
     try:
-        # Create source database with data and perform backup inside async with
+        # Create source database with data, then use a fresh connection for backup
+        # (same pattern as test_backup_with_pages_and_progress).
         async with rapsqlite.connect(test_db_file) as source_conn:
             await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
             await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
             await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
-            await source_conn.backup(target_conn)
+
+        async with rapsqlite.connect(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn)
 
         # Verify data in target
         cursor = target_conn.cursor()
