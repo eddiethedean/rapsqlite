@@ -51,6 +51,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ **SQLAlchemy dialect** — `sqlite+rapsqlite` via `rapsqlite.sqlalchemy`; optional `rapsqlite[sqlalchemy]`; `create_async_engine("sqlite+rapsqlite:///...")`
 - ✅ **Test isolation** — `unique_table_prefix` fixture; `xdist_group` for init_hook, concurrency, pool_exhaustion; CI uses `--timeout 90` and `--dist loadgroup`; optional test deps (`.[test]`) for FastAPI/SQLAlchemy tests
 - ✅ aiosqlite test suite runner; `tests/test_phase3_api.py` for Phase 3 APIs
+- ✅ **Session-connection reuse** — Each Connection reuses one pool connection for non-transaction, non-callback operations; released on `close()` and when starting a transaction. Concurrent Reads benchmark (10 workers × 2000 queries) wins vs aiosqlite; benchmarks/README.md updated with latest results.
 
 ---
 
@@ -99,6 +100,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Pool Management
 - ⏳ Dynamic pool sizing (scale up/down based on load)
+- ✅ **Session-connection reuse** — Each Connection holds one pool connection for non-transaction operations (`fetch_all`, `execute`, etc.); released on `close()` and when starting a transaction. Improves concurrent read performance (Concurrent Reads benchmark wins vs aiosqlite).
 - ✅ **`Connection.pool_health()`** — Minimal health check (`SELECT 1`); raises on failure
 - ✅ **Connection health and recovery** — Documented in advanced-usage (Monitoring): pool_health() for liveness; pool replaces failed connections on acquire; transient errors (e.g. SQLITE_BUSY) handled via retry.
 - ✅ **Idle connection management** — `idle_timeout` (seconds) via `connect(..., idle_timeout=N)` or `conn.idle_timeout = N`; pool closes idle connections after timeout; documented in advanced-usage and API reference.

@@ -36,6 +36,7 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 ### Changed
 
 - Version bump to **0.3.0-dev** — Phase 3 development (advanced features, ecosystem integration) toward v1.0.0.
+- **Performance — Session-connection reuse**: Each `Connection` now holds and reuses one pool connection for non-transaction, non-callback operations (e.g. `fetch_all`, `execute`, `total_changes`). The session connection is released on `close()` and when starting a transaction (`begin()` or `transaction()`), so transaction and callback paths are unchanged. This matches aiosqlite-style usage (one connection per worker for many queries) and improves concurrent read performance: the **Concurrent Reads** benchmark (10 workers × 2000 queries) now wins vs aiosqlite (~1206ms vs ~1439ms). Pool helpers: `ensure_session_connection`, `release_session_connection`.
 
 ### Added - Phase 3.9: API Completeness (aiosqlite compatibility)
 
@@ -69,6 +70,10 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - **`Cursor.close()`** — Async; clears cached results, description, lastrowid, rowcount.
 - **`Cursor.fetchmany(size=None)`** — `size` optional; uses `arraysize` when omitted.
 - **`Cursor.execute()` returns self** — When awaited, returns the same cursor for chaining (aiosqlite compat); implemented via `Connection.execute(..., cursor=self)`.
+
+### Added - Benchmarks
+
+- **`benchmarks/README.md`** — Updated with latest benchmark results (session-connection reuse; rapsqlite wins Concurrent Reads, High Concurrency Reads, Concurrent Batch Inserts, Mixed Workload at ×10 row scale).
 
 ### Added - Testing and tooling
 
