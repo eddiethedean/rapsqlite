@@ -120,6 +120,17 @@ impl Cursor {
         Ok(())
     }
 
+    /// Internal: store fetched SELECT results and description (eager execution from ExecuteContextManager).
+    fn _set_select_results(&self, rows: &Bound<'_, PyList>, description: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut vec = Vec::with_capacity(rows.len());
+        for item in rows.iter() {
+            vec.push(item.clone().unbind());
+        }
+        *self.results.lock().unwrap() = Some(vec);
+        *self.description.lock().unwrap() = Some(description.clone().unbind());
+        Ok(())
+    }
+
     #[getter(arraysize)]
     fn arraysize(&self) -> PyResult<usize> {
         Ok(*self.arraysize.lock().unwrap())
@@ -127,6 +138,18 @@ impl Cursor {
 
     #[setter(arraysize)]
     fn set_arraysize(&self, value: usize) -> PyResult<()> {
+        *self.arraysize.lock().unwrap() = value;
+        Ok(())
+    }
+
+    /// aiosqlite uses iter_chunk_size on cursor; same as arraysize.
+    #[getter(iter_chunk_size)]
+    fn iter_chunk_size(&self) -> PyResult<usize> {
+        Ok(*self.arraysize.lock().unwrap())
+    }
+
+    #[setter(iter_chunk_size)]
+    fn set_iter_chunk_size(&self, value: usize) -> PyResult<()> {
         *self.arraysize.lock().unwrap() = value;
         Ok(())
     }
@@ -1008,41 +1031,33 @@ impl Cursor {
         Ok(slf.into())
     }
 
-    /// Async iterator next item.
+    /// Async iterator next item. Returns an awaitable so ``async for row in cursor`` works.
     fn __anext__(&self) -> PyResult<Py<PyAny>> {
         let results = Arc::clone(&self.results);
         let current_index = Arc::clone(&self.current_index);
 
         Python::attach(|py| {
-            // Get the row value while holding GIL
-            let row_opt = {
+            let result: Result<Py<PyAny>, PyErr> = {
                 let results_guard = results.lock().unwrap();
                 let results_opt = results_guard.as_ref();
-
                 if results_opt.is_none() {
-                    return Err(ProgrammingError::new_err(
+                    Err(ProgrammingError::new_err(
                         "Cursor not executed. Call execute() first.",
-                    ));
+                    ))
+                } else {
+                    let results_vec = results_opt.unwrap();
+                    let mut index_guard = current_index.lock().unwrap();
+                    if *index_guard >= results_vec.len() {
+                        Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(""))
+                    } else {
+                        let row = results_vec[*index_guard].clone_ref(py);
+                        *index_guard += 1;
+                        Ok(row)
+                    }
                 }
-
-                let results_vec = results_opt.unwrap();
-                let mut index_guard = current_index.lock().unwrap();
-
-                if *index_guard >= results_vec.len() {
-                    // End of iteration - raise StopAsyncIteration
-                    return Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(""));
-                }
-
-                let row = results_vec[*index_guard].clone_ref(py);
-                *index_guard += 1;
-                Some(row)
             };
-
-            if let Some(row) = row_opt {
-                Ok(row)
-            } else {
-                Err(PyErr::new::<pyo3::exceptions::PyStopAsyncIteration, _>(""))
-            }
+            let future = async move { result };
+            future_into_py(py, future).map(|bound| bound.unbind())
         })
     }
 }

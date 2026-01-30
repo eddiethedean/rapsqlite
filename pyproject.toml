@@ -33,6 +33,9 @@ project-urls = [
 
 dependencies = []
 
+[project.optional-dependencies]
+sqlalchemy = ["sqlalchemy>=2.0"]
+
 [tool.maturin]
 module-name = "rapsqlite._rapsqlite"
 features = ["pyo3/extension-module"]

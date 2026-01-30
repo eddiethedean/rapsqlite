@@ -75,6 +75,35 @@ rapsqlite supports both async iteration and await-to-list:
 
 This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
 
+True Async DBAPI (SQLAlchemy-style)
+-----------------------------------
+
+rapsqlite implements a **True Async DBAPI 2.0** interface in ``rapsqlite.dbapi``, suitable for
+SQLAlchemy and other consumers that expect an async driver with no thread offloading.
+See ``docs/true_async_dbapi_spec.md`` for the contract.
+
+* ``apilevel = "2.0"``, ``threadsafety = 0``, ``paramstyle = "qmark"``
+* Full exception hierarchy (``Error``, ``InterfaceError``, ``DataError``, etc.)
+* ``async def connect(database, **kwargs) -> AsyncConnection``
+* ``AsyncConnection``: ``async cursor()``, ``async execute()``, ``executemany``, ``commit``, ``rollback``, ``close``
+* ``Cursor``: ``execute``, ``executemany``, ``fetchone``, ``fetchmany``, ``fetchall``, ``close``; ``description``, ``rowcount``, ``lastrowid``, ``arraysize``
+
+Use ``rapsqlite.dbapi`` when integrating with async frameworks that require a DBAPI-compliant module.
+
+SQLAlchemy
+~~~~~~~~~~
+
+A ``sqlite+rapsqlite`` dialect is provided. Install with ``pip install 'rapsqlite[sqlalchemy]'``, then:
+
+.. code-block:: python
+
+   import rapsqlite.sqlalchemy  # register dialect
+   from sqlalchemy.ext.asyncio import create_async_engine
+   engine = create_async_engine("sqlite+rapsqlite:///path.db")
+   # or sqlite+rapsqlite:///:memory:
+
+See ``docs/true_async_dbapi_spec.md`` for the full async DBAPI contract.
+
 Compatibility Summary
 ---------------------
 

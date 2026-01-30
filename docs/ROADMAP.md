@@ -294,7 +294,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ **`Connection.execute_insert(sql, parameters=None)`** — Execute INSERT/UPDATE/DELETE and return `last_insert_rowid()`; rejects SELECT
 
 #### Connection Control Methods
-- ✅ **`Connection.interrupt()`** — Stub only; raises `NotImplementedError` (full implementation deferred)
+- ✅ **`Connection.interrupt()`** — Interrupts callback connection when present; no-op otherwise
 - ⏳ `Connection.stop()` - Stop background thread (for API compatibility, though less relevant for rapsqlite's architecture)
 
 #### Connection Properties
@@ -329,14 +329,11 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Focus**: Enhanced type conversion and adapter support for custom types
 
 #### create_function() Enhancement
-- ⏳ `Connection.create_function(name, num_params, func, deterministic=False)` - Add `deterministic` parameter support
-- SQLite 3.8.3+ optimization flag that allows SQLite to perform additional optimizations
-- Should raise `NotSupportedError` if used with older SQLite versions
+- ✅ `Connection.create_function(name, num_params, func, deterministic=False)` - `deterministic` parameter; `NotSupportedError` on SQLite &lt; 3.8.3
 
 #### connect() Parameters
-- ⏳ `connect(iter_chunk_size=64)` - Parameter for controlling iteration chunk size
-- ⏳ `connect(loop=None)` - Event loop parameter (deprecated in aiosqlite but still exists for compatibility)
-- These parameters improve compatibility with existing aiosqlite code
+- ✅ `connect(iter_chunk_size=64)` - Stored; used for chunked iteration when applicable
+- ✅ `connect(loop=None)` - Accepted and ignored (deprecated in aiosqlite)
 
 #### Module-Level Type Registration Functions
 - ⏳ `rapsqlite.register_adapter(type, adapter)` - Register Python-to-SQLite type adapter

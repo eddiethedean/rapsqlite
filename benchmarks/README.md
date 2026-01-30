@@ -6,10 +6,10 @@ This directory contains performance benchmarks comparing `rapsqlite` with `aiosq
 
 ```bash
 # Install benchmark dependencies (optional, for comparison)
-pip install aiosqlite
+python -m pip install aiosqlite
 
-# Run benchmarks
-pytest benchmarks/benchmark_suite.py -v -s
+# Run benchmarks (use same Python as your rapsqlite build)
+python -m pytest benchmarks/benchmark_suite.py -v -s
 ```
 
 ## Benchmark Suite

@@ -72,6 +72,26 @@ OperationalError = _ext.OperationalError
 ProgrammingError = _ext.ProgrammingError
 IntegrityError = _ext.IntegrityError
 try:
+    InterfaceError = _ext.InterfaceError
+except AttributeError:  # pragma: no cover - compatibility with older wheels
+    class InterfaceError(Error):  # type: ignore[no-redef,misc]
+        pass
+try:
+    DataError = _ext.DataError
+except AttributeError:  # pragma: no cover - compatibility with older wheels
+    class DataError(DatabaseError):  # type: ignore[no-redef,misc]
+        pass
+try:
+    InternalError = _ext.InternalError
+except AttributeError:  # pragma: no cover - compatibility with older wheels
+    class InternalError(DatabaseError):  # type: ignore[no-redef,misc]
+        pass
+try:
+    NotSupportedError = _ext.NotSupportedError
+except AttributeError:  # pragma: no cover - compatibility with older wheels
+    class NotSupportedError(DatabaseError):  # type: ignore[no-redef,misc]
+        pass
+try:
     ValueError = _ext.ValueError
 except AttributeError:  # pragma: no cover - compatibility with older wheels
     # Fall back to the built-in ValueError so callers can still catch it.
@@ -97,16 +117,26 @@ __all__: List[str] = [
     "connect",
     "Error",
     "Warning",
+    "InterfaceError",
     "DatabaseError",
+    "DataError",
     "OperationalError",
-    "ProgrammingError",
     "IntegrityError",
+    "InternalError",
+    "ProgrammingError",
+    "NotSupportedError",
     "ValueError",
 ]
 
 
 def connect(
-    path: str, *, pragmas: Any = None, timeout: float = 5.0, **kwargs: Any
+    path: str,
+    *,
+    pragmas: Any = None,
+    timeout: float = 5.0,
+    iter_chunk_size: int = 64,
+    loop: Any = None,
+    **kwargs: Any,
 ) -> "Connection":  # type: ignore[valid-type]
     """Connect to a SQLite database.
 
@@ -127,6 +157,10 @@ def connect(
             another process/thread before raising an error. Default: 5.0 seconds.
             This sets SQLite's busy_timeout PRAGMA. Set to 0.0 to disable timeout.
             This matches aiosqlite and sqlite3's timeout parameter.
+        iter_chunk_size: Chunk size for iteration (e.g. fetchmany). Default 64.
+            Stored for use with cursor iteration; aiosqlite-compatible.
+        loop: Deprecated. Event loop (ignored). Accept-only for aiosqlite
+            compatibility.
         **kwargs: Additional arguments (currently ignored, reserved for future use)
 
     Returns:
@@ -184,7 +218,20 @@ def connect(
         :class:`Connection`: For more advanced connection options including
         initialization hooks.
     """
-    return Connection(path, pragmas=pragmas, timeout=timeout)  # type: ignore[no-any-return]
+    try:
+        return Connection(
+            path,
+            pragmas=pragmas,
+            timeout=timeout,
+            iter_chunk_size=iter_chunk_size,
+            loop_param=loop,
+        )  # type: ignore[no-any-return]
+    except TypeError as e:
+        err = str(e)
+        if "iter_chunk_size" in err or "loop_param" in err or "unexpected keyword argument" in err:
+            # Older _rapsqlite build without connect() params (e.g. wrong Python / stale wheel)
+            return Connection(path, pragmas=pragmas, timeout=timeout)  # type: ignore[no-any-return]
+        raise
 
 
 # -----------------------------------------------------------------------------
@@ -290,6 +337,9 @@ async def _pool_health(self: "Connection") -> bool:  # type: ignore[valid-type]
 
 
 Connection.pool_health = _pool_health  # type: ignore[attr-defined]
+
+# aiosqlite uses executemany; we expose execute_many. Alias for compat.
+Connection.executemany = Connection.execute_many  # type: ignore[attr-defined,assignment]
 
 
 def _connection_await(self: "Connection"):  # type: ignore[valid-type]

@@ -17,20 +17,22 @@ cd rapsqlite
    - **Windows**: Python headers are included with Python installations
    - **pyenv users**: Headers are included when installing Python versions via pyenv
 
-3. Install development dependencies:
+3. Install development dependencies (use the same Python you will use for build and tests):
 ```bash
-pip install maturin pytest pytest-asyncio pytest-cov pytest-xdist hypothesis
+python -m pip install maturin pytest pytest-asyncio pytest-cov pytest-xdist hypothesis
 ```
 
 4. Build the package in development mode:
 ```bash
-# Use maturin develop (recommended) - handles Python linking automatically
-maturin develop
+# Use the same Python for build and tests (required)
+python -m maturin develop
 
-# Or set PYO3_PYTHON environment variable if needed
-export PYO3_PYTHON=$(which python3)
-maturin develop
+# Or set PYO3_PYTHON explicitly if needed
+export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+python -m maturin develop
 ```
+
+**Python version alignment**: The extension is built for the Python used by `maturin develop`. Always run tests with **that same interpreter** (e.g. `python -m pytest tests/`). Using a different Python (e.g. pyenv 3.8 vs system 3.12) loads a different or missing wheel, causing Phase 3 tests to skip and compatibility fallbacks to activate. Use `scripts/dev_test.sh` to build and test with one Python.
 
 **Note**: Use `maturin develop` instead of `cargo build` for development, as maturin automatically handles Python library linking. If you need to use `cargo build` directly, ensure `PYO3_PYTHON` is set to your Python executable.
 
@@ -40,15 +42,17 @@ See [tests/README.md](tests/README.md) for detailed testing documentation.
 
 ### Quick Start
 ```bash
-# Run all tests
-pytest tests/
+# Run all tests (use same Python as build)
+python -m pytest tests/
 
 # Run tests in parallel
-pytest tests/ -n 10
+python -m pytest tests/ -n 10
 
 # Run with coverage
-pytest tests/ --cov=rapsqlite --cov-report=html
+python -m pytest tests/ --cov=rapsqlite --cov-report=html
 ```
+
+Or use the dev script: `./scripts/dev_test.sh` (builds then runs tests with one Python).
 
 ## Code Style
 
@@ -108,7 +112,7 @@ See [tests/README.md](tests/README.md) for more details.
 
 1. **Create a branch** from `main` or the appropriate feature branch
 2. **Write tests** for your changes
-3. **Ensure all tests pass**: `pytest tests/`
+3. **Ensure all tests pass**: `python -m pytest tests/` (same Python as build)
 4. **Run linting**: `ruff check .` and `cargo clippy`
 5. **Update documentation** if needed
 6. **Commit changes** with clear commit messages

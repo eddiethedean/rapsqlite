@@ -45,7 +45,17 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - **`Connection.pool_health()`** — Minimal health check (`SELECT 1`); returns `True` on success, raises on failure (Phase 3.2).
 - **`Connection.isolation_level`** getter/setter — Transaction isolation: `None` | `"DEFERRED"` | `"IMMEDIATE"` | `"EXCLUSIVE"`. Applied to `BEGIN` in `begin()` and `transaction()`.
 - **`Connection.__await__`** — Support `await conn` pattern (enter connection and return self).
-- **`Connection.interrupt()`** — Stub only; raises `NotImplementedError` when awaited (full implementation deferred).
+- **`Connection.interrupt()`** — Interrupts callback connection when present (UDFs, trace, etc.); no-op otherwise.
+- **`connect(..., iter_chunk_size=64, loop=None)`** — aiosqlite-compatible params; `iter_chunk_size` stored, `loop` accepted and ignored.
+- **`Connection.iter_chunk_size`** — Getter for stored chunk size.
+- **`Connection.create_function(..., deterministic=False)`** — Pass `SQLITE_DETERMINISTIC` when `deterministic=True` (SQLite 3.8.3+).
+- **`Connection.executemany`** — Alias for `execute_many` (aiosqlite compat).
+- **`Connection.savepoint(name=None)`** — Context manager for `SAVEPOINT` / `RELEASE` / `ROLLBACK TO`; requires active transaction.
+- **`Connection.pool_metrics()`** — Returns `{size, num_idle, in_use}` from the pool.
+- **`NotSupportedError`** — New exception (e.g. `deterministic=True` on SQLite &lt; 3.8.3).
+- **Implicit transactions** — First DML (INSERT/UPDATE/DELETE) without `begin()` starts a transaction; `commit()`/`rollback()` end it. DDL does not. `commit`/`rollback` with no transaction are no-ops. Context manager exit commits on success, rolls back on exception.
+- **`Cursor.iter_chunk_size`** — Alias for `arraysize` (aiosqlite compat).
+- **Examples** — `examples/async_basic.py`, `examples/fastapi_db.py`; `examples/README.md`. FastAPI smoke test in `tests/test_fastapi_example.py`.
 
 ### Added - Phase 3.9: Cursor properties and methods
 
@@ -59,8 +69,9 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 
 ### Added - Testing and tooling
 
-- **`tests/test_phase3_api.py`** — Tests for Phase 3.9 APIs (execute_fetchall, execute_insert, Cursor props, close, isolation_level, __await__, interrupt stub, explain_query_plan, pool_health).
-- **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; baseline documented in `docs/AIOSQLITE_TEST_RESULTS.md` (some failures remain, e.g. "No transaction in progress").
+- **`tests/test_phase3_api.py`** — Tests for Phase 3.9+ APIs (connect params, create_function deterministic, interrupt, savepoints, pool_metrics, etc.).
+- **`tests/test_fastapi_example.py`** — FastAPI + rapsqlite smoke test.
+- **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; see `docs/AIOSQLITE_TEST_RESULTS.md`. Transaction-related failures addressed (implicit transactions, commit-on-exit).
 
 ## [0.2.0] - 2026-01-26 (Updated 2026-01-28)
 

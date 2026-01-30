@@ -40,6 +40,7 @@ See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philo
 - ✅ **Row factories** (dict, tuple, callable, and `rapsqlite.Row` class)
 - ✅ **Advanced SQLite features** (callbacks, extensions, schema introspection, backup, dump)
 - ✅ **Database initialization hooks** (automatic schema setup)
+- ✅ **True Async DBAPI 2.0** (`rapsqlite.dbapi`) for SQLAlchemy-style async drivers
 
 ## Requirements
 
@@ -63,9 +64,11 @@ pip install rapsqlite
 ```bash
 git clone https://github.com/eddiethedean/rapsqlite.git
 cd rapsqlite
-pip install maturin
-maturin develop
+python -m pip install maturin
+python -m maturin develop
 ```
+
+When developing or running tests, use the **same** Python for both build and test (e.g. `python -m pytest tests/`). Using a different interpreter (e.g. pyenv 3.8 vs system 3.12) can cause version mismatches. See [CONTRIBUTING.md](CONTRIBUTING.md) and [tests/README.md](tests/README.md).
 
 **Note**: Python development headers are required for building. They're typically included with Python installations, but on some Linux distributions you may need to install `python3-dev` or `python3-devel` package. Use `maturin develop` instead of `cargo build` for development, as maturin automatically handles Python library linking.
 

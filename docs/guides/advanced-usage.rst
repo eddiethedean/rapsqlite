@@ -104,6 +104,22 @@ SQLite doesn't support true nested transactions, but you can use savepoints:
        except Exception:
            await conn.rollback()
 
+You can also use the ``savepoint()`` context manager for the same pattern:
+
+.. code-block:: python
+
+   async with connect("example.db") as conn:
+       await conn.begin()
+       try:
+           await conn.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
+           async with conn.savepoint("sp1"):
+               await conn.execute("INSERT INTO users (name) VALUES (?)", ["Bob"])
+           await conn.commit()
+       except Exception:
+           await conn.rollback()
+
+Use ``async with conn.savepoint():`` without a name to auto-generate one. Savepoints require an active transaction (``begin()`` or ``transaction()``).
+
 .. _error-handling-strategies:
 
 Error Handling Strategies

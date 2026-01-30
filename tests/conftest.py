@@ -1,10 +1,11 @@
 """Shared pytest fixtures and utilities for rapsqlite tests."""
 
+import hashlib
 import os
 import sys
 import tempfile
 import pytest
-from typing import Generator
+from typing import Any, AsyncGenerator, Generator
 
 # Windows-specific asyncio event loop policy fix
 # Windows uses ProactorEventLoop by default, which has known issues with pytest-asyncio
@@ -39,10 +40,7 @@ def cleanup_db(test_db: str) -> None:
 def test_db() -> Generator[str, None, None]:
     """Create a temporary database file for testing.
 
-    Yields:
-        Path to temporary database file
-
-    The database file is automatically cleaned up after the test.
+    Yields a unique path per test. The database file is cleaned up after the test.
     """
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
@@ -53,6 +51,17 @@ def test_db() -> Generator[str, None, None]:
 
 
 @pytest.fixture
+def unique_table_prefix(request) -> str:
+    """Unique table name per test to avoid cross-test collisions when running in parallel.
+
+    Use for all CREATE TABLE / INSERT / SELECT so tables never clash across workers.
+    Example: tbl = unique_table_prefix; conn.execute(f'CREATE TABLE {tbl} (a INT)').
+    """
+    h = hashlib.sha256(request.node.name.encode()).hexdigest()[:12]
+    return f"t_{h}"
+
+
+@pytest.fixture
 def test_db_memory() -> str:
     """Create an in-memory database for testing.
 
@@ -60,6 +69,27 @@ def test_db_memory() -> str:
         ":memory:" database path
     """
     return ":memory:"
+
+
+@pytest.fixture
+def dbapi_test_db(tmp_path):
+    """Isolated temp DB path for dbapi tests (unique per test, uses pytest tmp_path)."""
+    db_path = tmp_path / "dbapi_isolated.db"
+    yield str(db_path)
+    cleanup_db(str(db_path))
+
+
+@pytest.fixture
+async def dbapi_conn() -> AsyncGenerator[Any, None]:
+    """Isolated async DBAPI connection (:memory:). Guaranteed close after test."""
+    pytest.importorskip("rapsqlite")
+    from rapsqlite import dbapi
+
+    conn = await dbapi.connect(":memory:")
+    try:
+        yield conn
+    finally:
+        await conn.close()
 
 
 # Pytest markers for test categorization

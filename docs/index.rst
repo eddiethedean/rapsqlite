@@ -38,6 +38,11 @@ Python GIL**, ensuring event loops never stall under load.
 
    reference/roadmap
 
+Integration Examples
+--------------------
+
+See the `examples/ <https://github.com/eddiethedean/rapsqlite/blob/master/examples/README.md>`_ directory for minimal **FastAPI** and **async** usage patterns.
+
 Features
 --------
 
@@ -52,6 +57,7 @@ Features
 * ✅ **Row factories** (dict, tuple, callable, and `rapsqlite.Row` class)
 * ✅ **Advanced SQLite features** (callbacks, extensions, schema introspection, backup, dump)
 * ✅ **Database initialization hooks** (automatic schema setup)
+* ✅ **True Async DBAPI 2.0** (``rapsqlite.dbapi``) for SQLAlchemy-style async drivers
 
 Why ``rap*``?
 -------------

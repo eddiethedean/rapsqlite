@@ -8,13 +8,14 @@ Source: https://github.com/omnilib/aiosqlite/tree/main/aiosqlite/tests
 """
 
 import asyncio
+import inspect
 import os
 import pytest
 import sys
 import tempfile
 from pathlib import Path
 
-from rapsqlite import Connection, connect, OperationalError
+from rapsqlite import Connection, connect, OperationalError, Error
 
 
 def cleanup_db(test_db: str) -> None:
@@ -343,6 +344,30 @@ async def test_create_function(test_db):
         # Function should no longer work
         with pytest.raises(Exception):  # Should raise an error
             await db.fetch_one("SELECT test_func(value) FROM test")
+
+
+@pytest.mark.asyncio
+async def test_create_function_deterministic(test_db):
+    """Test create_function(..., deterministic=True) (Phase 3.10)."""
+    sig = inspect.signature(Connection.create_function)
+    if "deterministic" not in sig.parameters:
+        pytest.skip("create_function(deterministic=...) not supported by this build")
+    async with connect(test_db) as db:
+        def double(x):
+            return x * 2
+
+        await db.create_function("double_det", 1, double, deterministic=True)
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)")
+        await db.execute("INSERT INTO t (v) VALUES (7)")
+        row = await db.fetch_one("SELECT double_det(v) FROM t")
+        assert row[0] == 14
+        await db.create_function("double_det", 1, None)
+
+        # Default deterministic=False still works
+        await db.create_function("double_nd", 1, double)
+        row2 = await db.fetch_one("SELECT double_nd(v) FROM t")
+        assert row2[0] == 14
+        await db.create_function("double_nd", 1, None)
 
 
 @pytest.mark.asyncio

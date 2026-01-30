@@ -11,6 +11,14 @@ pub(crate) fn is_select_query(query: &str) -> bool {
     trimmed.starts_with("SELECT") || trimmed.starts_with("WITH")
 }
 
+/// True for INSERT/UPDATE/DELETE only. Used to avoid implicit transaction for DDL (CREATE, etc.).
+pub(crate) fn is_dml_query(query: &str) -> bool {
+    let trimmed = query.trim().to_uppercase();
+    trimmed.starts_with("INSERT")
+        || trimmed.starts_with("UPDATE")
+        || trimmed.starts_with("DELETE")
+}
+
 /// Normalize a SQL query by removing extra whitespace and standardizing formatting.
 /// This helps improve prepared statement cache hit rates by ensuring queries with
 /// different whitespace are treated as identical.

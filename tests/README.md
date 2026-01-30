@@ -39,6 +39,8 @@ Most tests exercise the compiled Rust extension, so install the package in edita
 python -m pip install -e .
 ```
 
+Use the **same** Python for both install and tests (`python -m pytest tests/`). Building with one interpreter and testing with another (e.g. pyenv 3.8 vs system 3.12) loads a different extension build; Phase 3 tests will skip and some compatibility fallbacks apply. See **Version alignment** below.
+
 On macOS, if you hit linker errors about missing Python symbols when building locally, use:
 
 ```bash
@@ -66,53 +68,65 @@ against `libpython` and can run standalone.
 
 ### Run All Tests
 ```bash
-pytest tests/
+python -m pytest tests/
 ```
+
+Use the same Python you used to install the package (`python -m pip install -e .` or `python -m maturin develop`). Alternatively, run `./scripts/dev_test.sh` to build and test with one interpreter.
 
 ### Recommended fast local run (matches PR CI defaults)
 ```bash
-pytest tests/ -m "not slow and not stress and not performance"
+python -m pytest tests/ -m "not slow and not stress and not performance"
 ```
 
 ### Run Tests in Parallel
 ```bash
-pytest tests/ -n 10
+python -m pytest tests/ -n 10
 ```
+
+Tests use unique table names per test (via the `unique_table_prefix` fixture) so parallel runs avoid table-name collisions. Use this fixture for any new tests that create tables.
 
 ### Run Specific Test Categories
 ```bash
 # Unit tests only
-pytest tests/ -m unit
+python -m pytest tests/ -m unit
 
 # Integration tests only
-pytest tests/ -m integration
+python -m pytest tests/ -m integration
 
 # Edge case tests
-pytest tests/ -m edge_case
+python -m pytest tests/ -m edge_case
 
 # Concurrency tests
-pytest tests/ -m concurrency
+python -m pytest tests/ -m concurrency
 
 # Stress tests (may be slow)
-pytest tests/ -m stress
+python -m pytest tests/ -m stress
 
 # Performance tests
-pytest tests/ -m performance
+python -m pytest tests/ -m performance
 
 # Property-based tests
-pytest tests/ -m property
+python -m pytest tests/ -m property
 
 # Skip slow tests
-pytest tests/ -m "not slow"
+python -m pytest tests/ -m "not slow"
 
 # Skip slow/stress/performance (fast default)
-pytest tests/ -m "not slow and not stress and not performance"
+python -m pytest tests/ -m "not slow and not stress and not performance"
 ```
 
 ### Run with Coverage
 ```bash
-pytest tests/ --cov=rapsqlite --cov-report=html
+python -m pytest tests/ --cov=rapsqlite --cov-report=html
 ```
+
+### Version alignment
+The Rust extension is built for a specific Python. Run tests with **that same** interpreter:
+
+- **Correct**: `python -m maturin develop` then `python -m pytest tests/` (same `python`).
+- **Incorrect**: building with `python3.12 -m maturin develop` but running `python3.8 -m pytest tests/` (e.g. different pyenv versions). The 3.8 run will load a different or missing wheel; Phase 3 API tests skip, and `connect(iter_chunk_size=...)` uses a fallback.
+
+Use `./scripts/dev_test.sh` to build and test with one Python consistently.
 
 ## Test Fixtures
 
@@ -200,7 +214,7 @@ async def test_error_handling(test_db):
 
 Current test coverage targets:
 - **Goal**: 80%+ coverage
-- **Current**: Run `pytest --cov=rapsqlite --cov-report=term-missing` to see current coverage
+- **Current**: Run `python -m pytest tests/ --cov=rapsqlite --cov-report=term-missing` to see current coverage
 
 ## Continuous Integration
 
@@ -218,7 +232,7 @@ Performance tests are marked with `@pytest.mark.performance` and `@pytest.mark.s
 
 Run performance tests separately:
 ```bash
-pytest tests/ -m performance
+python -m pytest tests/ -m performance
 ```
 
 ## Property-Based Tests
@@ -231,24 +245,24 @@ Property-based tests use Hypothesis to test invariants:
 
 Run property tests:
 ```bash
-pytest tests/ -m property
+python -m pytest tests/ -m property
 ```
 
 ## Debugging Tests
 
 ### Run Single Test
 ```bash
-pytest tests/test_rapsqlite.py::test_create_table -v
+python -m pytest tests/test_rapsqlite.py::test_create_table -v
 ```
 
 ### Run with Output
 ```bash
-pytest tests/ -v -s
+python -m pytest tests/ -v -s
 ```
 
 ### Run with Debugger
 ```bash
-pytest tests/ --pdb
+python -m pytest tests/ --pdb
 ```
 
 ## Best Practices

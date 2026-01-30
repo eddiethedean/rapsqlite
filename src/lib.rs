@@ -4,7 +4,9 @@ mod connection;
 pub(crate) use connection::Connection;
 
 mod context_managers;
-pub(crate) use context_managers::{ExecuteContextManager, TransactionContextManager};
+pub(crate) use context_managers::{
+    ExecuteContextManager, SavepointContextManager, TransactionContextManager,
+};
 
 mod cursor;
 pub(crate) use cursor::Cursor;
@@ -13,7 +15,8 @@ use pyo3::prelude::*;
 
 mod exceptions;
 use exceptions::{
-    DatabaseError, Error, IntegrityError, OperationalError, ProgrammingError, ValueError, Warning,
+    DataError, DatabaseError, Error, IntegrityError, InternalError, InterfaceError,
+    NotSupportedError, OperationalError, ProgrammingError, ValueError, Warning,
 };
 
 mod types;
@@ -42,15 +45,20 @@ fn _rapsqlite(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Cursor>()?;
     m.add_class::<ExecuteContextManager>()?;
     m.add_class::<TransactionContextManager>()?;
+    m.add_class::<SavepointContextManager>()?;
     m.add_class::<RapRow>()?;
 
     // Register exception classes (required for create_exception! to be accessible from Python)
     m.add("Error", py.get_type::<Error>())?;
     m.add("Warning", py.get_type::<Warning>())?;
+    m.add("InterfaceError", py.get_type::<InterfaceError>())?;
     m.add("DatabaseError", py.get_type::<DatabaseError>())?;
+    m.add("DataError", py.get_type::<DataError>())?;
     m.add("OperationalError", py.get_type::<OperationalError>())?;
-    m.add("ProgrammingError", py.get_type::<ProgrammingError>())?;
     m.add("IntegrityError", py.get_type::<IntegrityError>())?;
+    m.add("InternalError", py.get_type::<InternalError>())?;
+    m.add("ProgrammingError", py.get_type::<ProgrammingError>())?;
+    m.add("NotSupportedError", py.get_type::<NotSupportedError>())?;
     m.add("ValueError", py.get_type::<ValueError>())?;
 
     Ok(())
