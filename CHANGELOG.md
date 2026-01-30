@@ -73,6 +73,32 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - **`tests/test_fastapi_example.py`** — FastAPI + rapsqlite smoke test.
 - **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; see `docs/AIOSQLITE_TEST_RESULTS.md`. Transaction-related failures addressed (implicit transactions, commit-on-exit).
 
+### Added - True Async DBAPI (`rapsqlite.dbapi`)
+
+- **`rapsqlite.dbapi`** — True Async DBAPI 2.0–compliant module for SQLAlchemy and other consumers.
+- **`dbapi.connect(database, **kwargs)`** — Async connect; `database` required (positional or keyword).
+- **`AsyncConnection`** / **`AsyncCursor`** — Async context managers; one operation per connection at a time; concurrent use raises `ProgrammingError`.
+- **Eager SELECT execution** — `async for row in cursor` works immediately after `execute(SELECT)`.
+- **Cancellation handling** — `CancelledError` triggers `interrupt()` on the underlying connection; connection remains usable.
+- **`docs/true_async_dbapi_spec.md`** — Specification and minimal driver checklist.
+
+### Added - SQLAlchemy integration
+
+- **`rapsqlite.sqlalchemy`** — `sqlite+rapsqlite` dialect; use with `create_async_engine("sqlite+rapsqlite:///:memory:")`.
+- **Optional dependency** — `pip install 'rapsqlite[sqlalchemy]'` for SQLAlchemy support.
+- **Compatibility docs** — `docs/guides/compatibility.rst` updated with SQLAlchemy usage.
+
+### Added - Test isolation and parallel runs
+
+- **`unique_table_prefix` fixture** — Per-test unique table names to avoid cross-test collisions when running in parallel.
+- **`tests/test_dbapi.py`** — DBAPI contract, connection/cursor behavior, cancellation, concurrency.
+- **`tests/test_sqlalchemy_rapsqlite.py`** — Smoke tests for `sqlite+rapsqlite` engine creation.
+- **`test_dbapi` and `test_concurrent_transactions`** — Use `unique_table_prefix` for all created tables.
+
+### Changed
+
+- **Parallel test runs** — Removed `--dist=loadgroup` and `xdist_group`; isolation via unique table names instead. CI runs `pytest -n auto` (or `-n 2` on Windows) without loadgroup.
+
 ## [0.2.0] - 2026-01-26 (Updated 2026-01-28)
 
 ### Added - Phase 2.1: Parameterized Queries

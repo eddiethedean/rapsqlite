@@ -46,6 +46,9 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ **3.1**: `explain_query_plan` helper
 - ✅ **3.2**: `pool_health` helper
 - ✅ **3.3**: `isolation_level` applied to transactions
+- ✅ **True Async DBAPI** — `rapsqlite.dbapi`: `AsyncConnection`, `AsyncCursor`, `connect()`, eager SELECT, cancellation handling, one-op-per-connection; see `docs/true_async_dbapi_spec.md`
+- ✅ **SQLAlchemy dialect** — `sqlite+rapsqlite` via `rapsqlite.sqlalchemy`; optional `rapsqlite[sqlalchemy]`; `create_async_engine("sqlite+rapsqlite:///...")`
+- ✅ **Test isolation** — `unique_table_prefix` fixture; `test_dbapi`, `test_concurrent_transactions` use unique table names; parallel runs without `--dist=loadgroup`
 - ✅ aiosqlite test suite runner; `tests/test_phase3_api.py` for Phase 3 APIs
 
 ---
@@ -145,7 +148,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Focus**: Seamless integration with popular Python frameworks
 
 #### ORM Support
-- ⏳ SQLAlchemy async driver support
+- ✅ **SQLAlchemy async dialect** — `sqlite+rapsqlite`; `create_async_engine("sqlite+rapsqlite:///...")`; install `rapsqlite[sqlalchemy]`
 - ⏳ Tortoise ORM async SQLite backend
 - ⏳ Peewee async SQLite support
 - ⏳ Custom ORM adapters and patterns
@@ -165,7 +168,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ⏳ Schema migration testing tools
 
 **Success Criteria**:
-- SQLAlchemy async driver works seamlessly
+- ✅ SQLAlchemy async driver (`sqlite+rapsqlite`) available; full workflow and Alembic validation pending
 - FastAPI integration examples and patterns documented
 - Alembic migrations work with rapsqlite
 - At least 3 major frameworks have integration examples
