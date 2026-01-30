@@ -136,7 +136,8 @@ async def test_authorizer_callback_invalid_return_defaults_to_deny(test_db):
 async def test_backup_progress_callback_exception_handled(test_db):
     """Test that exceptions in backup progress callbacks don't crash backup."""
     import tempfile
-    import os
+
+    from conftest import cleanup_db
 
     async with rapsqlite.connect(test_db) as src:
         await src.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -166,5 +167,4 @@ async def test_backup_progress_callback_exception_handled(test_db):
             rows = await verify.fetch_all("SELECT COUNT(*) FROM t")
             assert rows[0][0] == 3
     finally:
-        if os.path.exists(target_db):
-            os.unlink(target_db)
+        cleanup_db(target_db)
