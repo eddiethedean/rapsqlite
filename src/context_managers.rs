@@ -20,13 +20,11 @@ pub(crate) fn next_savepoint_name() -> String {
 use crate::connection::ensure_not_closed;
 use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::pool::{
-    ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
-    pool_acquisition_error,
+    acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
+    execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
+    release_session_connection,
 };
-use crate::query::{
-    bind_and_execute, bind_and_execute_on_connection, bind_and_fetch_all,
-    bind_and_fetch_all_on_connection,
-};
+use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
 use crate::utils::is_dml_query;
 use crate::{map_sqlx_error, Connection, Cursor, OperationalError};
@@ -42,6 +40,7 @@ pub(crate) struct ExecuteContextManager {
     // Connection state needed for execution
     pub(crate) path: String,
     pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
+    pub(crate) session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
@@ -76,6 +75,7 @@ impl ExecuteContextManager {
             let is_select = slf.borrow(py).is_select;
             let path = slf.borrow(py).path.clone();
             let pool = Arc::clone(&slf.borrow(py).pool);
+            let session_connection = Arc::clone(&slf.borrow(py).session_connection);
             let pragmas = Arc::clone(&slf.borrow(py).pragmas);
             let pool_size = Arc::clone(&slf.borrow(py).pool_size);
             let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);
@@ -187,39 +187,39 @@ impl ExecuteContextManager {
                         })?;
                         bind_and_execute_on_connection(&query, &param_values, conn, &path).await?
                     } else if hook_already_called || !is_dml_query(&query) {
-                        // Inside init_hook, or DDL (CREATE/DROP etc.): use pool only; no implicit transaction.
-                        let pool_clone = get_or_create_pool(
+                        // Inside init_hook, or DDL (CREATE/DROP etc.): use session connection.
+                        ensure_session_connection(
                             &path,
                             &pool,
+                            &session_connection,
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
                             &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_execute(&query, &param_values, &pool_clone, &path).await?
+                        let mut conn_guard = session_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
+                        })?;
+                        bind_and_execute_on_connection(&query, &param_values, conn, &path).await?
                     } else {
                         // Implicit transaction (aiosqlite compat): first DML (INSERT/UPDATE/DELETE)
                         // without explicit begin() starts a transaction; commit()/rollback() end it.
-                        let pool_clone = get_or_create_pool(
+                        // Use session connection for BEGIN then move it to transaction_connection.
+                        ensure_session_connection(
                             &path,
                             &pool,
+                            &session_connection,
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut conn = pool_clone.acquire().await.map_err(|e| {
-                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
+                        let mut conn_guard = session_connection.lock().await;
+                        let mut conn = conn_guard.take().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
                         })?;
                         let timeout_ms = {
                             let g = timeout.lock().unwrap();
@@ -361,16 +361,21 @@ impl ExecuteContextManager {
                         })?;
                         bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
                     } else {
-                        let pool_clone = get_or_create_pool(
+                        ensure_session_connection(
                             &path,
                             &pool,
+                            &session_connection,
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
                             &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_fetch_all(&query, &param_values, &pool_clone, &path).await?
+                        let mut conn_guard = session_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
+                        })?;
+                        bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
                     };
                     #[allow(deprecated)]
                     let _ = Python::with_gil(|py| -> PyResult<()> {
@@ -452,6 +457,7 @@ impl ExecuteContextManager {
 pub(crate) struct TransactionContextManager {
     pub(crate) path: String,
     pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
+    pub(crate) session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
@@ -473,6 +479,7 @@ impl TransactionContextManager {
         Python::attach(|py| {
             let path = slf.borrow(py).path.clone();
             let pool = Arc::clone(&slf.borrow(py).pool);
+            let session_connection = Arc::clone(&slf.borrow(py).session_connection);
             let pragmas = Arc::clone(&slf.borrow(py).pragmas);
             let pool_size = Arc::clone(&slf.borrow(py).pool_size);
             let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);
@@ -528,6 +535,9 @@ impl TransactionContextManager {
                     }
                 } // Lock released
 
+                // Release session connection so we don't hold session + transaction
+                release_session_connection(&session_connection).await;
+
                 let result: Result<Py<PyAny>, PyErr> = async {
                     let pool_clone = get_or_create_pool(
                         &path,
@@ -558,9 +568,14 @@ impl TransactionContextManager {
                         let g = connection_timeout_secs.lock().unwrap();
                         *g
                     };
-                    let mut conn = pool_clone.acquire().await.map_err(|e| {
-                        pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
-                    })?;
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
                     // Set PRAGMA busy_timeout on this connection to handle lock contention
                     // Convert timeout from seconds (float) to milliseconds (integer) for SQLite
                     let timeout_ms = {

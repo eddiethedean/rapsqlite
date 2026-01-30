@@ -13,11 +13,10 @@ use tokio::sync::Mutex;
 use crate::connection::ensure_not_closed;
 use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::parameters::{process_named_parameters, process_positional_parameters};
-use crate::pool::{ensure_callback_connection, get_or_create_pool, has_callbacks};
-use crate::query::{
-    bind_and_execute, bind_and_execute_on_connection, bind_and_fetch_all,
-    bind_and_fetch_all_on_connection,
+use crate::pool::{
+    acquire_with_pragmas, ensure_callback_connection, get_or_create_pool, has_callbacks,
 };
+use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
 use crate::utils::is_select_query;
 use crate::{Connection, OperationalError, ProgrammingError};
@@ -331,8 +330,16 @@ impl Cursor {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_fetch_all(&processed_query, &processed_params, &pool_clone, &path)
-                            .await?
+                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        )
+                        .await?;
+                        bind_and_fetch_all_on_connection(
+                            &processed_query, &processed_params, &mut conn, &path,
+                        )
+                        .await?
                     };
 
                     #[allow(deprecated)]
@@ -620,10 +627,16 @@ impl Cursor {
                                 &idle_timeout_secs,
                             )
                             .await?;
-                            bind_and_fetch_all(
+                            let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                            let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                            let mut conn = acquire_with_pragmas(
+                                &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                            )
+                            .await?;
+                            bind_and_fetch_all_on_connection(
                                 &processed_query,
                                 &processed_params,
-                                &pool_clone,
+                                &mut conn,
                                 &path,
                             )
                             .await?
@@ -868,8 +881,16 @@ impl Cursor {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_fetch_all(&processed_query, &processed_params, &pool_clone, &path)
-                            .await?
+                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        )
+                        .await?;
+                        bind_and_fetch_all_on_connection(
+                            &processed_query, &processed_params, &mut conn, &path,
+                        )
+                        .await?
                     };
 
                     // Cache results as Python objects; resolve row_factory (override else connection)
@@ -1106,7 +1127,13 @@ impl Cursor {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_execute(&statement, &[], &pool_clone, &path).await?;
+                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        )
+                        .await?;
+                        bind_and_execute_on_connection(&statement, &[], &mut conn, &path).await?;
                     }
                 }
 

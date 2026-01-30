@@ -1,16 +1,31 @@
 //! Pool creation and connection-management helpers.
+//!
+//! Uses a path-based global pool registry so multiple Connection objects
+//! connecting to the same database path share one SqlitePool, improving
+//! concurrent operation performance (e.g. many `connect(path)` calls).
 
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::into_future;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::types::{ProgressHandler, UserFunctions};
 use crate::OperationalError;
+
+/// Minimum pool size when creating a shared pool so many concurrent
+/// Connection objects to the same path can acquire connections.
+const SHARED_POOL_MIN_CONNECTIONS: u32 = 25;
+
+/// Global registry: path -> SqlitePool. Connections to the same path share one pool.
+fn global_registry() -> &'static StdMutex<HashMap<String, SqlitePool>> {
+    static REGISTRY: OnceLock<StdMutex<HashMap<String, SqlitePool>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
+}
 
 /// Create a helpful error message for pool acquisition failures.
 pub(crate) fn pool_acquisition_error(
@@ -47,7 +62,43 @@ pub(crate) fn pool_acquisition_error(
     OperationalError::new_err(msg)
 }
 
+/// Apply this Connection's PRAGMAs to a pooled connection so session pragmas
+/// (e.g. set via set_pragma) are in effect when using a shared pool.
+pub(crate) async fn apply_pragmas_to_connection(
+    conn: &mut PoolConnection<sqlx::Sqlite>,
+    pragmas: &[(String, String)],
+    path: &str,
+) -> Result<(), PyErr> {
+    for (name, value) in pragmas {
+        let pragma_query = format!("PRAGMA {name} = {value}");
+        sqlx::query(&pragma_query)
+            .execute(&mut **conn)
+            .await
+            .map_err(|e| crate::map_sqlx_error(e, path, &pragma_query))?;
+    }
+    Ok(())
+}
+
+/// Acquire a connection from the pool and apply the Connection's pragmas to it.
+/// Use this whenever a Connection acquires a connection so set_pragma and
+/// connect(pragmas=...) are respected with a shared pool.
+pub(crate) async fn acquire_with_pragmas(
+    pool: &SqlitePool,
+    pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
+    path: &str,
+    pool_size_val: Option<usize>,
+    timeout_val: Option<u64>,
+) -> Result<PoolConnection<sqlx::Sqlite>, PyErr> {
+    let mut conn = pool.acquire().await.map_err(|e| {
+        pool_acquisition_error(path, &e, pool_size_val, timeout_val)
+    })?;
+    let pragmas_list = pragmas.lock().unwrap().clone();
+    apply_pragmas_to_connection(&mut conn, &pragmas_list, path).await?;
+    Ok(conn)
+}
+
 /// Helper to get or create pool and apply PRAGMAs.
+/// Uses a global path-based registry so connections to the same path share one pool.
 pub(crate) async fn get_or_create_pool(
     path: &str,
     pool: &Arc<Mutex<Option<SqlitePool>>>,
@@ -56,56 +107,85 @@ pub(crate) async fn get_or_create_pool(
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
     idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
 ) -> Result<SqlitePool, PyErr> {
-    let mut pool_guard = pool.lock().await;
-    if pool_guard.is_none() {
-        let max_conn = {
-            let g = pool_size.lock().unwrap();
-            (g.unwrap_or(1).max(1)) as u32
-        };
-        let timeout_secs = {
-            let g = connection_timeout_secs.lock().unwrap();
-            *g
-        };
-        let idle_secs = {
-            let g = idle_timeout_secs.lock().unwrap();
-            *g
-        };
-        let mut opts = SqlitePoolOptions::new().max_connections(max_conn);
-        // Set default timeout of 30 seconds if not specified
-        let timeout = timeout_secs.unwrap_or(30);
-        opts = opts.acquire_timeout(Duration::from_secs(timeout));
-        if let Some(idle) = idle_secs {
-            opts = opts.idle_timeout(Some(Duration::from_secs(idle)));
+    // Fast path: this connection already has a pool (from registry or prior creation).
+    {
+        let pool_guard = pool.lock().await;
+        if let Some(ref p) = *pool_guard {
+            return Ok(p.clone());
         }
-        let new_pool = opts.connect(&format!("sqlite:{path}")).await.map_err(|e| {
-            OperationalError::new_err(format!("Failed to connect to database at {path}: {e}"))
-        })?;
-
-        // Apply PRAGMAs
-        let pragmas_list = {
-            let pragmas_guard = pragmas.lock().unwrap();
-            pragmas_guard.clone()
-        };
-
-        for (name, value) in pragmas_list {
-            // Safety: PRAGMA names and values come from user input (via pragmas parameter or URI).
-            // SQLite's PRAGMA parser will reject invalid syntax, providing protection against
-            // SQL injection. PRAGMA names are identifiers (alphanumeric + underscore), and
-            // values are typically simple (strings, integers, keywords). While not perfect,
-            // SQLite's parser provides reasonable protection. For maximum security, applications
-            // should validate PRAGMA names against a whitelist.
-            let pragma_query = format!("PRAGMA {name} = {value}");
-            sqlx::query(&pragma_query)
-                .execute(&new_pool)
-                .await
-                .map_err(|e| crate::map_sqlx_error(e, path, &pragma_query))?;
-        }
-
-        *pool_guard = Some(new_pool);
     }
-    // Safety: We just checked pool_guard.is_none() above and set it to Some if None.
-    // If it was already Some, we return it here. So unwrap() is safe.
-    Ok(pool_guard.as_ref().unwrap().clone())
+
+    let registry = global_registry();
+
+    // Check global registry for an existing pool for this path.
+    let from_registry = {
+        let reg = registry.lock().unwrap();
+        reg.get(path).cloned()
+    };
+    if let Some(shared_clone) = from_registry {
+        let mut pool_guard = pool.lock().await;
+        *pool_guard = Some(shared_clone.clone());
+        return Ok(shared_clone);
+    }
+
+    // No pool for this path: create one, then register or use existing (race).
+    let max_conn = {
+        let g = pool_size.lock().unwrap();
+        (g.unwrap_or(1).max(1)) as u32
+    };
+    let timeout_secs = {
+        let g = connection_timeout_secs.lock().unwrap();
+        *g
+    };
+    let idle_secs = {
+        let g = idle_timeout_secs.lock().unwrap();
+        *g
+    };
+    // Shared pool must support many concurrent connections to the same path.
+    let max_conn = max_conn.max(SHARED_POOL_MIN_CONNECTIONS);
+    let mut opts = SqlitePoolOptions::new().max_connections(max_conn);
+    let timeout = timeout_secs.unwrap_or(30);
+    opts = opts.acquire_timeout(Duration::from_secs(timeout));
+    if let Some(idle) = idle_secs {
+        opts = opts.idle_timeout(Some(Duration::from_secs(idle)));
+    }
+    let new_pool = opts.connect(&format!("sqlite:{path}")).await.map_err(|e| {
+        OperationalError::new_err(format!("Failed to connect to database at {path}: {e}"))
+    })?;
+
+    let pragmas_list = {
+        let pragmas_guard = pragmas.lock().unwrap();
+        pragmas_guard.clone()
+    };
+    for (name, value) in pragmas_list {
+        let pragma_query = format!("PRAGMA {name} = {value}");
+        sqlx::query(&pragma_query)
+            .execute(&new_pool)
+            .await
+            .map_err(|e| crate::map_sqlx_error(e, path, &pragma_query))?;
+    }
+
+    let to_use = {
+        let mut reg = registry.lock().unwrap();
+        if let Some(existing) = reg.get(path) {
+            Some(existing.clone())
+        } else {
+            reg.insert(path.to_string(), new_pool.clone());
+            None
+        }
+    };
+    match to_use {
+        Some(existing) => {
+            let mut pool_guard = pool.lock().await;
+            *pool_guard = Some(existing.clone());
+            Ok(existing)
+        }
+        None => {
+            let mut pool_guard = pool.lock().await;
+            *pool_guard = Some(new_pool.clone());
+            Ok(new_pool)
+        }
+    }
 }
 
 /// Helper to ensure callback connection exists.
@@ -144,10 +224,14 @@ pub(crate) async fn ensure_callback_connection(
             let g = connection_timeout_secs.lock().unwrap();
             *g
         };
-        let pool_conn = pool_clone
-            .acquire()
-            .await
-            .map_err(|e| pool_acquisition_error(path, &e, pool_size_val, timeout_val))?;
+        let pool_conn = acquire_with_pragmas(
+            &pool_clone,
+            pragmas,
+            path,
+            pool_size_val,
+            timeout_val,
+        )
+        .await?;
 
         *callback_guard = Some(pool_conn);
     }
@@ -215,6 +299,52 @@ pub(crate) async fn execute_init_hook_if_needed(
     }
 
     Ok(())
+}
+
+/// Ensure the Connection has a session connection from the pool (acquire and store if None).
+/// Used to reuse one connection per Connection for many queries when not in a transaction
+/// and not using callbacks, matching aiosqlite behavior and improving concurrent-read performance.
+pub(crate) async fn ensure_session_connection(
+    path: &str,
+    pool: &Arc<Mutex<Option<SqlitePool>>>,
+    session_connection: &Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
+    pool_size: &Arc<StdMutex<Option<usize>>>,
+    connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
+    idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
+) -> Result<(), PyErr> {
+    let mut guard = session_connection.lock().await;
+    if guard.is_none() {
+        let pool_clone = get_or_create_pool(
+            path,
+            pool,
+            pragmas,
+            pool_size,
+            connection_timeout_secs,
+            idle_timeout_secs,
+        )
+        .await?;
+        let pool_size_val = pool_size.lock().unwrap().clone();
+        let timeout_val = connection_timeout_secs.lock().unwrap().clone();
+        let conn = acquire_with_pragmas(
+            &pool_clone,
+            pragmas,
+            path,
+            pool_size_val,
+            timeout_val,
+        )
+        .await?;
+        *guard = Some(conn);
+    }
+    Ok(())
+}
+
+/// Release the session connection (return to pool). Call on close() and when starting a transaction.
+pub(crate) async fn release_session_connection(
+    session_connection: &Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+) {
+    let mut guard = session_connection.lock().await;
+    let _ = guard.take();
 }
 
 /// Check if any callbacks are currently set.

@@ -6,11 +6,11 @@ This document analyzes compatibility between rapsqlite and aiosqlite based on ru
 Test Execution
 --------------
 
-**Date**: 2026-01-26 (Updated)  
-**rapsqlite Version**: 0.2.0  
+**Date**: 2026-01-30  
+**rapsqlite Version**: 0.3.0-dev  
 **aiosqlite Test Suite**: Latest from https://github.com/omnilib/aiosqlite
 
-**Last Updated**: 2026-01-26 - Major compatibility improvements implemented
+**Test baseline**: Run ``scripts/run_aiosqlite_tests.py`` to execute the aiosqlite test suite against rapsqlite (patched imports). Results are written to ``docs/AIOSQLITE_TEST_RESULTS.md``. Summary: ``perf.py`` passes; ``smoke.py`` has multiple failures, most categorized as **document** (intentional differences: async methods for ``total_changes``/``in_transaction``, no transaction queue, backup API) or **environment** (temp dir when run from script). A few are **fix** candidates (e.g. ``test_connection_await``, ``test_cursor_return_self``) for low-risk compatibility tweaks. See ``docs/AIOSQLITE_TEST_RESULTS.md`` for per-test notes.
 
 Known API Differences
 ---------------------
@@ -177,5 +177,7 @@ Performance Characteristics
 
 For type conversion and custom types (including the current approach without
 ``register_adapter``/``register_converter``), see :doc:`../reference/type-conversion`.
+
+For the aiosqlite test suite baseline and per-test failure categories, see ``docs/AIOSQLITE_TEST_RESULTS.md``.
 
 For more details, see :doc:`migration-guide`.

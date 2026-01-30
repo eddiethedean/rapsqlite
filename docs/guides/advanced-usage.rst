@@ -9,6 +9,7 @@ Table of Contents
 * :ref:`connection-pooling`
 * :ref:`monitoring`
 * :ref:`resource-cleanup`
+* :ref:`thread-safety`
 * :ref:`transaction-patterns`
 * :ref:`error-handling-strategies`
 * :ref:`performance-tuning`
@@ -108,6 +109,11 @@ Use ``pool_health()`` for liveness/readiness probes: it runs ``SELECT 1`` and re
        # Database or pool unavailable
        pass
 
+Connection health and recovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The underlying pool (sqlx) acquires connections on demand; when a connection is returned to the pool after use, it remains available for reuse. If a connection fails (e.g. database closed or I/O error), the pool can replace it on the next acquire. Use **``pool_health()``** periodically (e.g. in a liveness probe) to detect when the database is unavailable; combine with **``pool_metrics()``** to observe pool usage. For transient errors (e.g. ``SQLITE_BUSY``), retry the operation or use a transaction retry pattern (see :ref:`transaction-patterns`).
+
 Query logging and slow-query detection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -128,6 +134,29 @@ Use ``set_trace_callback`` to log every SQL statement executed on the connection
 
 For slow-query detection, measure elapsed time around your own execute calls (e.g. with a small helper or middleware) and log when a threshold is exceeded; the trace callback alone does not provide timing. This gives a clear path to observe queries without implementing a full metrics pipeline.
 
+Query timing (duration and callbacks)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To record per-query duration (e.g. for metrics or slow-query logging), use **``timed_fetch_all(conn, sql, parameters=None, on_timing=None)``**. It runs ``fetch_all``, measures elapsed time, and optionally calls ``on_timing(duration_secs, sql)``. Import from ``rapsqlite``:
+
+.. code-block:: python
+
+   import logging
+   from rapsqlite import connect, timed_fetch_all
+
+   logger = logging.getLogger("app.queries")
+
+   def on_timing(duration_secs: float, sql: str) -> None:
+       if duration_secs > 1.0:
+           logger.warning("Slow query (%.2fs): %s", duration_secs, sql.strip()[:200])
+
+   async with connect("app.db") as conn:
+       rows = await timed_fetch_all(conn, "SELECT * FROM big_table", on_timing=on_timing)
+
+   # Or omit on_timing to get (rows, duration_secs)
+   rows, duration = await timed_fetch_all(conn, "SELECT 1")
+   logger.info("Query took %.3fs", duration)
+
 .. _resource-cleanup:
 
 Resource Cleanup and Connection Lifetime
@@ -142,6 +171,13 @@ If a ``Connection`` is dropped without calling ``close()`` (e.g. you keep no ref
 * **Best-effort ``__del__``**: The Python wrapper schedules ``close()`` on the running event loop when the connection is GC'd, if a loop exists. This is best-effort only (no guarantees about finalizer order or loop lifetime) and does not replace ``async with`` or explicit ``close()``.
 
 See ``docs/reference/tokio-panic-investigation.md`` in the source tree for technical details and reproduction steps.
+
+.. _thread-safety:
+
+Thread safety
+~~~~~~~~~~~~~
+
+``rapsqlite`` is designed for async use; connections are not thread-safe. Do not share a single ``Connection`` instance across threads. Use one connection per asyncio task, or rely on the internal pool (one logical connection, multiple pooled connections used by your async code). For concurrent access from multiple threads, use a separate ``Connection`` per thread or a thread-safe wrapper that hands out connections from a pool per request.
 
 .. _transaction-patterns:
 
@@ -214,6 +250,20 @@ You can also use the ``savepoint()`` context manager for the same pattern:
            await conn.rollback()
 
 Use ``async with conn.savepoint():`` without a name to auto-generate one. Savepoints require an active transaction (``begin()`` or ``transaction()``).
+
+Transaction retry (transient errors)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For workloads that may hit ``SQLITE_BUSY`` or ``SQLITE_LOCKED``, use **``transaction_retry(conn, work, max_retries=5, ...)``**. It runs a transaction with exponential backoff on transient errors. ``work`` must be a callable that returns an awaitable (e.g. an async function); it is invoked once per attempt so each retry runs fresh.
+
+.. code-block:: python
+
+   from rapsqlite import connect, transaction_retry
+
+   async with connect("app.db") as conn:
+       async def do_work():
+           await conn.execute("INSERT INTO t (x) VALUES (?)", ["a"])
+       await transaction_retry(conn, do_work, max_retries=3)
 
 .. _error-handling-strategies:
 
@@ -327,28 +377,20 @@ To process large SELECT result sets without loading every row into memory:
   result set. For true streaming (fetch from the database in chunks), use
   pagination below.
 
-- **Pagination (memory-efficient)**: Run the same query with ``LIMIT`` and
-  ``OFFSET`` in a loop and call ``fetch_all`` for each page. This keeps memory
-  usage bounded by the page size:
+- **Streaming iterator (memory-efficient)**: Use ``execute_iter(conn, sql, parameters=None, chunk_size=None)`` or ``conn.execute_iter(sql, ...)`` to get an async iterator that yields **chunks** of rows. Uses ``LIMIT``/``OFFSET`` under the hood so memory stays bounded by ``chunk_size`` (default: ``conn.iter_chunk_size``, e.g. 64). One connection is used for the duration of iteration; closing the connection or cancelling the task stops iteration.
 
   .. code-block:: python
 
-     chunk_size = 1000
-     offset = 0
-     while True:
-         rows = await conn.fetch_all(
-             "SELECT * FROM big_table ORDER BY id LIMIT ? OFFSET ?",
-             [chunk_size, offset],
-         )
-         if not rows:
-             break
-         for row in rows:
-             process(row)
-         offset += chunk_size
+     from rapsqlite import connect, execute_iter
 
-  Ensure the query has a deterministic order (e.g. ``ORDER BY id``) so pages
-  are consistent. A future release may add a native ``stream()`` or
-  ``stream_batches()`` API that avoids manual LIMIT/OFFSET.
+     async with connect("app.db") as conn:
+         async for chunk in conn.execute_iter("SELECT * FROM big_table ORDER BY id", chunk_size=1000):
+             for row in chunk:
+                 process(row)
+
+  Ensure the query has a deterministic order (e.g. ``ORDER BY id``) so pages are consistent.
+
+- **Manual pagination**: You can still run ``fetch_all`` with ``LIMIT``/``OFFSET`` in a loop if you prefer; ``execute_iter`` does this for you under the hood.
 
 FTS, JSON, and UPSERT
 ~~~~~~~~~~~~~~~~~~~~~
@@ -416,6 +458,8 @@ Error messages include current pool configuration and suggestions:
 
 Performance Tuning
 ------------------
+
+For a full performance tuning guide (pool sizing, prepared statements, PRAGMAs, benchmarks), see :doc:`performance`.
 
 Use Parameterized Queries
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

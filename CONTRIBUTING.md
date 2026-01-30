@@ -40,6 +40,16 @@ python -m maturin develop
 
 See [tests/README.md](tests/README.md) for detailed testing documentation.
 
+### Compatibility validation (aiosqlite suite)
+
+To run the aiosqlite test suite against rapsqlite (patched imports), use:
+
+```bash
+python scripts/run_aiosqlite_tests.py
+```
+
+This clones the aiosqlite repo, patches imports to use rapsqlite, runs the suite, and writes results to `docs/AIOSQLITE_TEST_RESULTS.md`. Use it periodically to check compatibility; see that file for per-test notes and categories (fix/document/environment). Requires network access to clone.
+
 ### Quick Start
 ```bash
 # Run all tests (use same Python as build)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("sqlalchemy")
+import rapsqlite.sqlalchemy  # noqa: F401 -- register dialect before create_async_engine
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -12,7 +13,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 @pytest.mark.asyncio
 async def test_sqlalchemy_engine_create():
     """create_async_engine(\"sqlite+rapsqlite:///:memory:\") builds an AsyncEngine."""
-
     engine = create_async_engine("sqlite+rapsqlite:///:memory:")
     assert engine is not None
     assert str(engine.url).startswith("sqlite+rapsqlite")
@@ -24,6 +24,7 @@ async def test_sqlalchemy_alembic_style_migration(test_db: str) -> None:
     """Validate sqlite+rapsqlite for Alembic-style migrations (create table, add column)."""
     from rapsqlite import connect
 
+    # Dialect already registered by module-level import
     url = f"sqlite+rapsqlite:///{test_db}"
     engine = create_async_engine(url)
     try:

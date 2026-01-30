@@ -49,7 +49,8 @@ Example:
 
 import asyncio
 import os
-from typing import Any, List, Optional
+import time
+from typing import Any, Callable, List, Optional, Union
 
 import builtins as _builtins
 
@@ -177,6 +178,9 @@ __all__: List[str] = [
     "Row",
     "connect",
     "pool_metrics_gauges",
+    "execute_iter",
+    "timed_fetch_all",
+    "transaction_retry",
     "Error",
     "Warning",
     "InterfaceError",
@@ -329,6 +333,140 @@ async def pool_metrics_gauges(conn: "Connection") -> dict:  # type: ignore[valid
         "rapsqlite_pool_num_idle": m.get("num_idle", 0),
         "rapsqlite_pool_in_use": m.get("in_use", 0),
     }
+
+
+async def timed_fetch_all(
+    conn: "Connection",  # type: ignore[valid-type]
+    sql: str,
+    parameters: Optional[Any] = None,
+    on_timing: Optional[Callable[[float, str], None]] = None,
+) -> Union[List[Any], tuple[List[Any], float]]:
+    """Run fetch_all and record duration; optionally call on_timing(duration_secs, sql).
+
+    If on_timing is None, returns (rows, duration_secs). If on_timing is provided,
+    calls on_timing(duration_secs, sql) and returns rows only.
+    """
+    t0 = time.perf_counter()
+    rows = await conn.fetch_all(sql, parameters)  # type: ignore[attr-defined]
+    duration = time.perf_counter() - t0
+    if on_timing is not None:
+        on_timing(duration, sql)
+        return rows  # type: ignore[return-value]
+    return (rows, duration)  # type: ignore[return-value]
+
+
+async def transaction_retry(
+    conn: "Connection",  # type: ignore[valid-type]
+    work: Any,
+    max_retries: int = 5,
+    initial_delay: float = 0.01,
+    max_delay: float = 1.0,
+) -> Any:
+    """Run a transaction with retry on transient errors (e.g. SQLITE_BUSY, SQLITE_LOCKED).
+
+    ``work`` is a callable that returns an awaitable (e.g. an async function); it is
+    invoked once per attempt so each retry runs fresh. Retries with exponential backoff.
+    Example:
+        async with connect("app.db") as conn:
+            async def do_work():
+                await conn.execute("INSERT INTO t (x) VALUES (?)", ["a"])
+            await transaction_retry(conn, do_work, max_retries=3)
+    """
+    last_err: Optional[Exception] = None
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            await conn.begin()  # type: ignore[attr-defined]
+            try:
+                coro = work() if callable(work) else work
+                result = await coro
+                await conn.commit()  # type: ignore[attr-defined]
+                return result
+            except Exception as e:
+                await conn.rollback()  # type: ignore[attr-defined]
+                last_err = e
+                msg = str(e).lower()
+                if "busy" in msg or "locked" in msg:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(min(delay, max_delay))
+                        delay = min(delay * 2, max_delay)
+                        continue
+                raise
+        except Exception as e:
+            last_err = e
+            raise
+    if last_err is not None:
+        raise last_err
+    return None
+
+
+def execute_iter(
+    conn: "Connection",  # type: ignore[valid-type]
+    sql: str,
+    parameters: Optional[Any] = None,
+    chunk_size: Optional[int] = None,
+):
+    """Return an async iterator that yields rows in chunks (streaming / memory-efficient).
+
+    Uses LIMIT/OFFSET under the hood so memory stays bounded by chunk_size.
+    Single connection is used for the duration of iteration; closing the
+    connection or cancelling the task stops iteration.
+
+    Example:
+        async with connect("app.db") as conn:
+            async for chunk in execute_iter(conn, "SELECT * FROM big", chunk_size=500):
+                for row in chunk:
+                    process(row)
+    """
+    return _StreamChunksIterator(conn, sql, parameters, chunk_size)
+
+
+class _StreamChunksIterator:
+    """Async iterator yielding chunks of rows from a SELECT (LIMIT/OFFSET under the hood)."""
+
+    def __init__(
+        self,
+        conn: "Connection",  # type: ignore[valid-type]
+        sql: str,
+        parameters: Optional[Any] = None,
+        chunk_size: Optional[int] = None,
+    ) -> None:
+        self._conn = conn
+        self._sql = sql.strip().rstrip(";")
+        self._params = list(parameters) if parameters is not None else []
+        try:
+            default_chunk = getattr(conn, "iter_chunk_size", 64)
+            default_chunk = int(default_chunk) if default_chunk is not None else 64
+        except (TypeError, ValueError):
+            default_chunk = 64
+        self._chunk_size = int(chunk_size) if chunk_size is not None else default_chunk
+        self._offset = 0
+
+    def __aiter__(self) -> "_StreamChunksIterator":
+        return self
+
+    async def __anext__(self) -> List[Any]:
+        # Wrap query so we can paginate: SELECT * FROM (user_query) LIMIT ? OFFSET ?
+        wrapped = f"SELECT * FROM ({self._sql}) LIMIT ? OFFSET ?"
+        params = self._params + [self._chunk_size, self._offset]
+        rows = await self._conn.fetch_all(wrapped, params)  # type: ignore[attr-defined]
+        if not rows:
+            raise StopAsyncIteration
+        self._offset += len(rows)
+        return rows  # type: ignore[no-any-return]
+
+
+def _connection_execute_iter(
+    self: "Connection",  # type: ignore[valid-type]
+    sql: str,
+    parameters: Optional[Any] = None,
+    chunk_size: Optional[int] = None,
+) -> _StreamChunksIterator:
+    """Return an async iterator that yields rows in chunks (streaming / memory-efficient)."""
+    return _StreamChunksIterator(self, sql, parameters, chunk_size)
+
+
+Connection.execute_iter = _connection_execute_iter  # type: ignore[attr-defined,assignment]
 
 
 # -----------------------------------------------------------------------------

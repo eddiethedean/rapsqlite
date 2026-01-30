@@ -42,3 +42,5 @@ When using a connection (which uses an internal pool), you can observe pool stat
 - **``pool_health()``** (async): Runs a minimal health check (``SELECT 1``) and returns ``True`` on success; raises on failure. Use for liveness/readiness probes.
 
 - **``idle_timeout``** (property): When set (seconds), connections idle in the pool longer than this are closed. ``None`` (default) means no idle timeout. Set before first use (e.g. ``connect(..., idle_timeout=60)`` or ``conn.idle_timeout = 60``).
+
+- **``interrupt()``** (async): Interrupts the callback connection when present (e.g. during a long-running user-defined function or progress handler); no-op when no callback connection is in use. Use from another task to cancel a long-running operation. **Limitations**: Only affects operations on the dedicated callback connection; pool operations (normal execute/fetch) are not interrupted. For aiosqlite compatibility; full interrupt semantics may be extended in a future release.

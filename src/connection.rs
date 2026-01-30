@@ -31,13 +31,12 @@ use crate::conversion::{py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_
 use crate::errors::map_sqlx_error;
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{
-    ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
-    pool_acquisition_error,
+    acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
+    execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
 };
 use crate::query::{
-    bind_and_execute, bind_and_execute_on_connection, bind_and_fetch_all,
-    bind_and_fetch_all_on_connection, bind_and_fetch_one, bind_and_fetch_one_on_connection,
-    bind_and_fetch_optional, bind_and_fetch_optional_on_connection,
+    bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
+    bind_and_fetch_one_on_connection, bind_and_fetch_optional_on_connection,
 };
 use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
 use crate::utils::{
@@ -96,6 +95,9 @@ pub(crate) struct Connection {
     explicit_transaction: Arc<Mutex<bool>>,
     /// True after close() has completed; used to reject post-close operations without touching pool/Tokio.
     closed: Arc<StdMutex<bool>>,
+    /// Reused connection for non-transaction, non-callback operations (session-scoped).
+    /// Released on close() and when starting a transaction to match aiosqlite and improve concurrent reads.
+    session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
 }
 
 // Note: We do not implement Drop for Connection because:
@@ -249,6 +251,7 @@ impl Connection {
             iter_chunk_size: Arc::new(StdMutex::new(iter_chunk_size)), // Phase 3.10: aiosqlite compat
             explicit_transaction: Arc::new(Mutex::new(false)),
             closed: Arc::new(StdMutex::new(false)),
+            session_connection: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -304,6 +307,7 @@ impl Connection {
     fn total_changes(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
+        let session_connection = Arc::clone(&self.session_connection);
         let callback_connection = Arc::clone(&self.callback_connection);
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
@@ -339,7 +343,7 @@ impl Connection {
                     })?;
                     handle.as_raw_handle().as_ptr()
                 } else {
-                    // Check if callbacks are set - if not, use pool directly (temporary connection)
+                    // Check if callbacks are set - if not, use session connection
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
@@ -371,44 +375,27 @@ impl Connection {
                         })?;
                         handle.as_raw_handle().as_ptr()
                     } else {
-                        // No callbacks - use pool directly with temporary connection
-                        let pool_clone = get_or_create_pool(
+                        // No callbacks - use session connection (compute total while handle is valid)
+                        ensure_session_connection(
                             &path,
                             &pool,
+                            &session_connection,
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut temp_conn = pool_clone.acquire().await.map_err(|e| {
-                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
+                        let mut conn_guard = session_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
                         })?;
-                        let sqlite_conn: &mut SqliteConnection = &mut temp_conn;
+                        let sqlite_conn: &mut SqliteConnection = &mut *conn;
                         let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
                             OperationalError::new_err(format!("Failed to lock handle: {e}"))
                         })?;
                         let handle_ptr = handle.as_raw_handle().as_ptr();
-
-                        // Call sqlite3_total_changes while connection is alive
-                        // Safety: handle_ptr is a valid sqlite3* pointer obtained from
-                        // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be
-                        // valid for the lifetime of the handle lock. sqlite3_total_changes
-                        // is a read-only operation that doesn't modify the database handle.
                         let total = unsafe { sqlite3_total_changes(handle_ptr) };
-
-                        // Connection will be released when temp_conn is dropped
-                        drop(handle);
-                        drop(temp_conn);
-
                         return Ok(total as u64);
                     }
                 };
@@ -806,11 +793,9 @@ impl Connection {
                     *ex_guard = false;
                 }
 
-                // Close pool
+                // Release our reference to the pool (do not close: pool is shared via global registry).
                 let mut pool_guard = pool.lock().await;
-                if let Some(p) = pool_guard.take() {
-                    p.close().await;
-                }
+                let _ = pool_guard.take();
 
                 Ok(())
             };
@@ -821,6 +806,7 @@ impl Connection {
     /// Close the connection.
     fn close(&self) -> PyResult<Py<PyAny>> {
         let pool = Arc::clone(&self.pool);
+        let session_connection = Arc::clone(&self.session_connection);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
@@ -832,6 +818,8 @@ impl Connection {
         let closed = Arc::clone(&self.closed);
         Python::attach(|py| {
             let future = async move {
+                // Release session connection back to pool
+                release_session_connection(&session_connection).await;
                 // Clear all callbacks before closing
                 {
                     let mut funcs_guard = user_functions.lock().unwrap();
@@ -871,11 +859,9 @@ impl Connection {
                     *ex_guard = false;
                 }
 
-                // Close pool
+                // Release our reference to the pool (do not close: pool is shared via global registry).
                 let mut pool_guard = pool.lock().await;
-                if let Some(p) = pool_guard.take() {
-                    p.close().await;
-                }
+                let _ = pool_guard.take();
 
                 *closed.lock().unwrap() = true;
                 Ok(())
@@ -893,6 +879,7 @@ impl Connection {
     fn begin(self_: PyRef<Self>) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let session_connection = Arc::clone(&self_.session_connection);
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
@@ -961,6 +948,9 @@ impl Connection {
                 let mut from_callback = false;
                 let mut pending_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
 
+                // Release session connection so we don't hold session + transaction
+                release_session_connection(&session_connection).await;
+
                 let result: Result<(), PyErr> = async {
                     // Ensure pool exists before acquiring transaction connection
                     let pool_clone = get_or_create_pool(
@@ -1019,9 +1009,14 @@ impl Connection {
                             let g = connection_timeout_secs.lock().unwrap();
                             *g
                         };
-                        let conn = pool_clone.acquire().await.map_err(|e| {
-                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
-                        })?;
+                        let conn = acquire_with_pragmas(
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
+                        )
+                        .await?;
                         pending_conn = Some(conn);
                     }
 
@@ -1282,6 +1277,7 @@ impl Connection {
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let session_connection = Arc::clone(&self_.session_connection);
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
@@ -1435,6 +1431,7 @@ impl Connection {
                 is_select,
                 path,
                 pool: Arc::clone(&pool),
+                session_connection: Arc::clone(&session_connection),
                 pragmas: Arc::clone(&pragmas),
                 pool_size: Arc::clone(&pool_size),
                 connection_timeout_secs: Arc::clone(&connection_timeout_secs),
@@ -1487,6 +1484,7 @@ impl Connection {
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let closed = Arc::clone(&self_.closed);
+        let _timeout = Arc::clone(&self_.timeout);
         let connection_self = self_.into();
 
         // Process all parameter sets
@@ -1590,7 +1588,8 @@ impl Connection {
                         drop(conn_guard);
                     }
                 } else {
-                    // Use pool
+                    // Use pool: one connection, lock handle, run batch in block_in_place (single transaction).
+                    // Reuses connection and params (no clone); BEGIN/COMMIT in execute_many_raw_core.
                     let pool_clone = get_or_create_pool(
                         &path,
                         &pool,
@@ -1600,12 +1599,35 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    for param_values in processed_params {
-                        let result =
-                            bind_and_execute(&query, &param_values, &pool_clone, &path).await?;
-                        total_changes += result.rows_affected();
-                        last_row_id = result.last_insert_rowid();
-                    }
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    let sqlite_conn: &mut SqliteConnection = &mut *conn;
+                    let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
+                        OperationalError::new_err(format!("Failed to lock handle: {e}"))
+                    })?;
+                    let raw_db = handle.as_raw_handle().as_ptr();
+                    let result = tokio::task::block_in_place(|| {
+                        crate::batch::execute_many_raw_core(raw_db, &query, &processed_params)
+                    });
+                    drop(handle);
+                    let (total_changes_val, last_row_id_val) = result
+                        .map_err(|(rc, msg)| crate::errors::map_sqlite_error_from_msg(&path, &query, rc, &msg))?;
+                    total_changes = total_changes_val;
+                    last_row_id = last_row_id_val;
                 }
 
                 *last_rowid.lock().await = last_row_id;
@@ -1665,6 +1687,7 @@ impl Connection {
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let session_connection = Arc::clone(&self_.session_connection);
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
@@ -1780,16 +1803,22 @@ impl Connection {
                     bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
                         .await?
                 } else {
-                    let pool_clone = get_or_create_pool(
+                    ensure_session_connection(
                         &path,
                         &pool,
+                        &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&processed_query, &param_values, &pool_clone, &path).await?
+                    let mut conn_guard = session_connection.lock().await;
+                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                        OperationalError::new_err("Session connection not available")
+                    })?;
+                    bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
+                        .await?
                 };
 
                 // Convert rows using row_factory
@@ -1965,7 +1994,14 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_one(&processed_query, &param_values, &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_one_on_connection(&processed_query, &param_values, &mut conn, &path)
+                        .await?
                 };
 
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
@@ -2150,8 +2186,16 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_optional(&processed_query, &param_values, &pool_clone, &path)
-                        .await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_optional_on_connection(
+                        &processed_query, &param_values, &mut conn, &path,
+                    )
+                    .await?
                 };
 
                 match opt {
@@ -2273,8 +2317,16 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_execute(&processed_query, &param_values, &pool_clone, &path)
-                            .await?
+                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        )
+                        .await?;
+                        bind_and_execute_on_connection(
+                            &processed_query, &param_values, &mut conn, &path,
+                        )
+                        .await?
                     }
                 } else {
                     let mut conn_guard = transaction_connection.lock().await;
@@ -2430,6 +2482,7 @@ impl Connection {
     fn transaction(slf: PyRef<Self>) -> PyResult<TransactionContextManager> {
         let path = slf.path.clone();
         let pool = Arc::clone(&slf.pool);
+        let session_connection = Arc::clone(&slf.session_connection);
         let pragmas = Arc::clone(&slf.pragmas);
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
@@ -2445,6 +2498,7 @@ impl Connection {
         Ok(TransactionContextManager {
             path,
             pool,
+            session_connection,
             pragmas,
             pool_size,
             connection_timeout_secs,
@@ -2553,8 +2607,24 @@ impl Connection {
                 // Execute init_hook if needed (before setting PRAGMA)
                 execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
+                let pool_size_val = {
+                    let g = pool_size.lock().unwrap();
+                    *g
+                };
+                let timeout_val = {
+                    let g = connection_timeout_secs.lock().unwrap();
+                    *g
+                };
+                let mut conn = acquire_with_pragmas(
+                    &pool_clone,
+                    &pragmas,
+                    &path,
+                    pool_size_val,
+                    timeout_val,
+                )
+                .await?;
                 sqlx::query(&pragma_query)
-                    .execute(&pool_clone)
+                    .execute(&mut *conn)
                     .await
                     .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
 
@@ -4128,7 +4198,13 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of table names (strings)
@@ -4247,7 +4323,13 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -4408,7 +4490,13 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -4553,7 +4641,13 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -4692,7 +4786,13 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&tables_query, &[], &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&tables_query, &[], &mut conn, &path).await?
                 };
 
                 // Extract table names
@@ -4731,7 +4831,13 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_fetch_all(&info_query, &[], &pool_clone, &path).await?
+                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        )
+                        .await?;
+                        bind_and_fetch_all_on_connection(&info_query, &[], &mut conn, &path).await?
                     };
 
                     // Get indexes
@@ -4758,7 +4864,13 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_fetch_all(&indexes_query, &[], &pool_clone, &path).await?
+                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        )
+                        .await?;
+                        bind_and_fetch_all_on_connection(&indexes_query, &[], &mut conn, &path).await?
                     };
 
                     // Get foreign keys
@@ -4786,7 +4898,13 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_fetch_all(&fk_query, &[], &pool_clone, &path).await?
+                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        )
+                        .await?;
+                        bind_and_fetch_all_on_connection(&fk_query, &[], &mut conn, &path).await?
                     };
 
                     tables_info.push((tbl_name.clone(), info_rows, indexes_rows, fk_rows));
@@ -5018,7 +5136,13 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of view names (strings)
@@ -5133,7 +5257,13 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -5276,7 +5406,13 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -5408,7 +5544,13 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
+                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -5634,9 +5776,16 @@ impl Connection {
                             let g = connection_timeout_secs.lock().unwrap();
                             *g
                         };
-                        source_pool_conn = Some(pool_clone.acquire().await.map_err(|e| {
-                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
-                        })?);
+                        source_pool_conn = Some(
+                            acquire_with_pragmas(
+                                &pool_clone,
+                                &pragmas,
+                                &path,
+                                pool_size_val,
+                                timeout_val,
+                            )
+                            .await?,
+                        );
                     }
 
                     // Get a mutable reference to the exclusive source connection.
@@ -5731,9 +5880,16 @@ impl Connection {
                                 let g = target_connection_timeout_secs.lock().unwrap();
                                 *g
                             };
-                            target_pool_conn = Some(target_pool_clone.acquire().await.map_err(|e| {
-                                pool_acquisition_error(&target_path, &e, target_pool_size_val, target_timeout_val)
-                            })?);
+                            target_pool_conn = Some(
+                                acquire_with_pragmas(
+                                    &target_pool_clone,
+                                    &target_pragmas,
+                                    &target_path,
+                                    target_pool_size_val,
+                                    target_timeout_val,
+                                )
+                                .await?,
+                            );
                         }
 
                         let target_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some((_, ref mut conn)) = target_taken {

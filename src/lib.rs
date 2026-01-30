@@ -32,6 +32,8 @@ mod query;
 
 mod pool;
 
+mod batch;
+
 mod errors;
 pub(crate) use errors::map_sqlx_error;
 

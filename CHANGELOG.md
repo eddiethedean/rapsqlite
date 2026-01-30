@@ -102,6 +102,34 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - **Type system (Phase 3.10)** — `register_adapter` and `register_converter` deferred; workarounds and future plan documented in `docs/reference/type-conversion.rst` and migration guide (subsection “Future: register_adapter and register_converter”).
 - **Type conversion strategy** — New `docs/reference/type-conversion.rst`: built-in parameter/result mapping, custom types today (application-layer conversion, `create_function`, `row_factory`, `text_factory`), and future plan for `register_adapter`/`register_converter`. Linked from docs index and compatibility guide.
 
+### Added - Phase 3.5: Query timing
+
+- **`timed_fetch_all(conn, sql, parameters=None, on_timing=None)`** — Runs fetch_all and records duration; returns (rows, duration_secs) when on_timing is None, or rows and calls on_timing(duration_secs, sql) when provided. Documented in advanced-usage (Query timing); tested in `test_phase3_api.py::test_timed_fetch_all`.
+
+### Added - Phase 3.6 / 3.9: DX and interrupt() docs
+
+- **Thread safety** — New subsection in advanced-usage (Thread safety): connections not thread-safe; one connection per asyncio task or pool. ROADMAP 3.6 updated.
+- **Performance tuning** — Advanced-usage (Performance Tuning) now links to :doc:`guides/performance`.
+- **interrupt()** — API reference (connection.rst): documented behavior (interrupts callback connection when present; no-op otherwise) and limitations (only callback connection; pool operations not interrupted).
+
+### Added - Phase 3.3: Transaction retry
+
+- **`transaction_retry(conn, work, max_retries=5, initial_delay=0.01, max_delay=1.0)`** — Runs a transaction with retry on transient errors (e.g. SQLITE_BUSY, SQLITE_LOCKED) and exponential backoff. ``work`` is a callable that returns an awaitable; invoked once per attempt. Documented in advanced-usage (Transaction retry); tested in `test_phase3_api.py::test_transaction_retry`.
+
+### Added - Phase 3.2: Connection health and recovery (docs)
+
+- **Connection health and recovery** — New subsection in advanced-usage (Monitoring): pool replaces failed connections on acquire; use pool_health() for liveness; transient errors via retry. ROADMAP 3.2 updated.
+
+### Added - Phase 3.1: Streaming / chunked results
+
+- **`execute_iter(conn, sql, parameters=None, chunk_size=None)`** and **`conn.execute_iter(sql, ...)`** — Async iterator that yields rows in chunks (memory-efficient). Uses LIMIT/OFFSET under the hood; chunk_size defaults to `conn.iter_chunk_size`. Documented in advanced-usage (Streaming and large result sets); tested in `test_phase3_api.py::test_execute_iter`.
+
+### Added - Phase 3.8: aiosqlite test baseline and compatibility docs
+
+- **`docs/AIOSQLITE_TEST_RESULTS.md`** — Per-test results and categories (fix/document/environment) for aiosqlite suite run via `scripts/run_aiosqlite_tests.py`; perf.py passes, smoke.py failures documented with notes.
+- **Compatibility and ROADMAP** — `docs/guides/compatibility.rst` updated with test baseline summary and link to results; ROADMAP 3.8 updated with baseline status.
+- **CONTRIBUTING** — Added "Compatibility validation (aiosqlite suite)" with command to run the aiosqlite suite and where results are written.
+
 ### Added - Test isolation and parallel runs
 
 - **`unique_table_prefix` fixture** — Per-test unique table names to avoid cross-test collisions when running in parallel.

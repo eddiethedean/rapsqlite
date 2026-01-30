@@ -72,7 +72,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ **`Connection.explain_query_plan(sql, parameters=None)`** — Runs `EXPLAIN QUERY PLAN` and returns result rows
 
 #### Result Handling
-- ⏳ Streaming query results for large datasets
+- ✅ **Streaming / chunked results** — `execute_iter(conn, sql, parameters=None, chunk_size=None)` and `conn.execute_iter(sql, ...)` return an async iterator yielding chunks of rows (LIMIT/OFFSET under the hood); documented in advanced-usage (Streaming and large result sets).
 - ⏳ Cursor-based pagination utilities
 - ⏳ Result set transformation utilities
 - ⏳ Row-to-object mapping helpers
@@ -100,7 +100,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 #### Pool Management
 - ⏳ Dynamic pool sizing (scale up/down based on load)
 - ✅ **`Connection.pool_health()`** — Minimal health check (`SELECT 1`); raises on failure
-- ⏳ Connection health monitoring and automatic recovery
+- ✅ **Connection health and recovery** — Documented in advanced-usage (Monitoring): pool_health() for liveness; pool replaces failed connections on acquire; transient errors (e.g. SQLITE_BUSY) handled via retry.
 - ✅ **Idle connection management** — `idle_timeout` (seconds) via `connect(..., idle_timeout=N)` or `conn.idle_timeout = N`; pool closes idle connections after timeout; documented in advanced-usage and API reference.
 - ✅ **Pool metrics** — `pool_metrics()` returns `{size, num_idle, in_use}`; documented in API reference and advanced-usage (Monitoring section).
 - ⏳ Cross-process connection sharing patterns (if applicable)
@@ -133,7 +133,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Transaction Utilities
 - ✅ **Savepoint context managers** — `async with db.savepoint():` or `db.savepoint("name")`; implemented and tested
-- ⏳ Transaction retry decorators/utilities
+- ✅ **Transaction retry** — `transaction_retry(conn, work, max_retries=5, ...)` runs a transaction with retry on transient errors (e.g. SQLITE_BUSY, SQLITE_LOCKED) and exponential backoff; documented in advanced-usage (Transaction retry).
 - ⏳ Transaction conflict resolution strategies
 
 **Success Criteria**:
@@ -182,7 +182,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Monitoring & Metrics
 - ✅ **Metrics export** — Optional helper `pool_metrics_gauges(conn)` returns dict of gauge names (e.g. `rapsqlite_pool_size`, `rapsqlite_pool_num_idle`, `rapsqlite_pool_in_use`) for Prometheus or custom metrics endpoints; documented in advanced-usage (Monitoring) and api-reference (pool_metrics).
-- ⏳ Query timing and profiling
+- ✅ **Query timing** — `timed_fetch_all(conn, sql, parameters=None, on_timing=None)` runs fetch_all and records duration; optional callback or returns (rows, duration_secs); documented in advanced-usage (Query timing).
 - ✅ **Connection pool metrics** — `pool_metrics()` and `pool_health()` documented; Monitoring section in advanced-usage.
 - ⏳ Resource usage tracking
 - ⏳ Slow query detection and reporting (approach documented via `set_trace_callback` + app-layer timing)
@@ -222,11 +222,11 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Documentation & Examples
 - ⏳ Advanced usage patterns and examples
-- ⏳ Performance tuning guides
+- ✅ **Performance tuning** — Advanced-usage (Performance Tuning) links to :doc:`guides/performance`; ROADMAP references performance guide.
 - ⏳ Migration documentation from other libraries
 - ⏳ Best practices and anti-patterns
 - ⏳ Contributing guidelines
-- ⏳ Thread-safety documentation
+- ✅ **Thread-safety** — Documented in advanced-usage (Thread safety): connections not thread-safe; one connection per task or pool.
 
 **Success Criteria**:
 - CLI tools available for common tasks
@@ -271,8 +271,8 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 #### Test Coverage
 - ⏳ Complete edge case coverage
 - ⏳ Fake Async Detector validation passes under load
-- ✅ **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; baseline documented; some failures remain (e.g. "No transaction in progress")
-- ⏳ Pass 100% of aiosqlite test suite as drop-in replacement validation
+- ✅ **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; baseline and per-test categories in `docs/AIOSQLITE_TEST_RESULTS.md` (perf.py passes; smoke.py failures mostly **document** or **environment**; a few **fix** candidates).
+- ⏳ Pass 100% of aiosqlite test suite as drop-in replacement validation (optional; intentional differences documented)
 - ⏳ Stress testing and performance regression tests
 - ⏳ Cross-platform testing (Linux, macOS, Windows)
 

@@ -383,6 +383,7 @@ async def test_changes():
 async def test_in_memory_database():
     """Test in-memory database compatibility."""
     async with aiosqlite.connect(":memory:") as conn:
+        await conn.execute("DROP TABLE IF EXISTS test")
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
         await conn.execute("INSERT INTO test (value) VALUES ('hello')")
         rows = await conn.fetch_all("SELECT * FROM test")

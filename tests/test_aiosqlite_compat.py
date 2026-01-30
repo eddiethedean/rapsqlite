@@ -1263,24 +1263,29 @@ async def test_backup_with_pages_and_progress(test_db_file):
     # We expect progress to have been reported at least once for a paged backup
     assert len(progress_calls) >= 1
 
-    # Second backup: re-open source (previous source_conn was closed by async with)
-    # and backup again to the same target path to verify full backup path.
-    with open(target_path, "w"):
+    # Second backup: re-open source and backup to a *different* target path.
+    # Using a new path avoids SQLITE_READONLY_DBMOVED (1032) when the shared pool
+    # may still hold a connection to the previous target path after we overwrote it.
+    target_path2 = test_db_file + ".backup_pages2"
+    if os.path.exists(target_path2):
+        os.remove(target_path2)
+    with open(target_path2, "w"):
         pass
 
-    target_conn = rapsqlite.Connection(target_path)
+    target_conn2 = rapsqlite.Connection(target_path2)
     try:
         async with rapsqlite.Connection(test_db_file) as source_conn2:
-            await source_conn2.backup(target_conn)
-        rows = await target_conn.fetch_all("SELECT * FROM test ORDER BY id")
+            await source_conn2.backup(target_conn2)
+        rows = await target_conn2.fetch_all("SELECT * FROM test ORDER BY id")
         assert len(rows) == 10
         assert rows[0][1] == "name_0"
         assert rows[9][1] == "name_9"
     finally:
-        await target_conn.close()
+        await target_conn2.close()
 
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    for p in (target_path, target_path2):
+        if os.path.exists(p):
+            os.remove(p)
 
 
 @pytest.mark.asyncio

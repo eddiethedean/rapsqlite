@@ -2,7 +2,14 @@
 
 import pytest
 
-from rapsqlite import Connection, connect, pool_metrics_gauges
+from rapsqlite import (
+    Connection,
+    connect,
+    execute_iter,
+    pool_metrics_gauges,
+    timed_fetch_all,
+    transaction_retry,
+)
 
 if not hasattr(Connection, "iter_chunk_size"):
     pytest.skip(
@@ -171,6 +178,58 @@ async def test_pool_metrics_gauges(test_db):
         gauges["rapsqlite_pool_size"]
         == gauges["rapsqlite_pool_num_idle"] + gauges["rapsqlite_pool_in_use"]
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_iter(test_db):
+    """execute_iter yields rows in chunks; conn.execute_iter(...) works; respects chunk_size."""
+    async with connect(test_db, iter_chunk_size=2) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
+        await db.execute(
+            "INSERT INTO t (x) VALUES ('a'),('b'),('c'),('d'),('e')"
+        )
+        collected = []
+        async for chunk in execute_iter(db, "SELECT * FROM t ORDER BY id", chunk_size=2):
+            collected.extend(chunk)
+        assert collected == [[1, "a"], [2, "b"], [3, "c"], [4, "d"], [5, "e"]]
+        # Connection method form and default chunk_size from iter_chunk_size
+        collected2 = []
+        async for chunk in db.execute_iter("SELECT * FROM t ORDER BY id"):
+            collected2.extend(chunk)
+        assert collected2 == [[1, "a"], [2, "b"], [3, "c"], [4, "d"], [5, "e"]]
+
+
+@pytest.mark.asyncio
+async def test_timed_fetch_all(test_db):
+    """timed_fetch_all returns (rows, duration) or rows and calls on_timing when given."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
+        await db.execute("INSERT INTO t (x) VALUES ('a'), ('b')")
+        rows, duration = await timed_fetch_all(db, "SELECT * FROM t ORDER BY id")
+    assert rows == [[1, "a"], [2, "b"]]
+    assert isinstance(duration, (int, float)) and duration >= 0
+    called = []
+
+    async with connect(test_db) as db:
+        rows2 = await timed_fetch_all(
+            db, "SELECT * FROM t", on_timing=lambda sec, sql: called.append((sec, sql))
+        )
+    assert rows2 == [[1, "a"], [2, "b"]]
+    assert len(called) == 1 and len(called[0]) == 2
+
+
+@pytest.mark.asyncio
+async def test_transaction_retry(test_db):
+    """transaction_retry runs a transaction with retry on transient errors."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
+
+        async def do_work():
+            await db.execute("INSERT INTO t (x) VALUES (?)", ["a"])
+
+        await transaction_retry(db, do_work, max_retries=2)
+        rows = await db.fetch_all("SELECT * FROM t")
+    assert rows == [[1, "a"]]
 
 
 @pytest.mark.asyncio

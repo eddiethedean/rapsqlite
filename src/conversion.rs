@@ -257,6 +257,12 @@ pub(crate) fn sqlite_value_to_py<'py>(
     Ok(py.None())
 }
 
+/// Number of columns to iterate (avoids index-out-of-bounds when row metadata
+/// and actual row data disagree, e.g. with shared pool connection reuse).
+fn row_column_count(row: &sqlx::sqlite::SqliteRow) -> usize {
+    std::cmp::min(row.len(), row.columns().len())
+}
+
 /// Convert a SQLite row to Python list.
 pub(crate) fn row_to_py_list<'py>(
     py: Python<'py>,
@@ -264,7 +270,8 @@ pub(crate) fn row_to_py_list<'py>(
     text_factory: Option<&Py<PyAny>>,
 ) -> PyResult<Bound<'py, PyList>> {
     let list = PyList::empty(py);
-    for i in 0..row.len() {
+    let n = row_column_count(row);
+    for i in 0..n {
         let val = sqlite_value_to_py(py, row, i, text_factory)?;
         list.append(val)?;
     }
@@ -289,10 +296,11 @@ pub(crate) fn row_to_py_with_factory<'py>(
     }
     if let Ok(s) = f.cast::<PyString>() {
         let name = s.to_str()?;
+        let n = row_column_count(row);
         return match name {
             "dict" => {
                 let dict = PyDict::new(py);
-                for i in 0..row.len() {
+                for i in 0..n {
                     let col_name = row.columns()[i].name();
                     let val = sqlite_value_to_py(py, row, i, text_factory)?;
                     dict.set_item(col_name, val)?;
@@ -301,7 +309,7 @@ pub(crate) fn row_to_py_with_factory<'py>(
             }
             "tuple" => {
                 let mut vals = Vec::new();
-                for i in 0..row.len() {
+                for i in 0..n {
                     vals.push(sqlite_value_to_py(py, row, i, text_factory)?);
                 }
                 let tuple = PyTuple::new(py, vals)?;
@@ -322,7 +330,8 @@ pub(crate) fn row_to_py_with_factory<'py>(
                 // Create RapRow with columns and values
                 let mut columns = Vec::new();
                 let mut values = Vec::new();
-                for i in 0..row.len() {
+                let n = row_column_count(row);
+                for i in 0..n {
                     columns.push(row.columns()[i].name().to_string());
                     let val = sqlite_value_to_py(py, row, i, text_factory)?;
                     values.push(val);
@@ -345,8 +354,9 @@ pub(crate) fn build_description_tuple<'py>(
     py: Python<'py>,
     row: &sqlx::sqlite::SqliteRow,
 ) -> PyResult<Bound<'py, PyTuple>> {
-    let mut col_tuples = Vec::with_capacity(row.len());
-    for i in 0..row.len() {
+    let n = row_column_count(row);
+    let mut col_tuples = Vec::with_capacity(n);
+    for i in 0..n {
         let name = row.columns()[i].name().to_string();
         let type_name = row.columns()[i].type_info().name().to_ascii_uppercase();
         let seven = PyTuple::new(

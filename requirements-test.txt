@@ -5,6 +5,9 @@ pytest-xdist
 pytest-timeout
 hypothesis
 
+# Optional: for benchmarks and aiosqlite compatibility tests
+aiosqlite
+
 # Optional: uncomment to run FastAPI and SQLAlchemy tests
 # fastapi
 # sqlalchemy>=2.0
