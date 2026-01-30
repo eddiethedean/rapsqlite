@@ -37,6 +37,8 @@ Pool metrics and health
 
 When using a connection (which uses an internal pool), you can observe pool state and run health checks:
 
-- **``pool_metrics()``** (async): Returns a dict with ``size`` (total connections in pool), ``num_idle`` (idle connections), and ``in_use`` (connections currently in use). Use this to monitor pool usage in production (e.g. log periodically or expose via a metrics endpoint).
+- **``pool_metrics()``** (async): Returns a dict with ``size`` (total connections in pool), ``num_idle`` (idle connections), and ``in_use`` (connections currently in use). Use this to monitor pool usage in production (e.g. log periodically or expose via a metrics endpoint). For Prometheus-style gauges, use the helper :func:`rapsqlite.pool_metrics_gauges` (see :doc:`../guides/advanced-usage` Monitoring / Metrics export).
 
 - **``pool_health()``** (async): Runs a minimal health check (``SELECT 1``) and returns ``True`` on success; raises on failure. Use for liveness/readiness probes.
+
+- **``idle_timeout``** (property): When set (seconds), connections idle in the pool longer than this are closed. ``None`` (default) means no idle timeout. Set before first use (e.g. ``connect(..., idle_timeout=60)`` or ``conn.idle_timeout = 60``).

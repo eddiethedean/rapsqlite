@@ -19,13 +19,14 @@ use libsqlite3_sys::{
     sqlite3, sqlite3_backup_finish, sqlite3_backup_init, sqlite3_backup_pagecount,
     sqlite3_backup_remaining, sqlite3_backup_step, sqlite3_busy_timeout, sqlite3_context,
     sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg,
-    sqlite3_free, sqlite3_get_autocommit, sqlite3_libversion, sqlite3_load_extension,
-    sqlite3_progress_handler, sqlite3_result_null, sqlite3_set_authorizer, sqlite3_total_changes,
-    sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_BUSY, SQLITE_DENY, SQLITE_DONE,
-    SQLITE_LOCKED, sqlite3_interrupt, sqlite3_libversion_number, SQLITE_OK, SQLITE_TRACE_STMT,
-    SQLITE_UTF8, SQLITE_DETERMINISTIC,
+    sqlite3_free, sqlite3_get_autocommit, sqlite3_interrupt, sqlite3_libversion,
+    sqlite3_libversion_number, sqlite3_load_extension, sqlite3_progress_handler,
+    sqlite3_result_null, sqlite3_set_authorizer, sqlite3_total_changes, sqlite3_trace_v2,
+    sqlite3_user_data, sqlite3_value, SQLITE_BUSY, SQLITE_DENY, SQLITE_DETERMINISTIC, SQLITE_DONE,
+    SQLITE_LOCKED, SQLITE_OK, SQLITE_TRACE_STMT, SQLITE_UTF8,
 };
 
+use crate::context_managers::next_savepoint_name;
 use crate::conversion::{py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py};
 use crate::errors::map_sqlx_error;
 use crate::parameters::{process_named_parameters, process_positional_parameters};
@@ -43,12 +44,11 @@ use crate::utils::{
     cstr_from_c_char_ptr, is_select_query, parse_connection_string, track_query_usage,
     validate_path,
 };
-use crate::{InterfaceError, OperationalError};
-use crate::context_managers::next_savepoint_name;
 use crate::{
     Cursor, ExecuteContextManager, NotSupportedError, ProgrammingError, SavepointContextManager,
     TransactionContextManager, ValueError,
 };
+use crate::{InterfaceError, OperationalError};
 
 /// Async SQLite connection.
 #[pyclass]
@@ -66,6 +66,7 @@ pub(crate) struct Connection {
     init_hook_called: Arc<StdMutex<bool>>,         // Track if init_hook has been executed
     pool_size: Arc<StdMutex<Option<usize>>>,       // Configurable pool size
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>, // Connection timeout in seconds
+    idle_timeout_secs: Arc<StdMutex<Option<u64>>>, // Idle connection timeout (pool closes idle conns after this)
     row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // None | "dict" | "tuple" | callable
     text_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Callable(bytes) -> str, or None for default UTF-8
     // Prepared statement cache tracking (Phase 2.13)
@@ -188,7 +189,7 @@ impl Connection {
         loop_param: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let _ = loop_param; // Accepted for aiosqlite compat (connect(loop=...)); ignored (deprecated).
-        // Validate timeout (must be non-negative)
+                            // Validate timeout (must be non-negative)
         if timeout < 0.0 {
             return Err(ValueError::new_err("timeout must be >= 0.0"));
         }
@@ -230,6 +231,7 @@ impl Connection {
             init_hook_called: Arc::new(StdMutex::new(false)),
             pool_size: Arc::new(StdMutex::new(None)),
             connection_timeout_secs: Arc::new(StdMutex::new(None)),
+            idle_timeout_secs: Arc::new(StdMutex::new(None)),
             row_factory: Arc::new(StdMutex::new(None)),
             text_factory: Arc::new(StdMutex::new(None)),
             // Prepared statement cache tracking (Phase 2.13)
@@ -306,6 +308,7 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
@@ -354,6 +357,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
 
@@ -374,6 +378,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         let pool_size_val = {
@@ -513,6 +518,7 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let closed = Arc::clone(&self.closed);
         Python::attach(|py| {
             let future = async move {
@@ -523,12 +529,13 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
                 let guard = pool.lock().await;
-                let p = guard.as_ref().ok_or_else(|| {
-                    OperationalError::new_err("Pool not available")
-                })?;
+                let p = guard
+                    .as_ref()
+                    .ok_or_else(|| OperationalError::new_err("Pool not available"))?;
                 let size = p.size();
                 let num_idle = p.num_idle();
                 let in_use = size as usize - num_idle;
@@ -674,6 +681,37 @@ impl Connection {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "connection_timeout must be >= 0",
                 ));
+            }
+            Some(n as u64)
+        };
+        Ok(())
+    }
+
+    /// Idle connection timeout in seconds. When set, connections idle in the pool
+    /// longer than this are closed. None (default) means no idle timeout.
+    #[getter(idle_timeout)]
+    fn idle_timeout(&self) -> PyResult<Py<PyAny>> {
+        #[allow(deprecated)]
+        Python::with_gil(|py| {
+            let guard = self.idle_timeout_secs.lock().unwrap();
+            Ok(match guard.as_ref() {
+                Some(&n) => PyInt::new(py, n as i64).into_any().unbind(),
+                None => py.None(),
+            })
+        })
+    }
+
+    #[setter(idle_timeout)]
+    fn set_idle_timeout(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut guard = self.idle_timeout_secs.lock().unwrap();
+        *guard = if value.is_none() {
+            None
+        } else {
+            let n: i64 = value
+                .extract::<i64>()
+                .or_else(|_| value.extract::<u64>().map(|u| u as i64))?;
+            if n < 0 {
+                return Err(ValueError::new_err("idle_timeout must be >= 0"));
             }
             Some(n as u64)
         };
@@ -858,6 +896,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let explicit_transaction = Arc::clone(&self_.explicit_transaction);
@@ -930,6 +969,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -962,6 +1002,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         let mut conn_guard = callback_connection.lock().await;
@@ -1244,6 +1285,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let last_rowid = Arc::clone(&self_.last_rowid);
         let last_changes = Arc::clone(&self_.last_changes);
         let transaction_state = Arc::clone(&self_.transaction_state);
@@ -1346,6 +1388,7 @@ impl Connection {
                     connection_pragmas: Arc::clone(&pragmas),
                     pool_size: Arc::clone(&pool_size),
                     connection_timeout_secs: Arc::clone(&connection_timeout_secs),
+                    idle_timeout_secs: Arc::clone(&idle_timeout_secs),
                     row_factory: Arc::clone(&row_factory),
                     text_factory: Arc::clone(&text_factory),
                     transaction_state: Arc::clone(&transaction_state),
@@ -1395,6 +1438,7 @@ impl Connection {
                 pragmas: Arc::clone(&pragmas),
                 pool_size: Arc::clone(&pool_size),
                 connection_timeout_secs: Arc::clone(&connection_timeout_secs),
+                idle_timeout_secs: Arc::clone(&idle_timeout_secs),
                 transaction_state: Arc::clone(&transaction_state),
                 transaction_connection: Arc::clone(&transaction_connection),
                 callback_connection: Arc::clone(&callback_connection),
@@ -1427,6 +1471,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let last_rowid = Arc::clone(&self_.last_rowid);
         let last_changes = Arc::clone(&self_.last_changes);
         let transaction_state = Arc::clone(&self_.transaction_state);
@@ -1484,6 +1529,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -1526,6 +1572,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -1550,6 +1597,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     for param_values in processed_params {
@@ -1620,6 +1668,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
@@ -1687,6 +1736,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -1718,6 +1768,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -1735,6 +1786,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&processed_query, &param_values, &pool_clone, &path).await?
@@ -1802,6 +1854,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
@@ -1859,6 +1912,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -1890,6 +1944,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -1907,6 +1962,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_one(&processed_query, &param_values, &pool_clone, &path).await?
@@ -1973,6 +2029,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
@@ -2030,6 +2087,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -2066,6 +2124,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -2088,6 +2147,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_optional(&processed_query, &param_values, &pool_clone, &path)
@@ -2125,6 +2185,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -2175,6 +2236,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -2192,6 +2254,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         let mut conn_guard = callback_connection.lock().await;
@@ -2207,6 +2270,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         bind_and_execute(&processed_query, &param_values, &pool_clone, &path)
@@ -2257,6 +2321,7 @@ impl Connection {
         let pragmas = Arc::clone(&slf.pragmas);
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&slf.idle_timeout_secs);
         let row_factory = Arc::clone(&slf.row_factory);
         let text_factory = Arc::clone(&slf.text_factory);
         let transaction_state = Arc::clone(&slf.transaction_state);
@@ -2281,6 +2346,7 @@ impl Connection {
             connection_pragmas: pragmas,
             pool_size,
             connection_timeout_secs,
+            idle_timeout_secs,
             row_factory,
             text_factory,
             transaction_state,
@@ -2313,6 +2379,7 @@ impl Connection {
         let pragmas = Arc::clone(&slf.pragmas);
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&slf.idle_timeout_secs);
         let row_factory = Arc::clone(&slf.row_factory);
         let text_factory = Arc::clone(&slf.text_factory);
         let transaction_state = Arc::clone(&slf.transaction_state);
@@ -2337,6 +2404,7 @@ impl Connection {
             connection_pragmas: pragmas,
             pool_size,
             connection_timeout_secs,
+            idle_timeout_secs,
             row_factory,
             text_factory,
             transaction_state,
@@ -2365,6 +2433,7 @@ impl Connection {
         let pragmas = Arc::clone(&slf.pragmas);
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&slf.idle_timeout_secs);
         let transaction_state = Arc::clone(&slf.transaction_state);
         let transaction_connection = Arc::clone(&slf.transaction_connection);
         let init_hook = Arc::clone(&slf.init_hook);
@@ -2379,6 +2448,7 @@ impl Connection {
             pragmas,
             pool_size,
             connection_timeout_secs,
+            idle_timeout_secs,
             transaction_state,
             transaction_connection,
             connection,
@@ -2418,6 +2488,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
@@ -2475,6 +2546,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -2502,6 +2574,7 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
         let trace_callback = Arc::clone(&self.trace_callback);
@@ -2527,6 +2600,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
                 let mut conn_guard = callback_connection.lock().await;
@@ -2553,6 +2627,7 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let closed = Arc::clone(&self.closed);
 
@@ -2567,6 +2642,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -2620,6 +2696,7 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let closed = Arc::clone(&self.closed);
 
@@ -2646,6 +2723,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -2749,6 +2827,7 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let user_functions = Arc::clone(&self.user_functions);
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
@@ -2771,6 +2850,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -3118,6 +3198,7 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let trace_callback = Arc::clone(&self.trace_callback);
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
@@ -3146,6 +3227,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -3299,6 +3381,7 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
@@ -3345,6 +3428,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -3519,6 +3603,7 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let progress_handler = Arc::clone(&self.progress_handler);
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
@@ -3565,6 +3650,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -3694,6 +3780,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         // Callback infrastructure (Phase 2.7)
@@ -3750,6 +3837,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -3767,6 +3855,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
@@ -3884,6 +3973,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         sqlx::query(&query)
@@ -3950,6 +4040,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -3981,6 +4072,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4018,6 +4110,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4032,6 +4125,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
@@ -4065,6 +4159,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -4104,6 +4199,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4133,6 +4229,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4147,6 +4244,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
@@ -4220,6 +4318,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -4261,6 +4360,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4290,6 +4390,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4304,6 +4405,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
@@ -4367,6 +4469,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -4402,6 +4505,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4431,6 +4535,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4445,6 +4550,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
@@ -4520,6 +4626,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -4567,6 +4674,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4581,6 +4689,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&tables_query, &[], &pool_clone, &path).await?
@@ -4619,6 +4728,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         bind_and_fetch_all(&info_query, &[], &pool_clone, &path).await?
@@ -4645,6 +4755,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         bind_and_fetch_all(&indexes_query, &[], &pool_clone, &path).await?
@@ -4672,6 +4783,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         bind_and_fetch_all(&fk_query, &[], &pool_clone, &path).await?
@@ -4816,6 +4928,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -4847,6 +4960,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4886,6 +5000,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4900,6 +5015,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
@@ -4933,6 +5049,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -4968,6 +5085,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4997,6 +5115,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -5011,6 +5130,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
@@ -5072,6 +5192,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -5107,6 +5228,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -5136,6 +5258,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -5150,6 +5273,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
@@ -5200,6 +5324,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -5235,6 +5360,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -5264,6 +5390,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -5278,6 +5405,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
@@ -5363,6 +5491,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
@@ -5389,6 +5518,7 @@ impl Connection {
                 target_pragmas_opt,
                 target_pool_size_opt,
                 target_connection_timeout_secs_opt,
+                target_idle_timeout_secs_opt,
                 target_transaction_state_opt,
                 target_transaction_connection_opt,
                 target_callback_connection_opt,
@@ -5409,6 +5539,7 @@ impl Connection {
                     Some(target_conn_borrowed.pragmas.clone()),
                     Some(target_conn_borrowed.pool_size.clone()),
                     Some(target_conn_borrowed.connection_timeout_secs.clone()),
+                    Some(target_conn_borrowed.idle_timeout_secs.clone()),
                     Some(target_conn_borrowed.transaction_state.clone()),
                     Some(target_conn_borrowed.transaction_connection.clone()),
                     Some(target_conn_borrowed.callback_connection.clone()),
@@ -5421,6 +5552,7 @@ impl Connection {
             } else {
                 (
                     None, None, None, None, None, None, None, None, None, None, None, None, None,
+                    None,
                 )
             };
 
@@ -5476,6 +5608,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         let mut guard = callback_connection.lock().await;
@@ -5490,6 +5623,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         let pool_size_val = {
@@ -5524,6 +5658,8 @@ impl Connection {
                             target_pool_size_opt.clone().unwrap();
                         let target_connection_timeout_secs: Arc<StdMutex<Option<u64>>> =
                             target_connection_timeout_secs_opt.clone().unwrap();
+                        let target_idle_timeout_secs: Arc<StdMutex<Option<u64>>> =
+                            target_idle_timeout_secs_opt.clone().unwrap();
                         let target_transaction_state: Arc<Mutex<TransactionState>> =
                             target_transaction_state_opt.clone().unwrap();
                         let target_transaction_connection: Arc<
@@ -5569,6 +5705,7 @@ impl Connection {
                                 &target_pragmas,
                                 &target_pool_size,
                                 &target_connection_timeout_secs,
+                                &target_idle_timeout_secs,
                             )
                             .await?;
                             let mut guard = target_callback_connection.lock().await;
@@ -5583,6 +5720,7 @@ impl Connection {
                                 &target_pragmas,
                                 &target_pool_size,
                                 &target_connection_timeout_secs,
+                                &target_idle_timeout_secs,
                             )
                             .await?;
                             let target_pool_size_val = {
@@ -5705,8 +5843,7 @@ impl Connection {
                         .lock()
                         .unwrap()
                         .unwrap_or(5)
-                        .max(5)
-                        .min(120);
+                        .clamp(5, 120);
                     let timeout_ms: std::ffi::c_int = (backup_busy_timeout_secs * 1000) as std::ffi::c_int;
                     unsafe {
                         sqlite3_busy_timeout(source_handle.0, timeout_ms);
@@ -5751,18 +5888,17 @@ impl Connection {
 
                         match step_result {
                             SQLITE_OK | SQLITE_BUSY | SQLITE_LOCKED => {
-                                if step_result == SQLITE_BUSY || step_result == SQLITE_LOCKED {
-                                    if backup_start.elapsed()
+                                if (step_result == SQLITE_BUSY || step_result == SQLITE_LOCKED)
+                                    && backup_start.elapsed()
                                         > Duration::from_secs(backup_busy_timeout_secs)
-                                    {
-                                        unsafe {
-                                            sqlite3_backup_finish(backup_handle.0);
-                                        }
-                                        return Err(OperationalError::new_err(format!(
-                                            "Backup timed out: database busy or locked after {} seconds",
-                                            backup_busy_timeout_secs
-                                        )));
+                                {
+                                    unsafe {
+                                        sqlite3_backup_finish(backup_handle.0);
                                     }
+                                    return Err(OperationalError::new_err(format!(
+                                        "Backup timed out: database busy or locked after {} seconds",
+                                        backup_busy_timeout_secs
+                                    )));
                                 }
 
                                 if let Some(ref progress_cb) = progress_callback {

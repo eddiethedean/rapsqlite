@@ -3,7 +3,6 @@
 Tests real-world scenarios, common usage patterns, and framework integration examples.
 """
 
-import asyncio
 import time
 
 import pytest

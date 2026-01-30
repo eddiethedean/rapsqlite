@@ -12,7 +12,6 @@ import inspect
 import os
 import pytest
 import sys
-import tempfile
 from pathlib import Path
 
 from rapsqlite import Connection, connect, Error, InterfaceError, OperationalError
@@ -311,6 +310,24 @@ async def test_set_progress_handler(test_db):
 
 
 @pytest.mark.asyncio
+async def test_set_progress_handler_callback_n_order(test_db):
+    """set_progress_handler accepts (callback, n) for sqlite3/aiosqlite compatibility."""
+    calls = []
+
+    def progress_callback():
+        calls.append(1)
+        return True
+
+    async with connect(test_db) as db:
+        await db.set_progress_handler(progress_callback, 100)  # (callback, n) order
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        for i in range(150):
+            await db.execute("INSERT INTO t (id) VALUES (?)", [i])
+        await db.set_progress_handler(100, None)
+    assert True  # no error; (callback, n) accepted
+
+
+@pytest.mark.asyncio
 async def test_create_function(test_db):
     """Test custom SQL functions."""
     async with connect(test_db) as db:
@@ -342,6 +359,7 @@ async def test_create_function_deterministic(test_db):
     if "deterministic" not in sig.parameters:
         pytest.skip("create_function(deterministic=...) not supported by this build")
     async with connect(test_db) as db:
+
         def double(x):
             return x * 2
 
@@ -1177,7 +1195,9 @@ async def test_backup_aiosqlite(test_db_file):
 
     # Create source database with data, then close so backup uses a fresh connection
     async with rapsqlite.Connection(test_db_file) as source_conn:
-        await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
 
@@ -1285,7 +1305,9 @@ async def test_backup_sqlite(test_db_file):
         # Create source database with data, then use a fresh connection for backup
         # (same pattern as test_backup_with_pages_and_progress).
         async with rapsqlite.connect(test_db_file) as source_conn:
-            await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+            await source_conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+            )
             await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
             await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
 

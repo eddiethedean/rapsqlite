@@ -32,7 +32,9 @@ async def test_raw_cursor_has_close_and_lastrowid():
     exec_cur = await conn.execute("SELECT 1")
     raw_exec = exec_cur._raw
     assert hasattr(raw_exec, "close"), "raw Cursor from execute() must have close"
-    assert hasattr(raw_exec, "lastrowid"), "raw Cursor from execute() must have lastrowid"
+    assert hasattr(raw_exec, "lastrowid"), (
+        "raw Cursor from execute() must have lastrowid"
+    )
     await exec_cur.close()
     await conn.close()
 
@@ -199,7 +201,7 @@ async def test_connect_database_path():
 
 @pytest.mark.asyncio
 async def test_context_manager():
-    async with (await dbapi.connect(":memory:")) as conn:
+    async with await dbapi.connect(":memory:") as conn:
         cur = await conn.execute("SELECT 1")
         row = await cur.fetchone()
         assert row is not None

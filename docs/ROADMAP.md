@@ -101,7 +101,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ⏳ Dynamic pool sizing (scale up/down based on load)
 - ✅ **`Connection.pool_health()`** — Minimal health check (`SELECT 1`); raises on failure
 - ⏳ Connection health monitoring and automatic recovery
-- ⏳ Idle connection management (timeout and cleanup)
+- ✅ **Idle connection management** — `idle_timeout` (seconds) via `connect(..., idle_timeout=N)` or `conn.idle_timeout = N`; pool closes idle connections after timeout; documented in advanced-usage and API reference.
 - ✅ **Pool metrics** — `pool_metrics()` returns `{size, num_idle, in_use}`; documented in API reference and advanced-usage (Monitoring section).
 - ⏳ Cross-process connection sharing patterns (if applicable)
 
@@ -125,14 +125,14 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Focus**: Enhanced transaction capabilities
 
 #### Transaction Features
-- ⏳ Nested transaction handling (savepoints)
+- ✅ **Nested transaction handling (savepoints)** — `Connection.savepoint(name=None)` context manager
 - ✅ **`Connection.isolation_level`** — Get/set `None` | `"DEFERRED"` | `"IMMEDIATE"` | `"EXCLUSIVE"`; applied to `BEGIN`
 - ⏳ Deadlock detection and automatic retry
 - ⏳ Transaction timeout handling
 - ⏳ Long-running transaction monitoring
 
 #### Transaction Utilities
-- ⏳ Savepoint context managers (`async with db.savepoint():`)
+- ✅ **Savepoint context managers** — `async with db.savepoint():` or `db.savepoint("name")`; implemented and tested
 - ⏳ Transaction retry decorators/utilities
 - ⏳ Transaction conflict resolution strategies
 
@@ -181,7 +181,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Focus**: Production monitoring and debugging capabilities
 
 #### Monitoring & Metrics
-- ⏳ Performance metrics export (Prometheus, StatsD, etc.)
+- ✅ **Metrics export** — Optional helper `pool_metrics_gauges(conn)` returns dict of gauge names (e.g. `rapsqlite_pool_size`, `rapsqlite_pool_num_idle`, `rapsqlite_pool_in_use`) for Prometheus or custom metrics endpoints; documented in advanced-usage (Monitoring) and api-reference (pool_metrics).
 - ⏳ Query timing and profiling
 - ✅ **Connection pool metrics** — `pool_metrics()` and `pool_health()` documented; Monitoring section in advanced-usage.
 - ⏳ Resource usage tracking
@@ -354,8 +354,8 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Success Criteria**:
 - `deterministic` parameter works correctly with create_function()
 - `iter_chunk_size` and `loop` parameters accepted (even if not fully utilized)
-- ⏳ `register_adapter` and `register_converter` implemented (current approach and plan documented)
-- Custom type conversions possible via documented workarounds
+- ⏳ `register_adapter` and `register_converter` implemented (deferred; current approach and plan documented in type-conversion.rst and migration guide)
+- ✅ Custom type conversions possible via documented workarounds (application-layer, row_factory, text_factory, create_function)
 - Type conversion strategy documented with examples
 - All type system features have test coverage
 

@@ -71,7 +71,9 @@ async def test_backup_source_in_transaction(test_db_file, target_db_file):
         await src.execute("INSERT INTO t (v) VALUES ('in_transaction')")
         # Backup should work even when source is in transaction
         # Use a separate connection for backup to avoid deadlock
-        async with connect(test_db_file) as src_for_backup, connect(target_db_file) as tgt:
+        async with connect(test_db_file) as src_for_backup, connect(
+            target_db_file
+        ) as tgt:
             await src_for_backup.backup(tgt)
         await src.commit()
 
@@ -129,7 +131,9 @@ async def test_backup_with_zero_pages(test_db_file, target_db_file):
 
 
 @pytest.mark.asyncio
-async def test_backup_sqlite3_target_with_active_transaction(test_db_file, target_db_file):
+async def test_backup_sqlite3_target_with_active_transaction(
+    test_db_file, target_db_file
+):
     """Test backup to sqlite3.Connection fails if target has active transaction."""
     async with connect(test_db_file) as src:
         await src.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")

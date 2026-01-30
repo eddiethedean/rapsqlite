@@ -163,7 +163,11 @@ Known Differences
       changes = await db.total_changes()
       in_tx = await db.in_transaction()
 
-2. **``iterdump()`` Return Type**: rapsqlite supports both async iteration and await-to-list:
+2. **``set_progress_handler``**: rapsqlite accepts both ``(n, callback)`` and ``(callback, n)`` for sqlite3/aiosqlite compatibility.
+
+3. **Tuple parameters**: rapsqlite accepts tuple as a single parameter (converted to text representation for one placeholder).
+
+4. **``iterdump()`` Return Type**: rapsqlite supports both async iteration and await-to-list:
 
    .. code-block:: python
 
@@ -174,7 +178,12 @@ Known Differences
       # rapsqlite (backwards compatible)
       lines = await db.iterdump()  # Returns List[str]
 
-3. **``init_hook`` parameter**: This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
+5. **``init_hook`` parameter**: This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
+
+Future: register_adapter and register_converter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+rapsqlite does **not** yet implement ``register_adapter`` or ``register_converter`` (sqlite3-style type adapters and converters). Until then, use application-layer conversion (serialize/deserialize before execute and after fetch), ``create_function``, ``row_factory``, or ``text_factory``. See :doc:`../reference/type-conversion` for the full type conversion strategy and workarounds.
 
 Advanced Features
 -----------------

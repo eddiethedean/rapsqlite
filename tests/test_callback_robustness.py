@@ -6,7 +6,6 @@ that might differ between rapsqlite and aiosqlite implementations.
 
 import os
 import sys
-import tempfile
 
 import pytest
 
@@ -932,7 +931,9 @@ async def test_backup_basic(test_db_file):
     import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
-        await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
 
@@ -964,7 +965,9 @@ async def test_backup_target_in_transaction_raises(test_db_file):
     import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
-        await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
     target_path = test_db_file + ".backup_txn"
@@ -1025,9 +1028,13 @@ async def test_backup_progress_callback(test_db_file):
     import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
-        await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)")
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)"
+        )
         for i in range(10):
-            await source_conn.execute("INSERT INTO test (data) VALUES (?)", [f"data{i}"])
+            await source_conn.execute(
+                "INSERT INTO test (data) VALUES (?)", [f"data{i}"]
+            )
 
     target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
@@ -1062,9 +1069,13 @@ async def test_backup_with_pages_parameter(test_db_file):
     import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
-        await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)")
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)"
+        )
         for i in range(5):
-            await source_conn.execute("INSERT INTO test (data) VALUES (?)", [f"data{i}"])
+            await source_conn.execute(
+                "INSERT INTO test (data) VALUES (?)", [f"data{i}"]
+            )
 
     target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
@@ -1092,7 +1103,9 @@ async def test_backup_with_custom_name(test_db_file):
     import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
-        await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
     target_path = test_db_file + ".backup"
@@ -1121,7 +1134,9 @@ async def test_backup_multiple_tables(test_db_file):
     import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
-        await source_conn.execute("CREATE TABLE table1 (id INTEGER PRIMARY KEY, name TEXT)")
+        await source_conn.execute(
+            "CREATE TABLE table1 (id INTEGER PRIMARY KEY, name TEXT)"
+        )
         await source_conn.execute(
             "CREATE TABLE table2 (id INTEGER PRIMARY KEY, value INTEGER)"
         )
@@ -1158,7 +1173,9 @@ async def test_backup_with_indexes(test_db_file):
     import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
-        await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
         await source_conn.execute("CREATE INDEX idx_name ON test(name)")
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
@@ -1190,7 +1207,9 @@ async def test_backup_progress_callback_exception(test_db_file):
     import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
-        await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
     target_path = test_db_file + ".backup"

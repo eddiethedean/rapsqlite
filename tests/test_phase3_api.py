@@ -2,7 +2,7 @@
 
 import pytest
 
-from rapsqlite import Connection, connect
+from rapsqlite import Connection, connect, pool_metrics_gauges
 
 if not hasattr(Connection, "iter_chunk_size"):
     pytest.skip(
@@ -160,6 +160,35 @@ async def test_pool_metrics(test_db):
 
 
 @pytest.mark.asyncio
+async def test_pool_metrics_gauges(test_db):
+    """pool_metrics_gauges(conn) returns dict of gauge names for Prometheus/custom metrics."""
+    async with connect(test_db) as db:
+        gauges = await pool_metrics_gauges(db)
+    assert "rapsqlite_pool_size" in gauges
+    assert "rapsqlite_pool_num_idle" in gauges
+    assert "rapsqlite_pool_in_use" in gauges
+    assert (
+        gauges["rapsqlite_pool_size"]
+        == gauges["rapsqlite_pool_num_idle"] + gauges["rapsqlite_pool_in_use"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout(test_db):
+    """idle_timeout can be set; pool is created with idle_timeout when set before first use."""
+    async with connect(test_db, idle_timeout=60) as db:
+        assert db.idle_timeout == 60
+        await db.execute("SELECT 1")
+    # Set on connection after creation (before first use)
+    db = connect(test_db)
+    db.idle_timeout = 30
+    async with db:
+        await db.execute("SELECT 1")
+    db.idle_timeout = None
+    assert db.idle_timeout is None
+
+
+@pytest.mark.asyncio
 async def test_explain_query_plan(test_db):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -276,3 +305,14 @@ async def test_savepoint_requires_transaction(test_db):
         with pytest.raises(Exception, match="active transaction|Savepoint"):
             async with db.savepoint("sp1"):
                 await db.execute("INSERT INTO t (id) VALUES (1)")
+
+
+@pytest.mark.asyncio
+async def test_tuple_parameter_supported(test_db):
+    """Tuple as parameter is converted to text for aiosqlite compatibility."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (x TEXT)")
+        await db.execute("INSERT INTO t (x) VALUES (?)", [("a", 1)])
+        row = await db.fetch_one("SELECT x FROM t")
+        assert row is not None
+        assert row[0] == "('a', 1)"

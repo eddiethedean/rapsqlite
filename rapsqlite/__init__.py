@@ -81,17 +81,38 @@ def _connection_del(self: "Connection") -> None:  # type: ignore[valid-type]
     except RuntimeError:
         return
     try:
+
         def _schedule_close() -> None:
             try:
                 asyncio.create_task(self.close())  # type: ignore[attr-defined]
             except Exception:
                 pass
+
         loop.call_soon_threadsafe(_schedule_close)
     except Exception:
         pass
 
 
 Connection.__del__ = _connection_del  # type: ignore[assignment]
+
+
+# set_progress_handler: accept (callback, n) as well as (n, callback) for sqlite3/aiosqlite compat
+_orig_set_progress_handler = Connection.set_progress_handler  # type: ignore[attr-defined]
+
+
+async def _set_progress_handler_wrapper(
+    self: "Connection",  # type: ignore[valid-type]
+    a: Any,
+    b: Any = None,
+) -> Any:  # type: ignore[name-defined]
+    if b is not None and callable(a) and isinstance(b, int):
+        n, callback = b, a
+    else:
+        n, callback = a, b
+    return await _orig_set_progress_handler(self, n, callback)
+
+
+Connection.set_progress_handler = _set_progress_handler_wrapper  # type: ignore[assignment]
 Cursor = _ext.Cursor
 Error = _ext.Error
 Warning = _ext.Warning
@@ -102,23 +123,35 @@ IntegrityError = _ext.IntegrityError
 try:
     InterfaceError = _ext.InterfaceError
 except AttributeError:  # pragma: no cover - compatibility with older wheels
-    class InterfaceError(Error):  # type: ignore[no-redef,misc]
+
+    class InterfaceError(Error):  # type: ignore[no-redef,misc,valid-type]
         pass
+
+
 try:
     DataError = _ext.DataError
 except AttributeError:  # pragma: no cover - compatibility with older wheels
-    class DataError(DatabaseError):  # type: ignore[no-redef,misc]
+
+    class DataError(DatabaseError):  # type: ignore[no-redef,misc,valid-type]
         pass
+
+
 try:
     InternalError = _ext.InternalError
 except AttributeError:  # pragma: no cover - compatibility with older wheels
-    class InternalError(DatabaseError):  # type: ignore[no-redef,misc]
+
+    class InternalError(DatabaseError):  # type: ignore[no-redef,misc,valid-type]
         pass
+
+
 try:
     NotSupportedError = _ext.NotSupportedError
 except AttributeError:  # pragma: no cover - compatibility with older wheels
-    class NotSupportedError(DatabaseError):  # type: ignore[no-redef,misc]
+
+    class NotSupportedError(DatabaseError):  # type: ignore[no-redef,misc,valid-type]
         pass
+
+
 try:
     ValueError = _ext.ValueError
 except AttributeError:  # pragma: no cover - compatibility with older wheels
@@ -143,6 +176,7 @@ __all__: List[str] = [
     "Cursor",
     "Row",
     "connect",
+    "pool_metrics_gauges",
     "Error",
     "Warning",
     "InterfaceError",
@@ -163,6 +197,7 @@ def connect(
     pragmas: Any = None,
     timeout: float = 5.0,
     iter_chunk_size: int = 64,
+    idle_timeout: Optional[int] = None,
     loop: Any = None,
     **kwargs: Any,
 ) -> "Connection":  # type: ignore[valid-type]
@@ -187,6 +222,8 @@ def connect(
             This matches aiosqlite and sqlite3's timeout parameter.
         iter_chunk_size: Chunk size for iteration (e.g. fetchmany). Default 64.
             Stored for use with cursor iteration; aiosqlite-compatible.
+        idle_timeout: Optional seconds. When set, connections idle in the pool
+            longer than this are closed. None (default) means no idle timeout.
         loop: Deprecated. Event loop (ignored). Accept-only for aiosqlite
             compatibility.
         **kwargs: Additional arguments (currently ignored, reserved for future use)
@@ -249,19 +286,49 @@ def connect(
     # Accept pathlib.Path / os.PathLike for aiosqlite compatibility (e.g. aiosqlite smoke tests)
     path_str = os.fspath(path) if not isinstance(path, str) else path
     try:
-        return Connection(
+        conn = Connection(
             path_str,
             pragmas=pragmas,
             timeout=timeout,
             iter_chunk_size=iter_chunk_size,
             loop_param=loop,
-        )  # type: ignore[no-any-return]
+        )
     except TypeError as e:
         err = str(e)
-        if "iter_chunk_size" in err or "loop_param" in err or "unexpected keyword argument" in err:
-            # Older _rapsqlite build without connect() params (e.g. wrong Python / stale wheel)
-            return Connection(path_str, pragmas=pragmas, timeout=timeout)  # type: ignore[no-any-return]
-        raise
+        if (
+            "iter_chunk_size" in err
+            or "loop_param" in err
+            or "unexpected keyword argument" in err
+        ):
+            conn = Connection(path_str, pragmas=pragmas, timeout=timeout)
+        else:
+            raise
+    if idle_timeout is not None:
+        conn.idle_timeout = idle_timeout  # type: ignore[attr-defined]
+    return conn  # type: ignore[no-any-return]
+
+
+async def pool_metrics_gauges(conn: "Connection") -> dict:  # type: ignore[valid-type]
+    """Return pool metrics as a dict of gauge names to values for Prometheus or custom metrics.
+
+    Calls ``conn.pool_metrics()`` and maps the result to gauge-style keys:
+    ``rapsqlite_pool_size``, ``rapsqlite_pool_num_idle``, ``rapsqlite_pool_in_use``.
+    Use this to expose pool state on a /metrics endpoint or feed into a metrics system.
+
+    Example:
+        async with connect("app.db") as conn:
+            gauges = await pool_metrics_gauges(conn)
+            # e.g. {"rapsqlite_pool_size": 5, "rapsqlite_pool_num_idle": 3, "rapsqlite_pool_in_use": 2}
+            for name, value in gauges.items():
+                # Expose as Prometheus gauge, or log, etc.
+                pass
+    """
+    m = await conn.pool_metrics()  # type: ignore[attr-defined]
+    return {
+        "rapsqlite_pool_size": m.get("size", 0),
+        "rapsqlite_pool_num_idle": m.get("num_idle", 0),
+        "rapsqlite_pool_in_use": m.get("in_use", 0),
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -341,7 +408,7 @@ async def _execute_fetchall(
     parameters: Optional[Any] = None,
 ) -> List[Any]:
     """Execute a SELECT and return all rows (aiosqlite-compatible helper)."""
-    return await self.fetch_all(sql, parameters)  # type: ignore[union-attr]
+    return await self.fetch_all(sql, parameters)  # type: ignore[attr-defined,no-any-return]
 
 
 Connection.execute_fetchall = _execute_fetchall  # type: ignore[attr-defined]
@@ -354,7 +421,7 @@ async def _explain_query_plan(
 ) -> List[Any]:
     """Run EXPLAIN QUERY PLAN for the given SQL and return result rows (Phase 3.1)."""
     prepended = f"EXPLAIN QUERY PLAN {sql}"
-    return await self.fetch_all(prepended, parameters)  # type: ignore[union-attr]
+    return await self.fetch_all(prepended, parameters)  # type: ignore[attr-defined,no-any-return]
 
 
 Connection.explain_query_plan = _explain_query_plan  # type: ignore[attr-defined]
@@ -362,7 +429,7 @@ Connection.explain_query_plan = _explain_query_plan  # type: ignore[attr-defined
 
 async def _pool_health(self: "Connection") -> bool:  # type: ignore[valid-type]
     """Run a minimal health check (SELECT 1) and return True (Phase 3.2). Raises on failure."""
-    await self.fetch_all("SELECT 1")  # type: ignore[union-attr]
+    await self.fetch_all("SELECT 1")  # type: ignore[attr-defined]
     return True
 
 
@@ -375,8 +442,8 @@ Connection.executemany = Connection.execute_many  # type: ignore[attr-defined,as
 def _connection_await(self: "Connection"):  # type: ignore[valid-type]
     """Support `await conn` (aiosqlite-compatible). Enters connection and returns self."""
 
-    async def _inner() -> "Connection":
-        await self.__aenter__()  # type: ignore[union-attr]
+    async def _inner() -> "Connection":  # type: ignore[valid-type]
+        await self.__aenter__()  # type: ignore[attr-defined]
         return self  # type: ignore[return-value]
 
     return _inner().__await__()

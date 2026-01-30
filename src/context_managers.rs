@@ -45,6 +45,7 @@ pub(crate) struct ExecuteContextManager {
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
     pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     pub(crate) callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
@@ -78,6 +79,7 @@ impl ExecuteContextManager {
             let pragmas = Arc::clone(&slf.borrow(py).pragmas);
             let pool_size = Arc::clone(&slf.borrow(py).pool_size);
             let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);
+            let idle_timeout_secs = Arc::clone(&slf.borrow(py).idle_timeout_secs);
             let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
             let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
             let callback_connection = Arc::clone(&slf.borrow(py).callback_connection);
@@ -136,6 +138,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                     }
@@ -174,6 +177,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
 
@@ -190,6 +194,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         bind_and_execute(&query, &param_values, &pool_clone, &path).await?
@@ -202,10 +207,17 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
-                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
                         let mut conn = pool_clone.acquire().await.map_err(|e| {
                             pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
                         })?;
@@ -287,6 +299,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                     }
@@ -307,6 +320,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                     }
@@ -338,6 +352,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         let mut conn_guard = callback_connection.lock().await;
@@ -352,6 +367,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         bind_and_fetch_all(&query, &param_values, &pool_clone, &path).await?
@@ -381,7 +397,7 @@ impl ExecuteContextManager {
                         let desc: Py<PyAny> = if let Some(first) = rows.first() {
                             build_description_tuple(py, first)?.unbind().into()
                         } else {
-                            py.None().into()
+                            py.None()
                         };
                         cur.call_method1("_set_select_results", (list, desc))?;
                         Ok(())
@@ -439,6 +455,7 @@ pub(crate) struct TransactionContextManager {
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
     pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     pub(crate) connection: Py<Connection>,
@@ -446,7 +463,7 @@ pub(crate) struct TransactionContextManager {
     pub(crate) init_hook_called: Arc<StdMutex<bool>>,       // Track if init_hook has been executed
     pub(crate) timeout: Arc<StdMutex<f64>>,                 // SQLite busy_timeout in seconds
     pub(crate) isolation_level: Arc<StdMutex<Option<String>>>, // Phase 3.9: None | DEFERRED | IMMEDIATE | EXCLUSIVE
-    pub(crate) explicit_transaction: Arc<Mutex<bool>>,      // in_transaction() true only when explicit
+    pub(crate) explicit_transaction: Arc<Mutex<bool>>, // in_transaction() true only when explicit
 }
 
 #[pymethods]
@@ -459,6 +476,7 @@ impl TransactionContextManager {
             let pragmas = Arc::clone(&slf.borrow(py).pragmas);
             let pool_size = Arc::clone(&slf.borrow(py).pool_size);
             let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);
+            let idle_timeout_secs = Arc::clone(&slf.borrow(py).idle_timeout_secs);
             let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
             let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
             let connection = slf.borrow(py).connection.clone_ref(py);
@@ -517,6 +535,7 @@ impl TransactionContextManager {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 

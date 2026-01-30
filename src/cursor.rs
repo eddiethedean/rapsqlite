@@ -38,6 +38,7 @@ pub(crate) struct Cursor {
     pub(crate) connection_pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Reference to connection's pragmas
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's row_factory at cursor creation
     pub(crate) text_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's text_factory
     // Transaction and callback state for proper connection priority
@@ -111,7 +112,11 @@ impl Cursor {
 
     /// Internal: store fetched SELECT results and description (eager execution from ExecuteContextManager).
     /// Description is stored in pending_description so cursor.description is None until first fetch (lazy).
-    fn _set_select_results(&self, rows: &Bound<'_, PyList>, description: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn _set_select_results(
+        &self,
+        rows: &Bound<'_, PyList>,
+        description: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
         let mut vec = Vec::with_capacity(rows.len());
         for item in rows.iter() {
             vec.push(item.clone().unbind());
@@ -208,6 +213,7 @@ impl Cursor {
         let pragmas = Arc::clone(&self.connection_pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
         let text_factory = Arc::clone(&self.text_factory);
         let transaction_state = Arc::clone(&self.transaction_state);
@@ -299,6 +305,7 @@ impl Cursor {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
 
@@ -321,6 +328,7 @@ impl Cursor {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         bind_and_fetch_all(&processed_query, &processed_params, &pool_clone, &path)
@@ -398,7 +406,7 @@ impl Cursor {
                     let o_guard = row_factory_override.lock().unwrap();
                     if let Some(ref f) = *o_guard {
                         if let Ok(s) = f.bind(py).downcast::<PyString>() {
-                            if s.to_str().map_or(false, |n| n == "tuple") {
+                            if s.to_str().is_ok_and(|n| n == "tuple") {
                                 if let Ok(list) = row.downcast_bound::<PyList>(py) {
                                     let items: Vec<pyo3::Bound<'_, PyAny>> = list.iter().collect();
                                     row = PyTuple::new(py, items)?.into_any().unbind();
@@ -428,6 +436,7 @@ impl Cursor {
         let pragmas = Arc::clone(&self.connection_pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
         let text_factory = Arc::clone(&self.text_factory);
         let transaction_state = Arc::clone(&self.transaction_state);
@@ -585,6 +594,7 @@ impl Cursor {
                                 &pragmas,
                                 &pool_size,
                                 &connection_timeout_secs,
+                                &idle_timeout_secs,
                             )
                             .await?;
 
@@ -607,6 +617,7 @@ impl Cursor {
                                 &pragmas,
                                 &pool_size,
                                 &connection_timeout_secs,
+                                &idle_timeout_secs,
                             )
                             .await?;
                             bind_and_fetch_all(
@@ -681,11 +692,15 @@ impl Cursor {
                     let start = *index_guard;
                     let result_list = PyList::empty(py);
                     let o_guard = row_factory_override.lock().unwrap();
-                    let use_tuple = o_guard.as_ref().and_then(|f| {
-                        f.bind(py).downcast::<PyString>().ok().and_then(|s| {
-                            s.to_str().ok().filter(|n| *n == "tuple")
+                    let use_tuple = o_guard
+                        .as_ref()
+                        .and_then(|f| {
+                            f.bind(py)
+                                .downcast::<PyString>()
+                                .ok()
+                                .and_then(|s| s.to_str().ok().filter(|n| *n == "tuple"))
                         })
-                    }).is_some();
+                        .is_some();
                     for row in &results_vec[start..] {
                         let mut r = row.clone_ref(py);
                         if use_tuple {
@@ -728,6 +743,7 @@ impl Cursor {
         let pragmas = Arc::clone(&self.connection_pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let row_factory = Arc::clone(&self.row_factory);
         let text_factory = Arc::clone(&self.text_factory);
         let transaction_state = Arc::clone(&self.transaction_state);
@@ -826,6 +842,7 @@ impl Cursor {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
 
@@ -848,6 +865,7 @@ impl Cursor {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         bind_and_fetch_all(&processed_query, &processed_params, &pool_clone, &path)
@@ -928,11 +946,15 @@ impl Cursor {
                     let end = std::cmp::min(start + fetch_size, results_vec.len());
 
                     let o_guard = row_factory_override.lock().unwrap();
-                    let use_tuple = o_guard.as_ref().and_then(|f| {
-                        f.bind(py).downcast::<PyString>().ok().and_then(|s| {
-                            s.to_str().ok().filter(|n| *n == "tuple")
+                    let use_tuple = o_guard
+                        .as_ref()
+                        .and_then(|f| {
+                            f.bind(py)
+                                .downcast::<PyString>()
+                                .ok()
+                                .and_then(|s| s.to_str().ok().filter(|n| *n == "tuple"))
                         })
-                    }).is_some();
+                        .is_some();
                     let result_list = PyList::empty(py);
                     for row in &results_vec[start..end] {
                         let mut r = row.clone_ref(py);
@@ -1008,6 +1030,7 @@ impl Cursor {
         let pragmas = Arc::clone(&self.connection_pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let callback_connection = Arc::clone(&self.callback_connection);
@@ -1064,6 +1087,7 @@ impl Cursor {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
 
@@ -1079,6 +1103,7 @@ impl Cursor {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         bind_and_execute(&statement, &[], &pool_clone, &path).await?;
@@ -1130,9 +1155,10 @@ impl Cursor {
                             let o_guard = row_factory_override.lock().unwrap();
                             if let Some(ref f) = *o_guard {
                                 if let Ok(s) = f.bind(py).downcast::<PyString>() {
-                                    if s.to_str().map_or(false, |n| n == "tuple") {
+                                    if s.to_str().is_ok_and(|n| n == "tuple") {
                                         if let Ok(list) = row.downcast_bound::<PyList>(py) {
-                                            let items: Vec<pyo3::Bound<'_, PyAny>> = list.iter().collect();
+                                            let items: Vec<pyo3::Bound<'_, PyAny>> =
+                                                list.iter().collect();
                                             row = PyTuple::new(py, items)?.into_any().unbind();
                                         }
                                     }

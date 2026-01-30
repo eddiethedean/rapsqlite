@@ -400,9 +400,12 @@ async def test_pool_config_large_pool_size(test_db):
                         await worker_db.execute("INSERT INTO t DEFAULT VALUES")
                     return  # Success
                 except rapsqlite.OperationalError as e:
-                    if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                    if (
+                        "database is locked" in str(e).lower()
+                        and attempt < max_retries - 1
+                    ):
                         # Exponential backoff: wait longer on each retry
-                        await asyncio.sleep(0.01 * (2 ** attempt))
+                        await asyncio.sleep(0.01 * (2**attempt))
                         continue
                     raise  # Re-raise if not a locking error or out of retries
 
@@ -411,14 +414,18 @@ async def test_pool_config_large_pool_size(test_db):
         results = await asyncio.gather(
             *(worker(i) for i in range(50)), return_exceptions=True
         )
-        
+
         # Check for any unexpected exceptions
         exceptions = [r for r in results if isinstance(r, Exception)]
         if exceptions:
             # If we have exceptions, log them but don't fail if they're all locking errors
             non_locking_errors = [
-                e for e in exceptions 
-                if not (isinstance(e, rapsqlite.OperationalError) and "database is locked" in str(e).lower())
+                e
+                for e in exceptions
+                if not (
+                    isinstance(e, rapsqlite.OperationalError)
+                    and "database is locked" in str(e).lower()
+                )
             ]
             if non_locking_errors:
                 raise Exception(f"Unexpected errors in workers: {non_locking_errors}")

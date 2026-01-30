@@ -120,7 +120,9 @@ async def test_multiple_operations():
     try:
         async with connect(test_db) as conn:
             # Create table
-            await conn.execute("CREATE TABLE data (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE data (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
 
             # Insert multiple rows
             for i in range(5):
@@ -166,7 +168,9 @@ async def test_type_integer():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
             await conn.execute("INSERT INTO test (value) VALUES (42)")
 
             rows = await conn.fetch_all("SELECT * FROM test")
@@ -190,7 +194,9 @@ async def test_type_real():
 
             rows = await conn.fetch_all("SELECT * FROM test")
             assert len(rows) == 1
-            assert isinstance(rows[0][1], float), f"Expected float, got {type(rows[0][1])}"
+            assert isinstance(rows[0][1], float), (
+                f"Expected float, got {type(rows[0][1])}"
+            )
             assert abs(rows[0][1] - 3.14) < 0.001
     finally:
         cleanup_db(test_db)
@@ -242,7 +248,9 @@ async def test_transaction_commit():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
 
             await conn.begin()
             await conn.execute("INSERT INTO test (value) VALUES (1)")
@@ -263,7 +271,9 @@ async def test_transaction_rollback():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
 
             await conn.begin()
             await conn.execute("INSERT INTO test (value) VALUES (1)")
@@ -331,7 +341,9 @@ async def test_fetch_one():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
             await conn.execute("INSERT INTO test (value) VALUES (42)")
 
             row = await conn.fetch_one("SELECT * FROM test WHERE id = 1")
@@ -349,7 +361,9 @@ async def test_fetch_optional():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
 
             # Test with no rows
             result = await conn.fetch_optional("SELECT * FROM test WHERE id = 999")
@@ -372,7 +386,9 @@ async def test_last_insert_rowid():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
             await conn.execute("INSERT INTO test (value) VALUES (42)")
 
             rowid = await conn.last_insert_rowid()
@@ -389,7 +405,9 @@ async def test_changes():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
             await conn.execute("INSERT INTO test (value) VALUES (1)")
             await conn.execute("INSERT INTO test (value) VALUES (2)")
 
@@ -409,7 +427,9 @@ async def test_cursor_execute():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
 
             cursor = conn.cursor()
             await cursor.execute("INSERT INTO test (value) VALUES (42)")
@@ -428,7 +448,9 @@ async def test_cursor_fetchone():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
             await conn.execute("INSERT INTO test (value) VALUES (42)")
 
             cursor = conn.cursor()
@@ -448,7 +470,9 @@ async def test_cursor_fetchall():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
             await conn.execute("INSERT INTO test (value) VALUES (1)")
             await conn.execute("INSERT INTO test (value) VALUES (2)")
 
@@ -524,7 +548,9 @@ async def test_cursor_context_manager():
 
     try:
         async with connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+            await conn.execute(
+                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+            )
 
             async with conn.cursor() as cursor:
                 await cursor.execute("INSERT INTO test (value) VALUES (42)")
@@ -586,7 +612,9 @@ async def test_programming_error():
 
     try:
         async with connect(test_db) as conn:
-            with pytest.raises(Exception):  # Should raise ProgrammingError or DatabaseError
+            with pytest.raises(
+                Exception
+            ):  # Should raise ProgrammingError or DatabaseError
                 await conn.execute("INVALID SQL STATEMENT")
     finally:
         cleanup_db(test_db)

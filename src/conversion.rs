@@ -363,5 +363,5 @@ pub(crate) fn build_description_tuple<'py>(
         )?;
         col_tuples.push(seven.into_any());
     }
-    Ok(PyTuple::new(py, col_tuples)?)
+    PyTuple::new(py, col_tuples)
 }

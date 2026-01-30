@@ -175,9 +175,9 @@ def pytest_configure(config):
 
 def pytest_collection_modifyitems(config, items):
     """Apply longer timeout (120s) to tests marked slow when pytest-timeout is active."""
-    try:
-        import pytest_timeout
-    except ImportError:
+    import importlib.util
+
+    if importlib.util.find_spec("pytest_timeout") is None:
         return
     for item in items:
         if item.get_closest_marker("slow"):

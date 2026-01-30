@@ -97,6 +97,9 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 ### Added - Documentation (pool, monitoring, type conversion)
 
 - **Pool metrics and health** — API reference (`docs/api-reference/connection.rst`): `pool_metrics()` returns `{size, num_idle, in_use}`; `pool_health()` runs `SELECT 1`. Advanced usage guide: new **Monitoring** section (pool metrics in production, health checks, query logging and slow-query detection via `set_trace_callback`).
+- **Idle connection timeout (Phase 3.2)** — `connect(..., idle_timeout=N)` and `Connection.idle_timeout` (getter/setter); pool closes connections idle longer than N seconds. Documented in advanced-usage and API reference; tested in `test_phase3_api.py::test_idle_timeout`.
+- **Metrics export (Phase 3.5)** — Optional helper `pool_metrics_gauges(conn)` returns a dict of gauge names to values for Prometheus or custom metrics endpoints (`rapsqlite_pool_size`, `rapsqlite_pool_num_idle`, `rapsqlite_pool_in_use`). Documented in advanced-usage (Monitoring / Metrics export) and api-reference (pool_metrics). Tested in `test_phase3_api.py::test_pool_metrics_gauges`.
+- **Type system (Phase 3.10)** — `register_adapter` and `register_converter` deferred; workarounds and future plan documented in `docs/reference/type-conversion.rst` and migration guide (subsection “Future: register_adapter and register_converter”).
 - **Type conversion strategy** — New `docs/reference/type-conversion.rst`: built-in parameter/result mapping, custom types today (application-layer conversion, `create_function`, `row_factory`, `text_factory`), and future plan for `register_adapter`/`register_converter`. Linked from docs index and compatibility guide.
 
 ### Added - Test isolation and parallel runs

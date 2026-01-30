@@ -45,7 +45,10 @@ async def test_concurrent_begin_attempts(test_db, unique_table_prefix):
                 # - Database error: "cannot start a transaction within a transaction"
                 # OperationalError may not subclass Error on older builds.
                 msg = str(e).lower()
-                if "already in progress" in msg or "cannot start a transaction within a transaction" in msg:
+                if (
+                    "already in progress" in msg
+                    or "cannot start a transaction within a transaction" in msg
+                ):
                     return False
                 raise
 
@@ -58,10 +61,14 @@ async def test_concurrent_begin_attempts(test_db, unique_table_prefix):
         await holder
 
         unexpected = [x for x in attempts if isinstance(x, Exception)]
-        assert not unexpected, f"Unexpected exceptions from begin attempts: {unexpected!r}"
+        assert not unexpected, (
+            f"Unexpected exceptions from begin attempts: {unexpected!r}"
+        )
 
         # All concurrent attempts should be rejected while the holder tx is active.
-        assert all(x is False for x in attempts), f"Expected all attempts to fail, got: {attempts!r}"
+        assert all(x is False for x in attempts), (
+            f"Expected all attempts to fail, got: {attempts!r}"
+        )
 
         # Verify the holder transaction committed exactly one insert.
         rows = await db.fetch_all(f"SELECT COUNT(*) FROM {tbl}")
@@ -108,8 +115,12 @@ async def test_concurrent_transaction_context_managers(test_db, unique_table_pre
         await holder
 
         unexpected = [x for x in attempts if isinstance(x, Exception)]
-        assert not unexpected, f"Unexpected exceptions from transaction attempts: {unexpected!r}"
-        assert all(x is False for x in attempts), f"Expected all attempts to fail, got: {attempts!r}"
+        assert not unexpected, (
+            f"Unexpected exceptions from transaction attempts: {unexpected!r}"
+        )
+        assert all(x is False for x in attempts), (
+            f"Expected all attempts to fail, got: {attempts!r}"
+        )
 
         # Verify the holder transaction committed exactly one insert.
         rows = await db.fetch_all(f"SELECT COUNT(*) FROM {tbl}")
@@ -183,7 +194,9 @@ async def test_transaction_state_consistency(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_transaction_rollback_on_error_preserves_state(test_db, unique_table_prefix):
+async def test_transaction_rollback_on_error_preserves_state(
+    test_db, unique_table_prefix
+):
     """Test that transaction state is properly reset after rollback."""
     tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:

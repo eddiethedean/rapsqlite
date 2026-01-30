@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 @pytest.mark.asyncio
 async def test_sqlalchemy_engine_create():
     """create_async_engine(\"sqlite+rapsqlite:///:memory:\") builds an AsyncEngine."""
-    import rapsqlite.sqlalchemy  # register dialect
 
     engine = create_async_engine("sqlite+rapsqlite:///:memory:")
     assert engine is not None
@@ -23,14 +22,15 @@ async def test_sqlalchemy_engine_create():
 @pytest.mark.asyncio
 async def test_sqlalchemy_alembic_style_migration(test_db: str) -> None:
     """Validate sqlite+rapsqlite for Alembic-style migrations (create table, add column)."""
-    import rapsqlite.sqlalchemy  # register dialect
     from rapsqlite import connect
 
     url = f"sqlite+rapsqlite:///{test_db}"
     engine = create_async_engine(url)
     try:
         async with engine.begin() as conn:
-            await conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"))
+            await conn.execute(
+                text("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+            )
             await conn.execute(text("INSERT INTO users (id, name) VALUES (1, 'alice')"))
         async with engine.begin() as conn:
             await conn.execute(text("ALTER TABLE users ADD COLUMN email TEXT"))

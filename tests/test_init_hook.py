@@ -69,7 +69,8 @@ async def test_init_hook_creates_tables(tmp_path):
     async with _isolated_connection(db_path, init_hook=init_hook) as conn:
         # First operation triggers init_hook
         await conn.execute(
-            "INSERT INTO users (name, email) VALUES (?, ?)", ["Alice", "alice@example.com"]
+            "INSERT INTO users (name, email) VALUES (?, ?)",
+            ["Alice", "alice@example.com"],
         )
 
         # Verify schema was created
@@ -626,7 +627,9 @@ async def test_init_hook_concurrent_first_access(tmp_path):
 
         # Now concurrent operations should work
 
-        tasks = [conn.execute("INSERT INTO test (id) VALUES (?)", [i]) for i in range(10)]
+        tasks = [
+            conn.execute("INSERT INTO test (id) VALUES (?)", [i]) for i in range(10)
+        ]
         await asyncio.gather(*tasks)
 
         # Verify all inserts succeeded (table was created by init_hook)
@@ -783,7 +786,9 @@ async def test_init_hook_with_connection_string_pragmas(tmp_path):
         await conn.set_pragma("synchronous", "NORMAL")
 
     # Use connection string with pragmas
-    async with _isolated_connection(f"file:{db_path}?foreign_keys=1", init_hook=init_hook) as conn:
+    async with _isolated_connection(
+        f"file:{db_path}?foreign_keys=1", init_hook=init_hook
+    ) as conn:
         # First operation triggers init_hook
         await conn.execute("INSERT INTO test (id) VALUES (1)")
 
@@ -860,7 +865,8 @@ async def test_init_hook_exception_different_types(tmp_path):
     conn1 = _isolated_connection(db_path, init_hook=init_hook_runtime)
     try:
         with pytest.raises(
-            rapsqlite.OperationalError, match="init_hook raised an exception.*Runtime error"
+            rapsqlite.OperationalError,
+            match="init_hook raised an exception.*Runtime error",
         ):
             await conn1.execute("SELECT 1")
     finally:
@@ -969,7 +975,9 @@ async def test_init_hook_with_complex_schema(tmp_path):
         assert len(indexes) == 2
 
         # Verify foreign keys work
-        user = await conn.fetch_one("SELECT id FROM users WHERE username = ?", ["alice"])
+        user = await conn.fetch_one(
+            "SELECT id FROM users WHERE username = ?", ["alice"]
+        )
         await conn.execute(
             "INSERT INTO posts (user_id, title) VALUES (?, ?)", [user[0], "First Post"]
         )

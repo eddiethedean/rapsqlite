@@ -48,6 +48,7 @@ class _RapsqliteConnection(AsyncAdapt_dbapi_connection):
 
 class _RapsqliteDialectModule:
     """DBAPI-compatible module for dialect. connect() is sync, uses await_."""
+
     paramstyle = _dbapi.paramstyle
     apilevel = _dbapi.apilevel
     threadsafety = _dbapi.threadsafety
@@ -65,6 +66,7 @@ class _RapsqliteDialectModule:
 
     def connect(self, *arg: Any, **kw: Any) -> _RapsqliteConnection:
         from sqlalchemy.util.concurrency import await_fallback
+
         creator_fn = kw.pop("async_creator_fn", None)
         if creator_fn:
             raw = await_fallback(creator_fn(*arg, **kw))
@@ -81,7 +83,7 @@ class SQLiteDialect_rapsqlite(SQLiteDialect_pysqlite):
     supports_server_side_cursors = False
 
     @classmethod
-    def import_dbapi(cls) -> _RapsqliteDialectModule:
+    def import_dbapi(cls) -> _RapsqliteDialectModule:  # type: ignore[override]
         return _RapsqliteDialectModule()
 
     @classmethod

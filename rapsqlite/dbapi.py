@@ -64,15 +64,15 @@ class AsyncCursor:
 
     @property
     def rowcount(self) -> int:
-        return self._raw.rowcount
+        return self._raw.rowcount  # type: ignore[no-any-return]
 
     @property
     def lastrowid(self) -> int:
-        return getattr(self._raw, "lastrowid", -1)
+        return getattr(self._raw, "lastrowid", -1)  # type: ignore[no-any-return]
 
     @property
     def arraysize(self) -> int:
-        return self._raw.arraysize
+        return self._raw.arraysize  # type: ignore[no-any-return]
 
     @arraysize.setter
     def arraysize(self, value: int) -> None:
@@ -80,27 +80,27 @@ class AsyncCursor:
 
     async def execute(self, sql: str, params: Any = None) -> None:
         async def _do() -> None:
-            return await self._raw.execute(sql, params)
+            return await self._raw.execute(sql, params)  # type: ignore[no-any-return]
 
-        return await self._with_lock(_do)
+        return await self._with_lock(_do)  # type: ignore[no-any-return]
 
     async def executemany(self, sql: str, seq_of_params: Any) -> None:
         async def _do() -> None:
             await self._raw.executemany(sql, seq_of_params)
 
-        await self._with_lock(_do)
+        await self._with_lock(_do)  # type: ignore[no-any-return]
 
     async def fetchone(self) -> Any:
-        return await self._with_lock(self._raw.fetchone)
+        return await self._with_lock(self._raw.fetchone)  # type: ignore[no-any-return]
 
     async def fetchmany(self, size: int | None = None) -> list[Any]:
         async def _do() -> list[Any]:
-            return await self._raw.fetchmany(size)
+            return await self._raw.fetchmany(size)  # type: ignore[no-any-return]
 
-        return await self._with_lock(_do)
+        return await self._with_lock(_do)  # type: ignore[no-any-return]
 
     async def fetchall(self) -> list[Any]:
-        return await self._with_lock(self._raw.fetchall)
+        return await self._with_lock(self._raw.fetchall)  # type: ignore[no-any-return]
 
     async def close(self) -> None:
         async def _do() -> None:
@@ -176,16 +176,16 @@ class AsyncConnection:
     async def cursor(self) -> AsyncCursor:
         async def _do() -> AsyncCursor:
             raw = self._conn.cursor()
-            return AsyncCursor(self, raw)
+            return AsyncCursor(self, raw)  # type: ignore[no-any-return]
 
-        return await self._with_op_lock(_do)
+        return await self._with_op_lock(_do)  # type: ignore[no-any-return]
 
     async def execute(self, sql: str, params: Any = None) -> AsyncCursor:
         async def _do() -> AsyncCursor:
             raw = await self._conn.execute(sql, params)
-            return AsyncCursor(self, raw)
+            return AsyncCursor(self, raw)  # type: ignore[no-any-return]
 
-        return await self._with_op_lock(_do)
+        return await self._with_op_lock(_do)  # type: ignore[no-any-return]
 
     async def executemany(self, sql: str, seq_of_params: Any) -> None:
         async def _do() -> None:
@@ -228,14 +228,18 @@ async def connect(*args: Any, **kwargs: Any) -> AsyncConnection:
     if database is None:
         database = kwargs.pop("database", None)
     if database is None:
-        raise InterfaceError("connect() requires database as first positional or as keyword 'database'")
+        raise InterfaceError(
+            "connect() requires database as first positional or as keyword 'database'"
+        )
     if args:
-        raise InterfaceError("connect() takes at most one positional argument (database)")
+        raise InterfaceError(
+            "connect() takes at most one positional argument (database)"
+        )
 
     timeout: float = float(kwargs.pop("timeout", 5.0))
     opts = {k: v for k, v in kwargs.items() if k in _ALLOWED_CONNECT_KWARGS}
     conn = _connect(str(database), timeout=timeout, **opts)
-    await conn.__aenter__()
+    await conn.__aenter__()  # type: ignore[attr-defined]
     return AsyncConnection(conn)
 
 

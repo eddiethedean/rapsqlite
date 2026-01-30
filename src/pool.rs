@@ -54,6 +54,7 @@ pub(crate) async fn get_or_create_pool(
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: &Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
+    idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
 ) -> Result<SqlitePool, PyErr> {
     let mut pool_guard = pool.lock().await;
     if pool_guard.is_none() {
@@ -65,10 +66,17 @@ pub(crate) async fn get_or_create_pool(
             let g = connection_timeout_secs.lock().unwrap();
             *g
         };
+        let idle_secs = {
+            let g = idle_timeout_secs.lock().unwrap();
+            *g
+        };
         let mut opts = SqlitePoolOptions::new().max_connections(max_conn);
         // Set default timeout of 30 seconds if not specified
         let timeout = timeout_secs.unwrap_or(30);
         opts = opts.acquire_timeout(Duration::from_secs(timeout));
+        if let Some(idle) = idle_secs {
+            opts = opts.idle_timeout(Some(Duration::from_secs(idle)));
+        }
         let new_pool = opts.connect(&format!("sqlite:{path}")).await.map_err(|e| {
             OperationalError::new_err(format!("Failed to connect to database at {path}: {e}"))
         })?;
@@ -112,12 +120,20 @@ pub(crate) async fn ensure_callback_connection(
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: &Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
+    idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
 ) -> Result<(), PyErr> {
     let mut callback_guard = callback_connection.lock().await;
     if callback_guard.is_none() {
         // Get or create pool first
-        let pool_clone =
-            get_or_create_pool(path, pool, pragmas, pool_size, connection_timeout_secs).await?;
+        let pool_clone = get_or_create_pool(
+            path,
+            pool,
+            pragmas,
+            pool_size,
+            connection_timeout_secs,
+            idle_timeout_secs,
+        )
+        .await?;
 
         // Acquire a connection from the pool
         let pool_size_val = {

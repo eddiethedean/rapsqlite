@@ -36,7 +36,9 @@ async def main():
         del conn
         # Force GC so PyO3 drops the Rust Connection -> drops pool/PoolConnection
         gc.collect()
-        print("gc.collect() completed (panic may have occurred in another thread/warning)")
+        print(
+            "gc.collect() completed (panic may have occurred in another thread/warning)"
+        )
     finally:
         cleanup_db(db_path)
 

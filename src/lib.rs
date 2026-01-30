@@ -15,7 +15,7 @@ use pyo3::prelude::*;
 
 mod exceptions;
 use exceptions::{
-    DataError, DatabaseError, Error, IntegrityError, InternalError, InterfaceError,
+    DataError, DatabaseError, Error, IntegrityError, InterfaceError, InternalError,
     NotSupportedError, OperationalError, ProgrammingError, ValueError, Warning,
 };
 

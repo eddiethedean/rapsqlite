@@ -50,6 +50,13 @@ Pool Size Guidelines
 
 **Note**: SQLite serializes writes, so increasing pool size mainly helps with concurrent reads.
 
+Idle connection timeout
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Set ``idle_timeout`` (seconds) so connections idle in the pool longer than that are closed.
+Use ``connect(..., idle_timeout=60)`` or ``conn.idle_timeout = 60`` before the pool is created.
+``None`` (default) means no idle timeout. This helps reduce resource use when load drops.
+
 .. _monitoring:
 
 Monitoring
@@ -67,6 +74,25 @@ Pool metrics
        # e.g. {"size": 5, "num_idle": 3, "in_use": 2}
        logger.info("pool %s", metrics)
        # Or expose via a /metrics endpoint for Prometheus, etc.
+
+Metrics export (Prometheus / custom)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use the optional helper **``pool_metrics_gauges(conn)``** to get pool metrics as a dict of
+gauge names suitable for Prometheus or a custom metrics endpoint. It returns
+``rapsqlite_pool_size``, ``rapsqlite_pool_num_idle``, and ``rapsqlite_pool_in_use``.
+Import it from ``rapsqlite`` and call it with your connection:
+
+.. code-block:: python
+
+   from rapsqlite import connect, pool_metrics_gauges
+
+   async with connect("app.db") as conn:
+       gauges = await pool_metrics_gauges(conn)
+       # e.g. {"rapsqlite_pool_size": 5, "rapsqlite_pool_num_idle": 3, "rapsqlite_pool_in_use": 2}
+       # Expose gauges on your /metrics endpoint or feed into your metrics system.
+
+See :ref:`api-connection` for ``pool_metrics()`` and ``pool_health()``.
 
 Health checks
 ~~~~~~~~~~~~~
@@ -286,6 +312,58 @@ Best Practice: Always handle exceptions within your callback functions:
            return None  # Or raise if you want query to fail
 
    await conn.create_function("safe_func", 1, safe_user_function)
+
+Streaming and large result sets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To process large SELECT result sets without loading every row into memory:
+
+- **Cursor iteration**: ``async for row in cursor`` after ``await cursor.execute(...)``
+  iterates over rows, but the cursor currently loads the full result set when
+  ``execute`` runs. Use this when the result size is acceptable in memory.
+
+- **Chunked fetching**: Use ``cursor.fetchmany(size)`` in a loop after
+  ``execute``; each call returns up to ``size`` rows from the already-fetched
+  result set. For true streaming (fetch from the database in chunks), use
+  pagination below.
+
+- **Pagination (memory-efficient)**: Run the same query with ``LIMIT`` and
+  ``OFFSET`` in a loop and call ``fetch_all`` for each page. This keeps memory
+  usage bounded by the page size:
+
+  .. code-block:: python
+
+     chunk_size = 1000
+     offset = 0
+     while True:
+         rows = await conn.fetch_all(
+             "SELECT * FROM big_table ORDER BY id LIMIT ? OFFSET ?",
+             [chunk_size, offset],
+         )
+         if not rows:
+             break
+         for row in rows:
+             process(row)
+         offset += chunk_size
+
+  Ensure the query has a deterministic order (e.g. ``ORDER BY id``) so pages
+  are consistent. A future release may add a native ``stream()`` or
+  ``stream_batches()`` API that avoids manual LIMIT/OFFSET.
+
+FTS, JSON, and UPSERT
+~~~~~~~~~~~~~~~~~~~~~
+
+rapsqlite uses standard SQLite; you can use FTS, JSON, and UPSERT directly:
+
+- **Full-Text Search (FTS)**: Create a virtual table with ``CREATE VIRTUAL TABLE
+  ... USING fts5(...)`` and query with ``MATCH``. No extra setup required.
+
+- **JSON**: Use SQLite's JSON1 functions (e.g. ``json_extract``, ``json_object``,
+  ``->``, ``->>``) in your SQL. Results are returned as text; parse in Python
+  if needed.
+
+- **UPSERT**: Use ``INSERT ... ON CONFLICT (...) DO UPDATE SET ...`` or ``DO
+  NOTHING``. Works with rapsqlite like any other DML.
 
 Connection Lifecycle and Cleanup
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

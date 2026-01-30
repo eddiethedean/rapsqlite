@@ -25,7 +25,9 @@ DB_PATH = str(Path(__file__).resolve().parent / "fastapi_example.db")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with connect(DB_PATH) as conn:
-        await conn.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)")
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)"
+        )
         await conn.execute("INSERT OR IGNORE INTO items (id, name) VALUES (1, 'foo')")
     yield
 

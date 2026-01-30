@@ -1,7 +1,7 @@
 //! Shared internal types used across modules.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyFloat, PyInt, PyString};
+use pyo3::types::{PyBytes, PyFloat, PyInt, PyString, PyTuple};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -93,6 +93,12 @@ impl SqliteParam {
         // Try to extract as string (PyString)
         if let Ok(py_str) = value.cast::<PyString>() {
             return Ok(SqliteParam::Text(py_str.to_str()?.to_string()));
+        }
+
+        // Tuple: convert to text representation for aiosqlite compatibility (single placeholder binding).
+        if value.cast::<PyTuple>().is_ok() {
+            let s = value.repr()?.to_string();
+            return Ok(SqliteParam::Text(s));
         }
 
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
