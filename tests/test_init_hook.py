@@ -491,7 +491,9 @@ async def test_init_hook_with_set_pragma(tmp_path):
         assert "test" in tables
 
 
-@pytest.mark.skip(reason="init_hook + begin(): Transaction connection not available when hook runs (known limitation)")
+@pytest.mark.skip(
+    reason="init_hook + begin(): Transaction connection not available when hook runs (known limitation)"
+)
 @pytest.mark.asyncio
 async def test_init_hook_with_begin(tmp_path):
     """Test init_hook is triggered by begin().
@@ -517,7 +519,9 @@ async def test_init_hook_with_begin(tmp_path):
         assert len(result) == 1
 
 
-@pytest.mark.skip(reason="init_hook + transaction(): Transaction connection not available when hook runs (known limitation)")
+@pytest.mark.skip(
+    reason="init_hook + transaction(): Transaction connection not available when hook runs (known limitation)"
+)
 @pytest.mark.asyncio
 async def test_init_hook_with_transaction_context_manager(tmp_path):
     """Test init_hook is triggered by transaction context manager.

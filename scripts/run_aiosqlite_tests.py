@@ -15,7 +15,6 @@ import shutil
 import re
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple
 
 # Colors for output
 GREEN = "\033[32m"
@@ -130,7 +129,7 @@ def patch_test_files(aiosqlite_dir: Path, patched_dir: Path):
 
 def run_tests(
     patched_dir: Path, project_root: Path
-) -> Tuple[List[str], List[str], List[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """Run tests and collect results."""
     print_status("\n🧪 Running tests...", BLUE)
     print_status("=" * 60, BLUE)
@@ -261,9 +260,9 @@ def run_tests(
 
 
 def generate_report(
-    passed: List[str],
-    failed: List[str],
-    skipped: List[str],
+    passed: list[str],
+    failed: list[str],
+    skipped: list[str],
     project_root: Path,
     rapsqlite_version: str,
 ):

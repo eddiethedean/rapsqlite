@@ -160,7 +160,9 @@ async def test_multiple_close_calls(test_db):
     await db.close()
 
 
-@pytest.mark.skip(reason="Requires extension built with maturin develop for same Python to raise on closed connection")
+@pytest.mark.skip(
+    reason="Requires extension built with maturin develop for same Python to raise on closed connection"
+)
 @pytest.mark.edge_case
 @pytest.mark.asyncio
 async def test_operations_on_closed_connection(test_db):

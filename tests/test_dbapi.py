@@ -143,7 +143,9 @@ async def test_cursor_description_rowcount_lastrowid_arraysize(unique_table_pref
     assert ins_cur.lastrowid >= -1 and ins_cur.rowcount >= -1
     await ins_cur.close()
     sel_cur = await conn.execute(f"SELECT * FROM {tbl}")
-    _ = await sel_cur.fetchone()  # trigger execution; description may be populated on fetch
+    _ = (
+        await sel_cur.fetchone()
+    )  # trigger execution; description may be populated on fetch
     # description may be None until first fetch on some builds
     assert sel_cur.description is None or len(sel_cur.description) >= 0
     assert sel_cur.arraysize >= 1

@@ -185,11 +185,11 @@ async def test_execute_iter(test_db):
     """execute_iter yields rows in chunks; conn.execute_iter(...) works; respects chunk_size."""
     async with connect(test_db, iter_chunk_size=2) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
-        await db.execute(
-            "INSERT INTO t (x) VALUES ('a'),('b'),('c'),('d'),('e')"
-        )
+        await db.execute("INSERT INTO t (x) VALUES ('a'),('b'),('c'),('d'),('e')")
         collected = []
-        async for chunk in execute_iter(db, "SELECT * FROM t ORDER BY id", chunk_size=2):
+        async for chunk in execute_iter(
+            db, "SELECT * FROM t ORDER BY id", chunk_size=2
+        ):
             collected.extend(chunk)
         assert collected == [[1, "a"], [2, "b"], [3, "c"], [4, "d"], [5, "e"]]
         # Connection method form and default chunk_size from iter_chunk_size

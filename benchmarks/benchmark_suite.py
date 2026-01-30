@@ -49,7 +49,7 @@ try:
 except ImportError:
     SQLITE3_AVAILABLE = False
 
-import rapsqlite
+import rapsqlite  # noqa: E402
 
 
 def cleanup_db(test_db: str) -> None:
@@ -155,7 +155,9 @@ async def test_simple_query_throughput():
                 test_db = f.name
             try:
                 conn = sqlite3.connect(test_db)
-                conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
+                conn.execute(
+                    "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+                )
                 for i in range(SETUP_ROWS):
                     conn.execute("INSERT INTO test (value) VALUES (?)", (i,))
                 conn.commit()
@@ -179,7 +181,9 @@ async def test_simple_query_throughput():
             "p99": statistics.mean(run_p99),
         }
 
-    print(f"\n=== Simple Query Throughput ({SIMPLE_QUERY_COUNT} queries, avg of {runs} runs) ===")
+    print(
+        f"\n=== Simple Query Throughput ({SIMPLE_QUERY_COUNT} queries, avg of {runs} runs) ==="
+    )
     for lib, metrics in results.items():
         print(
             f"{lib:12} - Mean: {metrics['mean']:.3f}ms, Median: {metrics['median']:.3f}ms, "
@@ -200,7 +204,9 @@ async def test_batch_insert_performance():
             test_db = f.name
         try:
             async with rapsqlite.connect(test_db) as conn:
-                await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
+                await conn.execute(
+                    "CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)"
+                )
                 params = [[f"value_{i}"] for i in range(BATCH_INSERT_ROWS)]
 
                 start = time.perf_counter()
@@ -224,7 +230,9 @@ async def test_batch_insert_performance():
                     params = [(f"value_{i}",) for i in range(BATCH_INSERT_ROWS)]
 
                     start = time.perf_counter()
-                    await conn.executemany("INSERT INTO test (value) VALUES (?)", params)
+                    await conn.executemany(
+                        "INSERT INTO test (value) VALUES (?)", params
+                    )
                     await conn.commit()
                     elapsed_ms.append((time.perf_counter() - start) * 1000)
             finally:
@@ -251,7 +259,9 @@ async def test_batch_insert_performance():
                 cleanup_db(test_db)
         results["sqlite3"] = statistics.mean(elapsed_ms)
 
-    print(f"\n=== Batch Insert Performance ({BATCH_INSERT_ROWS} rows, avg of {runs} runs) ===")
+    print(
+        f"\n=== Batch Insert Performance ({BATCH_INSERT_ROWS} rows, avg of {runs} runs) ==="
+    )
     for lib, avg_ms in results.items():
         print(f"{lib:12} - {avg_ms:.3f}ms")
 
@@ -281,7 +291,9 @@ async def test_concurrent_reads():
                         await conn.fetch_all("SELECT * FROM test WHERE value = ?", [50])
 
             start = time.perf_counter()
-            await asyncio.gather(*[read_worker() for _ in range(CONCURRENT_READS_WORKERS)])
+            await asyncio.gather(
+                *[read_worker() for _ in range(CONCURRENT_READS_WORKERS)]
+            )
             elapsed_ms.append((time.perf_counter() - start) * 1000)
         finally:
             cleanup_db(test_db)
@@ -310,7 +322,9 @@ async def test_concurrent_reads():
                                 await cursor.fetchall()
 
                 start = time.perf_counter()
-                await asyncio.gather(*[read_worker() for _ in range(CONCURRENT_READS_WORKERS)])
+                await asyncio.gather(
+                    *[read_worker() for _ in range(CONCURRENT_READS_WORKERS)]
+                )
                 elapsed_ms.append((time.perf_counter() - start) * 1000)
             finally:
                 cleanup_db(test_db)
@@ -345,7 +359,9 @@ async def test_transaction_performance():
                 for _ in range(TRANSACTION_COUNT):
                     async with conn.transaction():
                         for i in range(TRANSACTION_INSERTS_PER_TX):
-                            await conn.execute("INSERT INTO test (value) VALUES (?)", [i])
+                            await conn.execute(
+                                "INSERT INTO test (value) VALUES (?)", [i]
+                            )
                 elapsed_ms.append((time.perf_counter() - start) * 1000)
         finally:
             cleanup_db(test_db)
@@ -458,7 +474,9 @@ async def test_high_concurrency_reads():
         f"\n=== High Concurrency Reads ({HIGH_CONCURRENCY_READS_WORKERS} workers × {HIGH_CONCURRENCY_READS_PER_WORKER} queries, avg of {runs} runs) ==="
     )
     for lib, avg_ms in results.items():
-        print(f"{lib:12} - {avg_ms:.3f}ms (lower is better; rapsqlite true async scales)")
+        print(
+            f"{lib:12} - {avg_ms:.3f}ms (lower is better; rapsqlite true async scales)"
+        )
 
 
 @pytest.mark.asyncio
@@ -533,7 +551,9 @@ async def test_concurrent_batch_inserts():
         f"\n=== Concurrent Batch Inserts ({CONCURRENT_BATCH_WRITERS} writers × {CONCURRENT_BATCH_ROWS_PER_WRITER} rows each, avg of {runs} runs) ==="
     )
     for lib, avg_ms in results.items():
-        print(f"{lib:12} - {avg_ms:.3f}ms (lower is better; rapsqlite pool overlaps I/O)")
+        print(
+            f"{lib:12} - {avg_ms:.3f}ms (lower is better; rapsqlite pool overlaps I/O)"
+        )
 
 
 @pytest.mark.asyncio

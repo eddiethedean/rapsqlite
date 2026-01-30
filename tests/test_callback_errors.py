@@ -155,9 +155,10 @@ async def test_backup_progress_callback_exception_handled(test_db):
                 raise ValueError("Backup progress error")
 
         # Backup should complete despite progress callback errors
-        async with rapsqlite.connect(test_db) as src, rapsqlite.connect(
-            target_db
-        ) as tgt:
+        async with (
+            rapsqlite.connect(test_db) as src,
+            rapsqlite.connect(target_db) as tgt,
+        ):
             await src.backup(tgt, pages=1, progress=progress_callback)
 
         # Verify backup succeeded

@@ -21,8 +21,7 @@ use crate::connection::ensure_not_closed;
 use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
-    execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
-    release_session_connection,
+    execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};

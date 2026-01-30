@@ -27,16 +27,42 @@ except ImportError:
         raise ImportError("rapsqlite extension (_rapsqlite) not found") from None
 DatabaseError = _ext.DatabaseError
 
+
 def _dbapi_exc(name: str, ext_cls: Any, base: type) -> type:
     """Ensure exception class is a subclass of base (DBAPI hierarchy)."""
     return type(name, (ext_cls, base), {})
 
-DataError = _dbapi_exc("DataError", getattr(_ext, "DataError", type("DataError", (DatabaseError,), {})), DatabaseError)
-OperationalError = _dbapi_exc("OperationalError", getattr(_ext, "OperationalError", type("OperationalError", (DatabaseError,), {})), DatabaseError)
-IntegrityError = _dbapi_exc("IntegrityError", getattr(_ext, "IntegrityError", type("IntegrityError", (DatabaseError,), {})), DatabaseError)
-InternalError = _dbapi_exc("InternalError", getattr(_ext, "InternalError", type("InternalError", (DatabaseError,), {})), DatabaseError)
-NotSupportedError = _dbapi_exc("NotSupportedError", getattr(_ext, "NotSupportedError", type("NotSupportedError", (DatabaseError,), {})), DatabaseError)
-ProgrammingError = _dbapi_exc("ProgrammingError", getattr(_ext, "ProgrammingError", type("ProgrammingError", (DatabaseError,), {})), DatabaseError)
+
+DataError = _dbapi_exc(
+    "DataError",
+    getattr(_ext, "DataError", type("DataError", (DatabaseError,), {})),
+    DatabaseError,
+)
+OperationalError = _dbapi_exc(
+    "OperationalError",
+    getattr(_ext, "OperationalError", type("OperationalError", (DatabaseError,), {})),
+    DatabaseError,
+)
+IntegrityError = _dbapi_exc(
+    "IntegrityError",
+    getattr(_ext, "IntegrityError", type("IntegrityError", (DatabaseError,), {})),
+    DatabaseError,
+)
+InternalError = _dbapi_exc(
+    "InternalError",
+    getattr(_ext, "InternalError", type("InternalError", (DatabaseError,), {})),
+    DatabaseError,
+)
+NotSupportedError = _dbapi_exc(
+    "NotSupportedError",
+    getattr(_ext, "NotSupportedError", type("NotSupportedError", (DatabaseError,), {})),
+    DatabaseError,
+)
+ProgrammingError = _dbapi_exc(
+    "ProgrammingError",
+    getattr(_ext, "ProgrammingError", type("ProgrammingError", (DatabaseError,), {})),
+    DatabaseError,
+)
 
 apilevel = "2.0"
 threadsafety = 0
@@ -219,6 +245,7 @@ class AsyncConnection:
 
     async def _cursor_impl(self) -> AsyncCursor:
         """Actual cursor acquisition (used by _CursorContextManager.__aenter__)."""
+
         async def _do() -> AsyncCursor:
             raw = self._conn.cursor()
             return AsyncCursor(self, raw)  # type: ignore[no-any-return]
@@ -245,11 +272,13 @@ class AsyncConnection:
     async def commit(self) -> None:
         try:
             await self._conn.commit()
-        except OperationalError as e:
+        except OperationalError as e:  # type: ignore[misc]
             # DBAPI compat: commit() is a no-op when not in a transaction
             msg = str(e).lower()
             if "transaction" in msg and (
-                "not available" in msg or "in progress" in msg or "no transaction" in msg
+                "not available" in msg
+                or "in progress" in msg
+                or "no transaction" in msg
             ):
                 return
             raise
@@ -257,11 +286,13 @@ class AsyncConnection:
     async def rollback(self) -> None:
         try:
             await self._conn.rollback()
-        except OperationalError as e:
+        except OperationalError as e:  # type: ignore[misc]
             # DBAPI compat: rollback() is a no-op when not in a transaction
             msg = str(e).lower()
             if "transaction" in msg and (
-                "not available" in msg or "in progress" in msg or "no transaction" in msg
+                "not available" in msg
+                or "in progress" in msg
+                or "no transaction" in msg
             ):
                 return
             raise

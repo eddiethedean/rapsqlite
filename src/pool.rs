@@ -89,9 +89,10 @@ pub(crate) async fn acquire_with_pragmas(
     pool_size_val: Option<usize>,
     timeout_val: Option<u64>,
 ) -> Result<PoolConnection<sqlx::Sqlite>, PyErr> {
-    let mut conn = pool.acquire().await.map_err(|e| {
-        pool_acquisition_error(path, &e, pool_size_val, timeout_val)
-    })?;
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| pool_acquisition_error(path, &e, pool_size_val, timeout_val))?;
     let pragmas_list = pragmas.lock().unwrap().clone();
     apply_pragmas_to_connection(&mut conn, &pragmas_list, path).await?;
     Ok(conn)
@@ -224,14 +225,8 @@ pub(crate) async fn ensure_callback_connection(
             let g = connection_timeout_secs.lock().unwrap();
             *g
         };
-        let pool_conn = acquire_with_pragmas(
-            &pool_clone,
-            pragmas,
-            path,
-            pool_size_val,
-            timeout_val,
-        )
-        .await?;
+        let pool_conn =
+            acquire_with_pragmas(&pool_clone, pragmas, path, pool_size_val, timeout_val).await?;
 
         *callback_guard = Some(pool_conn);
     }
@@ -324,16 +319,10 @@ pub(crate) async fn ensure_session_connection(
             idle_timeout_secs,
         )
         .await?;
-        let pool_size_val = pool_size.lock().unwrap().clone();
-        let timeout_val = connection_timeout_secs.lock().unwrap().clone();
-        let conn = acquire_with_pragmas(
-            &pool_clone,
-            pragmas,
-            path,
-            pool_size_val,
-            timeout_val,
-        )
-        .await?;
+        let pool_size_val = *pool_size.lock().unwrap();
+        let timeout_val = *connection_timeout_secs.lock().unwrap();
+        let conn =
+            acquire_with_pragmas(&pool_clone, pragmas, path, pool_size_val, timeout_val).await?;
         *guard = Some(conn);
     }
     Ok(())

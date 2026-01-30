@@ -71,9 +71,10 @@ async def test_backup_source_in_transaction(test_db_file, target_db_file):
         await src.execute("INSERT INTO t (v) VALUES ('in_transaction')")
         # Backup should work even when source is in transaction
         # Use a separate connection for backup to avoid deadlock
-        async with connect(test_db_file) as src_for_backup, connect(
-            target_db_file
-        ) as tgt:
+        async with (
+            connect(test_db_file) as src_for_backup,
+            connect(target_db_file) as tgt,
+        ):
             await src_for_backup.backup(tgt)
         await src.commit()
 

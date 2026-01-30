@@ -46,10 +46,12 @@ Example:
             except Exception:
                 await conn.rollback()
 """
+
 import asyncio
 import os
 import time
-from typing import Any, Callable, List, Optional, Union
+from collections.abc import Callable
+from typing import Any
 
 import builtins as _builtins
 
@@ -126,6 +128,7 @@ Cursor = _ext.Cursor
 
 # aiosqlite compat: await cursor.execute() must return self (same cursor object)
 _orig_cursor_execute = Cursor.execute  # type: ignore[attr-defined]
+
 
 async def _cursor_execute_return_self(
     self: "Cursor",  # type: ignore[valid-type]
@@ -228,7 +231,7 @@ except AttributeError:
     ) from None
 
 __version__: str = "0.3.0-dev"
-__all__: List[str] = [
+__all__: list[str] = [
     "Connection",
     "Cursor",
     "Row",
@@ -257,7 +260,7 @@ def connect(
     pragmas: Any = None,
     timeout: float = 5.0,
     iter_chunk_size: int = 64,
-    idle_timeout: Optional[int] = None,
+    idle_timeout: int | None = None,
     loop: Any = None,
     **kwargs: Any,
 ) -> "Connection":  # type: ignore[valid-type]
@@ -394,9 +397,9 @@ async def pool_metrics_gauges(conn: "Connection") -> dict:  # type: ignore[valid
 async def timed_fetch_all(
     conn: "Connection",  # type: ignore[valid-type]
     sql: str,
-    parameters: Optional[Any] = None,
-    on_timing: Optional[Callable[[float, str], None]] = None,
-) -> Union[List[Any], tuple[List[Any], float]]:
+    parameters: Any | None = None,
+    on_timing: Callable[[float, str], None] | None = None,
+) -> list[Any] | tuple[list[Any], float]:
     """Run fetch_all and record duration; optionally call on_timing(duration_secs, sql).
 
     If on_timing is None, returns (rows, duration_secs). If on_timing is provided,
@@ -407,7 +410,7 @@ async def timed_fetch_all(
     duration = time.perf_counter() - t0
     if on_timing is not None:
         on_timing(duration, sql)
-        return rows  # type: ignore[return-value]
+        return rows  # type: ignore[return-value,no-any-return]
     return (rows, duration)  # type: ignore[return-value]
 
 
@@ -428,7 +431,7 @@ async def transaction_retry(
                 await conn.execute("INSERT INTO t (x) VALUES (?)", ["a"])
             await transaction_retry(conn, do_work, max_retries=3)
     """
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
     delay = initial_delay
     for attempt in range(max_retries):
         try:
@@ -459,8 +462,8 @@ async def transaction_retry(
 def execute_iter(
     conn: "Connection",  # type: ignore[valid-type]
     sql: str,
-    parameters: Optional[Any] = None,
-    chunk_size: Optional[int] = None,
+    parameters: Any | None = None,
+    chunk_size: int | None = None,
 ):
     """Return an async iterator that yields rows in chunks (streaming / memory-efficient).
 
@@ -484,8 +487,8 @@ class _StreamChunksIterator:
         self,
         conn: "Connection",  # type: ignore[valid-type]
         sql: str,
-        parameters: Optional[Any] = None,
-        chunk_size: Optional[int] = None,
+        parameters: Any | None = None,
+        chunk_size: int | None = None,
     ) -> None:
         self._conn = conn
         self._sql = sql.strip().rstrip(";")
@@ -501,7 +504,7 @@ class _StreamChunksIterator:
     def __aiter__(self) -> "_StreamChunksIterator":
         return self
 
-    async def __anext__(self) -> List[Any]:
+    async def __anext__(self) -> list[Any]:
         # Wrap query so we can paginate: SELECT * FROM (user_query) LIMIT ? OFFSET ?
         wrapped = f"SELECT * FROM ({self._sql}) LIMIT ? OFFSET ?"
         params = self._params + [self._chunk_size, self._offset]
@@ -515,8 +518,8 @@ class _StreamChunksIterator:
 def _connection_execute_iter(
     self: "Connection",  # type: ignore[valid-type]
     sql: str,
-    parameters: Optional[Any] = None,
-    chunk_size: Optional[int] = None,
+    parameters: Any | None = None,
+    chunk_size: int | None = None,
 ) -> _StreamChunksIterator:
     """Return an async iterator that yields rows in chunks (streaming / memory-efficient)."""
     return _StreamChunksIterator(self, sql, parameters, chunk_size)
@@ -555,7 +558,7 @@ class _IterdumpWrapper:
 
     def __init__(self, conn: "Connection") -> None:  # type: ignore[valid-type]
         self._conn = conn
-        self._lines: Optional[List[str]] = None
+        self._lines: list[str] | None = None
         self._index: int = 0
 
     def __aiter__(self) -> "_IterdumpWrapper":
@@ -575,8 +578,8 @@ class _IterdumpWrapper:
         return line
 
     def __await__(self):
-        async def _inner() -> List[str]:
-            # Preserve existing semantics: await conn.iterdump() -> List[str]
+        async def _inner() -> list[str]:
+            # Preserve existing semantics: await conn.iterdump() -> list[str]
             result = await _raw_iterdump(self._conn)  # type: ignore[arg-type]
             return result  # type: ignore[no-any-return]
 
@@ -587,7 +590,7 @@ def _iterdump(self: "Connection") -> _IterdumpWrapper:  # type: ignore[valid-typ
     """Return a dual-mode iterdump wrapper.
 
     - async for line in conn.iterdump():  # async iterator
-    - lines = await conn.iterdump()       # List[str], backwards compatible
+    - lines = await conn.iterdump()       # list[str], backwards compatible
     """
     return _IterdumpWrapper(self)
 
@@ -599,8 +602,8 @@ Connection.iterdump = _iterdump  # type: ignore[assignment]
 async def _execute_fetchall(
     self: "Connection",  # type: ignore[valid-type]
     sql: str,
-    parameters: Optional[Any] = None,
-) -> List[Any]:
+    parameters: Any | None = None,
+) -> list[Any]:
     """Execute a SELECT and return all rows (aiosqlite-compatible helper)."""
     return await self.fetch_all(sql, parameters)  # type: ignore[attr-defined,no-any-return]
 
@@ -611,8 +614,8 @@ Connection.execute_fetchall = _execute_fetchall  # type: ignore[attr-defined]
 async def _explain_query_plan(
     self: "Connection",  # type: ignore[valid-type]
     sql: str,
-    parameters: Optional[Any] = None,
-) -> List[Any]:
+    parameters: Any | None = None,
+) -> list[Any]:
     """Run EXPLAIN QUERY PLAN for the given SQL and return result rows (Phase 3.1)."""
     prepended = f"EXPLAIN QUERY PLAN {sql}"
     return await self.fetch_all(prepended, parameters)  # type: ignore[attr-defined,no-any-return]

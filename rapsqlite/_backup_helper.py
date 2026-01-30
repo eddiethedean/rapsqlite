@@ -6,10 +6,9 @@ from Python's sqlite3.Connection objects for use in backup operations.
 
 import ctypes
 import sys
-from typing import Optional
 
 
-def get_sqlite3_handle(conn) -> Optional[int]:
+def get_sqlite3_handle(conn) -> int | None:
     """
     Extract sqlite3* handle from sqlite3.Connection object.
 

@@ -3,9 +3,9 @@
 
 use libsqlite3_sys::{
     sqlite3, sqlite3_bind_blob, sqlite3_bind_double, sqlite3_bind_int64, sqlite3_bind_null,
-    sqlite3_bind_text, sqlite3_busy_timeout, sqlite3_close, sqlite3_errmsg,
-    sqlite3_finalize, sqlite3_last_insert_rowid, sqlite3_open, sqlite3_prepare_v2, sqlite3_reset,
-    sqlite3_step, SQLITE_DONE, SQLITE_OK, SQLITE_ROW, SQLITE_STATIC,
+    sqlite3_bind_text, sqlite3_busy_timeout, sqlite3_close, sqlite3_errmsg, sqlite3_finalize,
+    sqlite3_last_insert_rowid, sqlite3_open, sqlite3_prepare_v2, sqlite3_reset, sqlite3_step,
+    SQLITE_DONE, SQLITE_OK, SQLITE_ROW, SQLITE_STATIC,
 };
 use std::ffi::{CStr, CString};
 use std::os::raw::c_int;
@@ -27,30 +27,15 @@ fn errmsg_from_db(db: *mut sqlite3) -> String {
 
 /// Run a single SQL statement (no parameters). Used for BEGIN/COMMIT.
 fn exec_simple(db: *mut sqlite3, sql: &str) -> Result<(), (i32, String)> {
-    let c = CString::new(sql).map_err(|e| {
-        (
-            libsqlite3_sys::SQLITE_ERROR,
-            format!("Invalid SQL: {e}"),
-        )
-    })?;
+    let c = CString::new(sql)
+        .map_err(|e| (libsqlite3_sys::SQLITE_ERROR, format!("Invalid SQL: {e}")))?;
     let mut stmt = std::ptr::null_mut();
-    let rc = unsafe {
-        sqlite3_prepare_v2(
-            db,
-            c.as_ptr(),
-            -1_i32,
-            &mut stmt,
-            std::ptr::null_mut(),
-        )
-    };
+    let rc = unsafe { sqlite3_prepare_v2(db, c.as_ptr(), -1_i32, &mut stmt, std::ptr::null_mut()) };
     if rc != SQLITE_OK {
         return Err((rc, errmsg_from_db(db)));
     }
     if stmt.is_null() {
-        return Err((
-            rc,
-            "sqlite3_prepare_v2 returned null statement".to_string(),
-        ));
+        return Err((rc, "sqlite3_prepare_v2 returned null statement".to_string()));
     }
     loop {
         let step_rc = unsafe { sqlite3_step(stmt) };
@@ -79,7 +64,10 @@ pub(crate) fn execute_many_raw_core(
         return Ok((0, 0));
     }
     if db.is_null() {
-        return Err((libsqlite3_sys::SQLITE_MISUSE, "db pointer is null".to_string()));
+        return Err((
+            libsqlite3_sys::SQLITE_MISUSE,
+            "db pointer is null".to_string(),
+        ));
     }
 
     exec_simple(db, "BEGIN")?;
@@ -107,10 +95,7 @@ pub(crate) fn execute_many_raw_core(
     }
     if stmt.is_null() {
         let _ = exec_simple(db, "ROLLBACK");
-        return Err((
-            rc,
-            "sqlite3_prepare_v2 returned null statement".to_string(),
-        ));
+        return Err((rc, "sqlite3_prepare_v2 returned null statement".to_string()));
     }
 
     for param_set in params.iter() {

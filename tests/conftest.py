@@ -18,6 +18,7 @@ def _ensure_extension_built() -> None:
     """
     try:
         import importlib.util
+
         if importlib.util.find_spec("maturin") is None:
             return
     except Exception:
@@ -37,6 +38,7 @@ def _ensure_extension_built() -> None:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
+
 
 # Windows-specific asyncio event loop policy fix
 # Windows uses ProactorEventLoop by default, which has known issues with pytest-asyncio

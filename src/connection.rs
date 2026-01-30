@@ -1632,7 +1632,7 @@ impl Connection {
                         timeout_val,
                     )
                     .await?;
-                    let sqlite_conn: &mut SqliteConnection = &mut *conn;
+                    let sqlite_conn: &mut SqliteConnection = &mut conn;
                     let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
                         OperationalError::new_err(format!("Failed to lock handle: {e}"))
                     })?;
@@ -1641,8 +1641,9 @@ impl Connection {
                         crate::batch::execute_many_raw_core(raw_db, &query, &processed_params)
                     });
                     drop(handle);
-                    let (total_changes_val, last_row_id_val) = result
-                        .map_err(|(rc, msg)| crate::errors::map_sqlite_error_from_msg(&path, &query, rc, &msg))?;
+                    let (total_changes_val, last_row_id_val) = result.map_err(|(rc, msg)| {
+                        crate::errors::map_sqlite_error_from_msg(&path, &query, rc, &msg)
+                    })?;
                     total_changes = total_changes_val;
                     last_row_id = last_row_id_val;
                 }
@@ -2011,14 +2012,29 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
-                    bind_and_fetch_one_on_connection(&processed_query, &param_values, &mut conn, &path)
-                        .await?
+                    bind_and_fetch_one_on_connection(
+                        &processed_query,
+                        &param_values,
+                        &mut conn,
+                        &path,
+                    )
+                    .await?
                 };
 
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
@@ -2203,14 +2219,27 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_optional_on_connection(
-                        &processed_query, &param_values, &mut conn, &path,
+                        &processed_query,
+                        &param_values,
+                        &mut conn,
+                        &path,
                     )
                     .await?
                 };
@@ -2334,14 +2363,27 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
                         let mut conn = acquire_with_pragmas(
-                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
                         )
                         .await?;
                         bind_and_execute_on_connection(
-                            &processed_query, &param_values, &mut conn, &path,
+                            &processed_query,
+                            &param_values,
+                            &mut conn,
+                            &path,
                         )
                         .await?
                     }
@@ -2656,14 +2698,9 @@ impl Connection {
                     let g = connection_timeout_secs.lock().unwrap();
                     *g
                 };
-                let mut conn = acquire_with_pragmas(
-                    &pool_clone,
-                    &pragmas,
-                    &path,
-                    pool_size_val,
-                    timeout_val,
-                )
-                .await?;
+                let mut conn =
+                    acquire_with_pragmas(&pool_clone, &pragmas, &path, pool_size_val, timeout_val)
+                        .await?;
                 sqlx::query(&pragma_query)
                     .execute(&mut *conn)
                     .await
@@ -4239,10 +4276,20 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
@@ -4364,10 +4411,20 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
@@ -4531,10 +4588,20 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
@@ -4682,10 +4749,20 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
@@ -4827,10 +4904,20 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_all_on_connection(&tables_query, &[], &mut conn, &path).await?
@@ -4872,10 +4959,20 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
                         let mut conn = acquire_with_pragmas(
-                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
                         )
                         .await?;
                         bind_and_fetch_all_on_connection(&info_query, &[], &mut conn, &path).await?
@@ -4905,13 +5002,24 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
                         let mut conn = acquire_with_pragmas(
-                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
                         )
                         .await?;
-                        bind_and_fetch_all_on_connection(&indexes_query, &[], &mut conn, &path).await?
+                        bind_and_fetch_all_on_connection(&indexes_query, &[], &mut conn, &path)
+                            .await?
                     };
 
                     // Get foreign keys
@@ -4939,10 +5047,20 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                        let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
                         let mut conn = acquire_with_pragmas(
-                            &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
                         )
                         .await?;
                         bind_and_fetch_all_on_connection(&fk_query, &[], &mut conn, &path).await?
@@ -5177,10 +5295,20 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
@@ -5298,10 +5426,20 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
@@ -5447,10 +5585,20 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
@@ -5585,10 +5733,20 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = { let g = pool_size.lock().unwrap(); *g };
-                    let timeout_val = { let g = connection_timeout_secs.lock().unwrap(); *g };
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
                     let mut conn = acquire_with_pragmas(
-                        &pool_clone, &pragmas, &path, pool_size_val, timeout_val,
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
                     )
                     .await?;
                     bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
