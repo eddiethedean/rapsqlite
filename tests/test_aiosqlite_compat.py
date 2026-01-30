@@ -1171,20 +1171,34 @@ async def test_iterdump_empty_database(test_db):
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_backup_aiosqlite(test_db_file):
-    """Test backup functionality."""
+    """Test backup functionality (rapsqlite source and target)."""
     import os
     import rapsqlite
 
-    # Create source database with data
-    source_conn = rapsqlite.Connection(test_db_file)
-    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
-    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
-    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
+    # Create source database with data, then close so backup uses a fresh connection
+    async with rapsqlite.Connection(test_db_file) as source_conn:
+        await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
+        await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
 
-    # Create target database
     target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
+    with open(target_path, "w"):
+        pass
+
+    target_conn = rapsqlite.Connection(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn)
+        rows = await target_conn.fetch_all("SELECT * FROM test ORDER BY id")
+        assert len(rows) == 2
+        assert rows[0][1] == "test1"
+        assert rows[1][1] == "test2"
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
 
 @pytest.mark.asyncio
