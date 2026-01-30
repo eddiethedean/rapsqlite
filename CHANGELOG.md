@@ -51,7 +51,9 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - **`Connection.create_function(..., deterministic=False)`** — Pass `SQLITE_DETERMINISTIC` when `deterministic=True` (SQLite 3.8.3+).
 - **`Connection.executemany`** — Alias for `execute_many` (aiosqlite compat).
 - **`Connection.savepoint(name=None)`** — Context manager for `SAVEPOINT` / `RELEASE` / `ROLLBACK TO`; requires active transaction.
+- **`Connection.stop()`** — No-op for aiosqlite API compatibility; use `close()` to close the connection.
 - **`Connection.pool_metrics()`** — Returns `{size, num_idle, in_use}` from the pool.
+- **`Connection.execute(query, parameters=None, cursor=None)`** — Optional `cursor` argument: when provided (e.g. from `Cursor.execute()`), reuses that cursor so `await cursor.execute(...)` returns the same cursor (aiosqlite chaining).
 - **`NotSupportedError`** — New exception (e.g. `deterministic=True` on SQLite &lt; 3.8.3).
 - **Implicit transactions** — First DML (INSERT/UPDATE/DELETE) without `begin()` starts a transaction; `commit()`/`rollback()` end it. DDL does not. `commit`/`rollback` with no transaction are no-ops. Context manager exit commits on success, rolls back on exception.
 - **`Cursor.iter_chunk_size`** — Alias for `arraysize` (aiosqlite compat).
@@ -66,6 +68,7 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - **`Cursor.row_factory`** (r/w) — Per-cursor override; falls back to connection’s `row_factory`.
 - **`Cursor.close()`** — Async; clears cached results, description, lastrowid, rowcount.
 - **`Cursor.fetchmany(size=None)`** — `size` optional; uses `arraysize` when omitted.
+- **`Cursor.execute()` returns self** — When awaited, returns the same cursor for chaining (aiosqlite compat); implemented via `Connection.execute(..., cursor=self)`.
 
 ### Added - Testing and tooling
 
@@ -94,10 +97,16 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - **`tests/test_dbapi.py`** — DBAPI contract, connection/cursor behavior, cancellation, concurrency.
 - **`tests/test_sqlalchemy_rapsqlite.py`** — Smoke tests for `sqlite+rapsqlite` engine creation.
 - **`test_dbapi` and `test_concurrent_transactions`** — Use `unique_table_prefix` for all created tables.
+- **Optional test dependencies** — `pip install -e ".[test]"` installs fastapi and sqlalchemy for full test coverage; `requirements-test.txt` documents optional deps for FastAPI/SQLAlchemy tests.
+
+### Fixed
+
+- **init_hook timing** — init_hook now runs *after* the transaction connection is acquired and set to Active in both `begin()` and `transaction()` context manager, so tables created in init_hook are visible for the rest of the transaction.
+- **init_hook pool isolation** — When init_hook runs inside an active transaction and calls `conn.execute()`, the execute path now uses the transaction connection instead of acquiring from the pool (avoids "pool timed out" when pool size is 1).
 
 ### Changed
 
-- **Parallel test runs** — Removed `--dist=loadgroup` and `xdist_group`; isolation via unique table names instead. CI runs `pytest -n auto` (or `-n 2` on Windows) without loadgroup.
+- **Parallel test runs** — CI uses `--timeout 90` and `--dist loadgroup` with `xdist_group` on init_hook, concurrency, and pool_exhaustion tests to avoid timeouts and pool contention; other tests use unique table names for isolation.
 
 ## [0.2.0] - 2026-01-26 (Updated 2026-01-28)
 

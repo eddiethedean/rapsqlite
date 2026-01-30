@@ -36,19 +36,20 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ SQLite busy_timeout support (`timeout` parameter matching aiosqlite)
 - ✅ Comprehensive documentation and benchmarking
 
-**Test Coverage**: 493+ tests passing (8 skipped)  
+**Test Coverage**: 493 tests passing (5 skipped)  
 **API Compatibility**: ~95% with aiosqlite (Phase 3.9 additions improve compatibility)  
 **Python Support**: 3.8–3.14  
 **Code Quality**: Full mypy type checking and Ruff formatting/linting
 
 **Phase 3 (v0.3.0-dev) — In progress:**
-- ✅ **3.9 API completeness**: `execute_fetchall`, `execute_insert`, Cursor properties (`arraysize`, `connection`, `description`, `lastrowid`, `rowcount`, `row_factory`), `Cursor.close()`, `isolation_level`, `__await__`, `interrupt` (stub)
+- ✅ **3.9 API completeness**: `execute_fetchall`, `execute_insert`, Cursor properties (`arraysize`, `connection`, `description`, `lastrowid`, `rowcount`, `row_factory`), `Cursor.close()`, `isolation_level`, `__await__`, `interrupt` (stub), `Connection.stop()` (no-op), `Cursor.execute()` returns self (aiosqlite chaining)
 - ✅ **3.1**: `explain_query_plan` helper
 - ✅ **3.2**: `pool_health` helper
 - ✅ **3.3**: `isolation_level` applied to transactions
+- ✅ **init_hook** — Runs after transaction is active in `begin()` and `transaction()`; execute during init_hook uses transaction connection (avoids pool timeout when pool size is 1)
 - ✅ **True Async DBAPI** — `rapsqlite.dbapi`: `AsyncConnection`, `AsyncCursor`, `connect()`, eager SELECT, cancellation handling, one-op-per-connection; see `docs/true_async_dbapi_spec.md`
 - ✅ **SQLAlchemy dialect** — `sqlite+rapsqlite` via `rapsqlite.sqlalchemy`; optional `rapsqlite[sqlalchemy]`; `create_async_engine("sqlite+rapsqlite:///...")`
-- ✅ **Test isolation** — `unique_table_prefix` fixture; `test_dbapi`, `test_concurrent_transactions` use unique table names; parallel runs without `--dist=loadgroup`
+- ✅ **Test isolation** — `unique_table_prefix` fixture; `xdist_group` for init_hook, concurrency, pool_exhaustion; CI uses `--timeout 90` and `--dist loadgroup`; optional test deps (`.[test]`) for FastAPI/SQLAlchemy tests
 - ✅ aiosqlite test suite runner; `tests/test_phase3_api.py` for Phase 3 APIs
 
 ---
