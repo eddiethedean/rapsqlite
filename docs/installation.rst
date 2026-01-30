@@ -4,7 +4,7 @@ Installation
 Requirements
 ------------
 
-* Python 3.8+ (including Python 3.13 and 3.14)
+* Python 3.10+ (including Python 3.13 and 3.14)
 * Rust 1.70+ (for building from source)
 
 Installing from PyPI

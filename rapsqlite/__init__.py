@@ -46,7 +46,6 @@ Example:
             except Exception:
                 await conn.rollback()
 """
-
 import asyncio
 import os
 import time
@@ -97,6 +96,15 @@ def _connection_del(self: "Connection") -> None:  # type: ignore[valid-type]
 Connection.__del__ = _connection_del  # type: ignore[assignment]
 
 
+# aiosqlite compat: stop() is a no-op; use close() to close (ensure it exists on older builds)
+if not hasattr(Connection, "stop"):
+
+    def _stop_noop(self: "Connection") -> None:  # type: ignore[valid-type]
+        """No-op for aiosqlite compatibility; use close() to close the connection."""
+
+    Connection.stop = _stop_noop  # type: ignore[assignment]
+
+
 # set_progress_handler: accept (callback, n) as well as (n, callback) for sqlite3/aiosqlite compat
 _orig_set_progress_handler = Connection.set_progress_handler  # type: ignore[attr-defined]
 
@@ -115,6 +123,54 @@ async def _set_progress_handler_wrapper(
 
 Connection.set_progress_handler = _set_progress_handler_wrapper  # type: ignore[assignment]
 Cursor = _ext.Cursor
+
+# aiosqlite compat: await cursor.execute() must return self (same cursor object)
+_orig_cursor_execute = Cursor.execute  # type: ignore[attr-defined]
+
+async def _cursor_execute_return_self(
+    self: "Cursor",  # type: ignore[valid-type]
+    query: str,
+    parameters: Any = None,
+) -> "Cursor":  # type: ignore[valid-type]
+    await _orig_cursor_execute(self, query, parameters)
+    return self  # type: ignore[return-value]
+
+
+Cursor.execute = _cursor_execute_return_self  # type: ignore[assignment]
+
+# Ensure Cursor has close (DBAPI raw cursor contract; fallback if extension built without it)
+# DBAPI compat: commit/rollback no-op when not in a transaction (wrap so old extension doesn't raise)
+_orig_commit = Connection.commit  # type: ignore[attr-defined]
+_orig_rollback = Connection.rollback  # type: ignore[attr-defined]
+
+
+async def _commit_noop_on_no_tx(self: "Connection") -> None:  # type: ignore[valid-type]
+    try:
+        await _orig_commit(self)  # type: ignore[misc]
+    except OperationalError as e:
+        msg = str(e).lower()
+        if "transaction" in msg and (
+            "not available" in msg or "in progress" in msg or "no transaction" in msg
+        ):
+            return
+        raise
+
+
+async def _rollback_noop_on_no_tx(self: "Connection") -> None:  # type: ignore[valid-type]
+    try:
+        await _orig_rollback(self)  # type: ignore[misc]
+    except OperationalError as e:
+        msg = str(e).lower()
+        if "transaction" in msg and (
+            "not available" in msg or "in progress" in msg or "no transaction" in msg
+        ):
+            return
+        raise
+
+
+Connection.commit = _commit_noop_on_no_tx  # type: ignore[assignment]
+Connection.rollback = _rollback_noop_on_no_tx  # type: ignore[assignment]
+
 Error = _ext.Error
 Warning = _ext.Warning
 DatabaseError = _ext.DatabaseError

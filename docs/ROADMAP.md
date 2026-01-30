@@ -38,7 +38,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 **Test Coverage**: 544 tests passing (3 skipped)  
 **API Compatibility**: ~95% with aiosqlite (Phase 3.9 additions improve compatibility)  
-**Python Support**: 3.8–3.14  
+**Python Support**: 3.10–3.14  
 **Code Quality**: Full mypy type checking and Ruff formatting/linting
 
 **Phase 3 (v0.3.0-dev) — In progress:**
@@ -280,7 +280,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Compatibility Testing
 - ⏳ Continuous compatibility testing with aiosqlite
-- ⏳ Python version compatibility matrix (3.8–3.14+)
+- ⏳ Python version compatibility matrix (3.10–3.14+)
 - ⏳ Platform-specific testing and validation
 
 **Success Criteria**:
@@ -335,7 +335,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Focus**: Enhanced type conversion and adapter support for custom types
 
 #### create_function() Enhancement
-- ✅ `Connection.create_function(name, num_params, func, deterministic=False)` - `deterministic` parameter; `NotSupportedError` on SQLite &lt; 3.8.3
+- ✅ `Connection.create_function(name, num_params, func, deterministic=False)` - `deterministic` parameter; `NotSupportedError` on SQLite &lt; 3.8.3 (SQLite version, not Python)
 
 #### connect() Parameters
 - ✅ `connect(iter_chunk_size=64)` - Stored; used for chunked iteration when applicable

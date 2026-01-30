@@ -6,8 +6,6 @@ Run: pip install "fastapi[standard]" "uvicorn[standard]" && \
 Then: GET http://127.0.0.1:8000/
 """
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

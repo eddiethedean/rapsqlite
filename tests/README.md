@@ -39,7 +39,7 @@ Most tests exercise the compiled Rust extension, so install the package in edita
 python -m pip install -e .
 ```
 
-Use the **same** Python for both install and tests (`python -m pytest tests/`). Building with one interpreter and testing with another (e.g. pyenv 3.8 vs system 3.12) loads a different extension build; Phase 3 tests will skip and some compatibility fallbacks apply. See **Version alignment** below.
+Use the **same** Python for both install and tests (`python -m pytest tests/`). Building with one interpreter and testing with another loads a different extension build; Phase 3 tests will skip and some compatibility fallbacks apply. See **Version alignment** below.
 
 On macOS, if you hit linker errors about missing Python symbols when building locally, use:
 
@@ -133,7 +133,7 @@ python -m pytest tests/ --cov=rapsqlite --cov-report=html
 The Rust extension is built for a specific Python. Run tests with **that same** interpreter:
 
 - **Correct**: `python -m maturin develop` then `python -m pytest tests/` (same `python`).
-- **Incorrect**: building with `python3.12 -m maturin develop` but running `python3.8 -m pytest tests/` (e.g. different pyenv versions). The 3.8 run will load a different or missing wheel; Phase 3 API tests skip, and `connect(iter_chunk_size=...)` uses a fallback.
+- **Incorrect**: building with `python3.12 -m maturin develop` but running `python3.10 -m pytest tests/` (different versions). The 3.10 run will load a different or missing wheel; Phase 3 API tests skip, and `connect(iter_chunk_size=...)` uses a fallback.
 
 Use `./scripts/dev_test.sh` to build and test with one Python consistently.
 
@@ -228,7 +228,7 @@ Current test coverage targets:
 ## Continuous Integration
 
 Tests run automatically on:
-- All supported Python versions (3.8-3.14)
+- All supported Python versions (3.10-3.14)
 - All supported platforms (Linux, macOS, Windows)
 - Full test suite with coverage reporting
 

@@ -4,7 +4,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/rapsqlite.svg)](https://pypi.org/project/rapsqlite/)
 [![Downloads](https://pepy.tech/badge/rapsqlite)](https://pepy.tech/project/rapsqlite)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Documentation](https://readthedocs.org/projects/rapsqlite/badge/?version=latest)](https://rapsqlite.readthedocs.io/en/latest/)
 
@@ -44,7 +44,7 @@ See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philo
 
 ## Requirements
 
-- Python 3.8+ (including Python 3.13 and 3.14)
+- Python 3.10+ (including Python 3.13 and 3.14)
 - Rust 1.70+ (for building from source)
 - Python development headers (included with most Python installations)
 
@@ -57,7 +57,7 @@ pip install rapsqlite
 ### Building from Source
 
 **Prerequisites:**
-- Python 3.8+ with development headers installed
+- Python 3.10+ with development headers installed
 - Rust 1.70+ and Cargo
 
 **Installation:**
@@ -68,7 +68,7 @@ python -m pip install maturin
 python -m maturin develop
 ```
 
-When developing or running tests, use the **same** Python for both build and test (e.g. `python -m pytest tests/`). Using a different interpreter (e.g. pyenv 3.8 vs system 3.12) can cause version mismatches. See [CONTRIBUTING.md](CONTRIBUTING.md) and [tests/README.md](tests/README.md).
+When developing or running tests, use the **same** Python for both build and test (e.g. `python -m pytest tests/`). Using a different interpreter can cause version mismatches. See [CONTRIBUTING.md](CONTRIBUTING.md) and [tests/README.md](tests/README.md).
 
 **Note**: Python development headers are required for building. They're typically included with Python installations, but on some Linux distributions you may need to install `python3-dev` or `python3-devel` package. Use `maturin develop` instead of `cargo build` for development, as maturin automatically handles Python library linking.
 

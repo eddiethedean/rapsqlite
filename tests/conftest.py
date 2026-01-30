@@ -2,10 +2,41 @@
 
 import hashlib
 import os
+import subprocess
 import sys
 import tempfile
 import pytest
 from typing import Any, AsyncGenerator, Generator
+
+
+def _ensure_extension_built() -> None:
+    """Build the native extension for the current Python so tests see the latest Rust code.
+
+    Runs once in the main process (before xdist workers spawn) so that the same
+    interpreter used for pytest has a matching extension. Skips if maturin is
+    not available or build fails (tests may still run with an existing wheel).
+    """
+    try:
+        import importlib.util
+        if importlib.util.find_spec("maturin") is None:
+            return
+    except Exception:
+        return
+    # Repo root: directory containing pyproject.toml and Cargo.toml
+    conftest_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(conftest_dir)
+    if not os.path.isfile(os.path.join(repo_root, "pyproject.toml")):
+        return
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "maturin", "develop"],
+            cwd=repo_root,
+            timeout=120,
+            capture_output=True,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
 
 # Windows-specific asyncio event loop policy fix
 # Windows uses ProactorEventLoop by default, which has known issues with pytest-asyncio
@@ -149,7 +180,11 @@ async def dbapi_conn() -> AsyncGenerator[Any, None]:
 
 # Pytest markers for test categorization
 def pytest_configure(config):
-    """Register custom pytest markers and ensure Windows event loop policy is set."""
+    """Register custom pytest markers, ensure extension is built, and set Windows event loop."""
+    # Build extension for current Python (main process only; xdist workers skip)
+    if not getattr(config, "workerinput", None):
+        _ensure_extension_built()
+
     # Ensure WindowsSelectorEventLoopPolicy is set before any tests run
     # This is especially important for pytest-xdist parallel execution on Windows
     # Each worker process will import conftest.py and get the correct policy

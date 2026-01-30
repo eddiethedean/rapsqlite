@@ -11,8 +11,6 @@ Use with create_async_engine:
 Requires ``pip install rapsqlite[sqlalchemy]`` (adds sqlalchemy dependency).
 """
 
-from __future__ import annotations
-
 import sqlite3
 from typing import Any
 

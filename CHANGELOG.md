@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Checklist for v1.0 Release (Future)
 
 - Phase 3 features complete
-- All tests passing across supported Python versions (3.8–3.14)
+- All tests passing across supported Python versions (3.10–3.14)
 - Comprehensive documentation and examples
 - Ecosystem integrations validated
 - Performance benchmarks meet targets
@@ -588,7 +588,7 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 
 ### Compatibility
 
-- Python 3.8 through 3.14 supported
+- Python 3.10 through 3.14 supported
 - All platforms: Ubuntu (x86-64, aarch64), macOS (aarch64, x86-64), Windows (x86-64, aarch64)
 
 ---

@@ -1,7 +1,5 @@
 """Smoke test for FastAPI + rapsqlite integration pattern."""
 
-from __future__ import annotations
-
 from typing import Any, AsyncIterator
 
 import pytest

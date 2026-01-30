@@ -4,7 +4,7 @@ This document contains the results of running the aiosqlite test suite against r
 
 **Date**: 2026-01-30  
 **rapsqlite Version**: 0.3.0-dev  
-**Python Version**: 3.9.6
+**Python Version**: 3.10+
 
 ## Summary
 

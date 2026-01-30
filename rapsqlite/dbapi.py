@@ -3,7 +3,7 @@ True Async DBAPI 2.0-compliant module for SQLAlchemy and other consumers.
 See docs/true_async_dbapi_spec.md for the interface contract.
 """
 
-from __future__ import annotations
+from __future__ import annotations  # PEP 563: forward references without quotes
 
 import asyncio
 from typing import Any
@@ -11,23 +11,63 @@ from typing import Any
 from . import (
     Connection as _Connection,
     Cursor as _Cursor,
-    DataError,
-    DatabaseError,
     Error,
-    IntegrityError,
-    InternalError,
     InterfaceError,
-    NotSupportedError,
-    OperationalError,
-    ProgrammingError,
 )
 from . import connect as _connect
+
+# DBAPI exception hierarchy: ensure OperationalError etc. are subclasses of DatabaseError
+# (pyo3 create_exception can expose types where issubclass(OperationalError, DatabaseError) is False)
+try:
+    import _rapsqlite as _ext
+except ImportError:
+    _parent = __import__(__name__.rsplit(".", 1)[0], fromlist=["Connection"])
+    _ext = getattr(_parent, "_ext", None)
+    if _ext is None:
+        raise ImportError("rapsqlite extension (_rapsqlite) not found") from None
+DatabaseError = _ext.DatabaseError
+
+def _dbapi_exc(name: str, ext_cls: Any, base: type) -> type:
+    """Ensure exception class is a subclass of base (DBAPI hierarchy)."""
+    return type(name, (ext_cls, base), {})
+
+DataError = _dbapi_exc("DataError", getattr(_ext, "DataError", type("DataError", (DatabaseError,), {})), DatabaseError)
+OperationalError = _dbapi_exc("OperationalError", getattr(_ext, "OperationalError", type("OperationalError", (DatabaseError,), {})), DatabaseError)
+IntegrityError = _dbapi_exc("IntegrityError", getattr(_ext, "IntegrityError", type("IntegrityError", (DatabaseError,), {})), DatabaseError)
+InternalError = _dbapi_exc("InternalError", getattr(_ext, "InternalError", type("InternalError", (DatabaseError,), {})), DatabaseError)
+NotSupportedError = _dbapi_exc("NotSupportedError", getattr(_ext, "NotSupportedError", type("NotSupportedError", (DatabaseError,), {})), DatabaseError)
+ProgrammingError = _dbapi_exc("ProgrammingError", getattr(_ext, "ProgrammingError", type("ProgrammingError", (DatabaseError,), {})), DatabaseError)
 
 apilevel = "2.0"
 threadsafety = 0
 paramstyle = "qmark"
 
 _ALLOWED_CONNECT_KWARGS = frozenset(("pragmas", "iter_chunk_size", "loop"))
+
+
+class _CursorContextManager:
+    """Context manager returned by AsyncConnection.cursor() for SQLAlchemy etc.
+
+    SQLAlchemy expects connection.cursor() to return an object with __aenter__,
+    not a coroutine. This wrapper allows:
+    - ``async with conn.cursor() as cur:`` (SQLAlchemy)
+    - ``cur = await conn.cursor()`` (direct use)
+    """
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: "AsyncConnection") -> None:
+        self._conn = conn
+
+    def __await__(self) -> Any:
+        """Allow await conn.cursor() to return the cursor directly."""
+        return self._conn._cursor_impl().__await__()
+
+    async def __aenter__(self) -> "AsyncCursor":
+        return await self._conn._cursor_impl()
+
+    async def __aexit__(self, *args: Any) -> None:
+        pass
 
 
 class AsyncCursor:
@@ -68,7 +108,7 @@ class AsyncCursor:
 
     @property
     def lastrowid(self) -> int:
-        return getattr(self._raw, "lastrowid", -1)  # type: ignore[no-any-return]
+        return self._raw.lastrowid  # type: ignore[no-any-return]
 
     @property
     def arraysize(self) -> int:
@@ -104,10 +144,7 @@ class AsyncCursor:
 
     async def close(self) -> None:
         async def _do() -> None:
-            close_fn = getattr(self._raw, "close", None)
-            if callable(close_fn):
-                await close_fn()
-            # else: no-op when raw Cursor lacks close (e.g. older build)
+            await self._raw.close()
 
         await self._with_lock(_do)
 
@@ -173,7 +210,15 @@ class AsyncConnection:
         await self._conn.close()
         self._closed = True
 
-    async def cursor(self) -> AsyncCursor:
+    def cursor(self) -> _CursorContextManager:
+        """Return a context manager that yields the cursor (SQLAlchemy compat).
+
+        Use: ``async with conn.cursor() as cur:`` or ``cur = await (await conn.cursor()).__aenter__()``.
+        """
+        return _CursorContextManager(self)
+
+    async def _cursor_impl(self) -> AsyncCursor:
+        """Actual cursor acquisition (used by _CursorContextManager.__aenter__)."""
         async def _do() -> AsyncCursor:
             raw = self._conn.cursor()
             return AsyncCursor(self, raw)  # type: ignore[no-any-return]
@@ -193,11 +238,33 @@ class AsyncConnection:
 
         await self._with_op_lock(_do)
 
+    async def begin(self) -> None:
+        """Start a transaction (for SQLAlchemy engine.begin() etc.)."""
+        await self._conn.begin()
+
     async def commit(self) -> None:
-        await self._conn.commit()
+        try:
+            await self._conn.commit()
+        except OperationalError as e:
+            # DBAPI compat: commit() is a no-op when not in a transaction
+            msg = str(e).lower()
+            if "transaction" in msg and (
+                "not available" in msg or "in progress" in msg or "no transaction" in msg
+            ):
+                return
+            raise
 
     async def rollback(self) -> None:
-        await self._conn.rollback()
+        try:
+            await self._conn.rollback()
+        except OperationalError as e:
+            # DBAPI compat: rollback() is a no-op when not in a transaction
+            msg = str(e).lower()
+            if "transaction" in msg and (
+                "not available" in msg or "in progress" in msg or "no transaction" in msg
+            ):
+                return
+            raise
 
     async def close(self) -> None:
         if self._closed:

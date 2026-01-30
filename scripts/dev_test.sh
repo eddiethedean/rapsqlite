@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build and run tests using a single Python interpreter.
-# Use this to avoid version mismatches (e.g. maturin for 3.12, pytest for 3.8).
+# Build and run tests using a single Python interpreter (Python 3.10+ required).
+# Use this to avoid version mismatches between maturin build and pytest run.
 #
 # Usage: ./scripts/dev_test.sh [pytest options...]
 #   PYTHON=python3.12 ./scripts/dev_test.sh -n 4

@@ -1127,11 +1127,18 @@ impl Connection {
                     &progress_handler,
                 );
 
-                // Retrieve the stored transaction connection
+                // Retrieve the stored transaction connection; if missing, treat as no-op (DBAPI compat)
                 let mut conn_guard = transaction_connection.lock().await;
-                let mut conn = conn_guard.take().ok_or_else(|| {
-                    OperationalError::new_err("Transaction connection not available")
-                })?;
+                let mut conn = match conn_guard.take() {
+                    Some(c) => c,
+                    None => {
+                        *trans_guard = TransactionState::None;
+                        drop(trans_guard);
+                        let mut ex_guard = explicit_transaction.lock().await;
+                        *ex_guard = false;
+                        return Ok(());
+                    }
+                };
 
                 // Execute COMMIT on the same connection that started the transaction
                 sqlx::query("COMMIT")
@@ -1188,11 +1195,18 @@ impl Connection {
                     &progress_handler,
                 );
 
-                // Retrieve the stored transaction connection
+                // Retrieve the stored transaction connection; if missing, treat as no-op (DBAPI compat)
                 let mut conn_guard = transaction_connection.lock().await;
-                let mut conn = conn_guard.take().ok_or_else(|| {
-                    OperationalError::new_err("Transaction connection not available")
-                })?;
+                let mut conn = match conn_guard.take() {
+                    Some(c) => c,
+                    None => {
+                        *trans_guard = TransactionState::None;
+                        drop(trans_guard);
+                        let mut ex_guard = explicit_transaction.lock().await;
+                        *ex_guard = false;
+                        return Ok(());
+                    }
+                };
 
                 // Execute ROLLBACK on the same connection that started the transaction
                 sqlx::query("ROLLBACK")
@@ -1304,6 +1318,9 @@ impl Connection {
         let isolation_level = Arc::clone(&self_.isolation_level);
         let closed = Arc::clone(&self_.closed);
         let connection_self: Py<Connection> = self_.into();
+
+        // Raise immediately if connection is closed (cursor.execute() on closed connection, etc.)
+        ensure_not_closed(&closed)?;
 
         // Clone query before processing (it may be moved)
         let original_query = query.clone();
@@ -2543,6 +2560,8 @@ impl Connection {
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let session_connection = Arc::clone(&self_.session_connection);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
@@ -2594,6 +2613,29 @@ impl Connection {
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
+                // Apply PRAGMA to the current connection (transaction or session) if we have one,
+                // so subsequent operations on this Connection see the new value (e.g. fetch_all after set_pragma).
+                {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    if let Some(ref mut conn) = *conn_guard {
+                        sqlx::query(&pragma_query)
+                            .execute(&mut **conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
+                        return Ok(());
+                    }
+                }
+                {
+                    let mut conn_guard = session_connection.lock().await;
+                    if let Some(ref mut conn) = *conn_guard {
+                        sqlx::query(&pragma_query)
+                            .execute(&mut **conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
+                        return Ok(());
+                    }
+                }
+                // No current connection: ensure pool exists, run init_hook if needed, acquire a connection and apply PRAGMA.
                 let pool_clone = get_or_create_pool(
                     &path,
                     &pool,
@@ -2604,7 +2646,6 @@ impl Connection {
                 )
                 .await?;
 
-                // Execute init_hook if needed (before setting PRAGMA)
                 execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
                 let pool_size_val = {

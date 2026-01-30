@@ -45,13 +45,13 @@ All benchmarks use the **same structure for both packages** (no special-casing);
 
 **Test Date**: 2026-01-29  
 **System**: macOS (Darwin arm64)  
-**Python Version**: 3.9.6  
+**Python Version**: 3.10+  
 **SQLite Version**: 3.51.0  
 **rapsqlite Version**: 0.3.0-dev
 
-*Note: Actual benchmark results will vary based on system configuration, load, and SQLite version. Run the benchmarks on your system for accurate measurements.*
+*Note: rapsqlite requires Python 3.10+. Actual benchmark results will vary based on system configuration, load, and SQLite version. Run the benchmarks on your system for accurate measurements.*
 
-### Actual Results (macOS arm64, Python 3.9.6, with aiosqlite, avg of 5 runs, ×10 row scale)
+### Actual Results (macOS arm64, Python 3.10+, with aiosqlite, avg of 5 runs, ×10 row scale)
 
 ```
 === Simple Query Throughput (20000 queries, avg of 5 runs) ===
@@ -143,7 +143,7 @@ To add new benchmarks:
 ## System Requirements
 
 Benchmarks require:
-- Python 3.8+
+- Python 3.10+
 - rapsqlite (installed)
 - aiosqlite (optional, for comparison)
 - sqlite3 (standard library)

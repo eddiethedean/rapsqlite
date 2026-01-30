@@ -32,7 +32,7 @@ export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
 python -m maturin develop
 ```
 
-**Python version alignment**: The extension is built for the Python used by `maturin develop`. Always run tests with **that same interpreter** (e.g. `python -m pytest tests/`). Using a different Python (e.g. pyenv 3.8 vs system 3.12) loads a different or missing wheel, causing Phase 3 tests to skip and compatibility fallbacks to activate. Use `scripts/dev_test.sh` to build and test with one Python.
+**Python version alignment**: The extension is built for the Python used by `maturin develop`. Always run tests with **that same interpreter** (e.g. `python -m pytest tests/`). Using a different Python loads a different or missing wheel, causing Phase 3 tests to skip and compatibility fallbacks to activate. Use `scripts/dev_test.sh` to build and test with one Python.
 
 **Note**: Use `maturin develop` instead of `cargo build` for development, as maturin automatically handles Python library linking. If you need to use `cargo build` directly, ensure `PYO3_PYTHON` is set to your Python executable.
 

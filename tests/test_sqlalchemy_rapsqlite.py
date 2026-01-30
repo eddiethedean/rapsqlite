@@ -1,7 +1,5 @@
 """Smoke tests for SQLAlchemy + rapsqlite (sqlite+rapsqlite dialect)."""
 
-from __future__ import annotations
-
 import pytest
 
 pytest.importorskip("sqlalchemy")
