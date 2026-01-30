@@ -48,6 +48,7 @@ Example:
 """
 
 import asyncio
+import os
 from typing import Any, List, Optional
 
 import builtins as _builtins
@@ -245,9 +246,11 @@ def connect(
         :class:`Connection`: For more advanced connection options including
         initialization hooks.
     """
+    # Accept pathlib.Path / os.PathLike for aiosqlite compatibility (e.g. aiosqlite smoke tests)
+    path_str = os.fspath(path) if not isinstance(path, str) else path
     try:
         return Connection(
-            path,
+            path_str,
             pragmas=pragmas,
             timeout=timeout,
             iter_chunk_size=iter_chunk_size,
@@ -257,7 +260,7 @@ def connect(
         err = str(e)
         if "iter_chunk_size" in err or "loop_param" in err or "unexpected keyword argument" in err:
             # Older _rapsqlite build without connect() params (e.g. wrong Python / stale wheel)
-            return Connection(path, pragmas=pragmas, timeout=timeout)  # type: ignore[no-any-return]
+            return Connection(path_str, pragmas=pragmas, timeout=timeout)  # type: ignore[no-any-return]
         raise
 
 

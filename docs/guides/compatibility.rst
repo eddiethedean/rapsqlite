@@ -104,6 +104,60 @@ A ``sqlite+rapsqlite`` dialect is provided. Install with ``pip install 'rapsqlit
 
 See ``docs/true_async_dbapi_spec.md`` for the full async DBAPI contract.
 
+Alembic with rapsqlite
+~~~~~~~~~~~~~~~~~~~~~~
+
+You can run Alembic migrations using the ``sqlite+rapsqlite`` dialect.
+
+1. Install dependencies: ``pip install 'rapsqlite[sqlalchemy]' alembic``
+2. Initialize Alembic with async support: ``alembic init -t async alembic``
+3. In ``alembic/env.py``, ensure the dialect is registered and the URL uses ``sqlite+rapsqlite``:
+
+.. code-block:: python
+
+   import rapsqlite.sqlalchemy  # register sqlite+rapsqlite dialect
+   from sqlalchemy.ext.asyncio import create_async_engine
+   # ...
+   # In run_migrations_online(), use:
+   connectable = create_async_engine(
+       config.get_main_option("sqlalchemy.url").replace("sqlite://", "sqlite+rapsqlite://")
+   )
+
+4. Set ``sqlalchemy.url`` in ``alembic.ini`` (e.g. ``sqlite:///app.db``). The env.py replacement above switches it to ``sqlite+rapsqlite:///app.db`` for async runs.
+5. Run migrations: ``alembic upgrade head`` (runs in the async context provided by the template).
+
+For file-backed databases, use a path or ``sqlite+rapsqlite:///path/to/db.db``. In-memory (``:memory:``) is supported for the engine but each connection gets its own database; use a file path for migrations so the same database is used across runs.
+
+FastAPI
+~~~~~~~
+
+Use a connection dependency with ``rapsqlite.connect()`` and lifespan for setup. See ``examples/fastapi_db.py``:
+
+.. code-block:: python
+
+   from contextlib import asynccontextmanager
+   from fastapi import FastAPI, Depends
+   from rapsqlite import connect
+
+   @asynccontextmanager
+   async def lifespan(app: FastAPI):
+       async with connect("app.db") as conn:
+           await conn.execute("CREATE TABLE IF NOT EXISTS ...")
+       yield
+
+   async def get_db():
+       async with connect("app.db") as conn:
+           yield conn
+
+   app = FastAPI(lifespan=lifespan)
+
+   @app.get("/")
+   async def root(db=Depends(get_db)):
+       rows = await db.fetch_all("SELECT ...")
+       return {"data": rows}
+
+Run with ``uvicorn examples.fastapi_db:app --reload``. The test ``tests/test_fastapi_example.py`` validates this pattern.
+
 Compatibility Summary
 ---------------------
 
@@ -120,5 +174,8 @@ Performance Characteristics
 * **Connection pooling**: rapsqlite uses connection pooling internally. The default pool size is 1, but can be configured.
 * **Prepared statements**: sqlx (the underlying library) caches prepared statements per connection automatically.
 * **True async**: All operations execute outside the GIL, providing better concurrency under load.
+
+For type conversion and custom types (including the current approach without
+``register_adapter``/``register_converter``), see :doc:`../reference/type-conversion`.
 
 For more details, see :doc:`migration-guide`.

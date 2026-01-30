@@ -37,6 +37,7 @@ Python GIL**, ensuring event loops never stall under load.
    :caption: Reference
 
    reference/roadmap
+   reference/type-conversion
 
 Integration Examples
 --------------------

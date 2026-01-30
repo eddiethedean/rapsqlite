@@ -7,6 +7,7 @@ This script:
 3. Runs tests and documents results
 """
 
+import os
 import sys
 import subprocess
 import tempfile
@@ -177,15 +178,23 @@ def run_tests(
                 print_status("   Make sure rapsqlite is built: maturin develop", YELLOW)
                 print_status("   Continuing anyway...", YELLOW)
 
-    # Find test files
+    # Find test files (exclude helpers and __main__ which are support modules)
     test_files = list(patched_dir.rglob("test_*.py"))
     if not test_files:
         test_files = list(patched_dir.rglob("*.py"))
-        test_files = [f for f in test_files if f.name != "__init__.py"]
+        test_files = [
+            f
+            for f in test_files
+            if f.name not in ("__init__.py", "helpers.py", "__main__.py")
+        ]
 
     passed = []
     failed = []
     skipped = []
+
+    # Run from parent so patched_dir is a package (enables "from .helpers" in smoke.py)
+    run_cwd = patched_dir.parent
+    package_name = patched_dir.name
 
     # Run each test file
     for test_file in test_files:
@@ -193,10 +202,23 @@ def run_tests(
         print_status(f"\n📝 Running: {rel_path}", BLUE)
         print_status("-" * 60, BLUE)
 
+        # File path under package so pytest finds it; PYTHONPATH=parent enables "from .helpers"
+        test_path = os.path.join(package_name, str(rel_path))
+
         try:
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(run_cwd)
             result = subprocess.run(
-                [sys.executable, "-m", "pytest", str(test_file), "-v", "--tb=short"],
-                cwd=patched_dir,
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    test_path,
+                    "-v",
+                    "--tb=short",
+                ],
+                cwd=run_cwd,
+                env=env,
                 capture_output=True,
                 text=True,
             )

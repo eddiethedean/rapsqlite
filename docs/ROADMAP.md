@@ -36,7 +36,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ SQLite busy_timeout support (`timeout` parameter matching aiosqlite)
 - ✅ Comprehensive documentation and benchmarking
 
-**Test Coverage**: 493 tests passing (5 skipped)  
+**Test Coverage**: 544 tests passing (3 skipped)  
 **API Compatibility**: ~95% with aiosqlite (Phase 3.9 additions improve compatibility)  
 **Python Support**: 3.8–3.14  
 **Code Quality**: Full mypy type checking and Ruff formatting/linting
@@ -102,7 +102,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ **`Connection.pool_health()`** — Minimal health check (`SELECT 1`); raises on failure
 - ⏳ Connection health monitoring and automatic recovery
 - ⏳ Idle connection management (timeout and cleanup)
-- ⏳ Pool monitoring and metrics (connection count, wait times, etc.)
+- ✅ **Pool metrics** — `pool_metrics()` returns `{size, num_idle, in_use}`; documented in API reference and advanced-usage (Monitoring section).
 - ⏳ Cross-process connection sharing patterns (if applicable)
 
 #### Connection Features
@@ -156,7 +156,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ⏳ Query builder integrations
 
 #### Web Framework Integration
-- ⏳ FastAPI database dependencies and patterns
+- ✅ **FastAPI** — Patterns documented in `docs/guides/compatibility.rst` (lifespan, connection dependency); `examples/fastapi_db.py` and `tests/test_fastapi_example.py`.
 - ⏳ Django async database backend (if applicable)
 - ⏳ aiohttp database patterns and middleware
 - ⏳ Starlette async database integration
@@ -164,14 +164,14 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ⏳ Sanic async database patterns
 
 #### Migration Tools
-- ⏳ Alembic integration patterns
+- ✅ **Alembic** — Documented in `docs/guides/compatibility.rst` (async env.py, `sqlite+rapsqlite`); Alembic-style DDL test in `test_sqlalchemy_rapsqlite.py`.
 - ⏳ Migration generation utilities
 - ⏳ Schema migration testing tools
 
 **Success Criteria**:
-- ✅ SQLAlchemy async driver (`sqlite+rapsqlite`) available; full workflow and Alembic validation pending
-- FastAPI integration examples and patterns documented
-- Alembic migrations work with rapsqlite
+- ✅ SQLAlchemy async driver (`sqlite+rapsqlite`) available; Alembic and FastAPI documented and validated
+- ✅ FastAPI integration examples and patterns documented
+- ✅ Alembic with rapsqlite documented and DDL validated
 - At least 3 major frameworks have integration examples
 
 ---
@@ -183,12 +183,12 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 #### Monitoring & Metrics
 - ⏳ Performance metrics export (Prometheus, StatsD, etc.)
 - ⏳ Query timing and profiling
-- ⏳ Connection pool metrics
+- ✅ **Connection pool metrics** — `pool_metrics()` and `pool_health()` documented; Monitoring section in advanced-usage.
 - ⏳ Resource usage tracking
-- ⏳ Slow query detection and reporting
+- ⏳ Slow query detection and reporting (approach documented via `set_trace_callback` + app-layer timing)
 
 #### Debugging Tools
-- ⏳ SQL query logging (configurable levels)
+- ✅ **Query logging** — Documented: use `set_trace_callback` to log SQL; slow-query detection via app-layer timing.
 - ⏳ Transaction tracing
 - ⏳ Connection pool diagnostics
 - ⏳ Performance profiling utilities
@@ -340,24 +340,23 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ `connect(loop=None)` - Accepted and ignored (deprecated in aiosqlite)
 
 #### Module-Level Type Registration Functions
-- ⏳ `rapsqlite.register_adapter(type, adapter)` - Register Python-to-SQLite type adapter
-- ⏳ `rapsqlite.register_converter(typename, converter)` - Register SQLite-to-Python type converter
-- These are sqlite3 compatibility features for custom type handling
-- Requires careful implementation to work with sqlx's type system
-- Enables custom date/time, UUID, and other type conversions
+- ⏳ `rapsqlite.register_adapter(type, adapter)` - Register Python-to-SQLite type adapter (planned; not yet implemented)
+- ⏳ `rapsqlite.register_converter(typename, converter)` - Register SQLite-to-Python type converter (planned; not yet implemented)
+- These are sqlite3 compatibility features for custom type handling; require integration with Rust binding/decoding paths
+- ✅ **Type conversion strategy documented** — `docs/reference/type-conversion.rst` describes built-in mapping, custom types today (application-layer conversion, `create_function`, `row_factory`, `text_factory`), and future adapter/converter plan
 
 #### Enhanced Type Conversion Utilities
 - ⏳ Date/time type handling utilities
 - ⏳ UUID type support
 - ⏳ Decimal type support
-- ⏳ Custom type adapter examples and documentation
+- ✅ Custom type approach documented (application-layer, row_factory, text_factory until adapter/converter exist)
 
 **Success Criteria**:
 - `deterministic` parameter works correctly with create_function()
 - `iter_chunk_size` and `loop` parameters accepted (even if not fully utilized)
-- `register_adapter` and `register_converter` functions work with sqlx
-- Custom type conversions work seamlessly
-- Type conversion utilities documented with examples
+- ⏳ `register_adapter` and `register_converter` implemented (current approach and plan documented)
+- Custom type conversions possible via documented workarounds
+- Type conversion strategy documented with examples
 - All type system features have test coverage
 
 ---

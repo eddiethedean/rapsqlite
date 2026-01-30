@@ -90,6 +90,14 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 - **`rapsqlite.sqlalchemy`** — `sqlite+rapsqlite` dialect; use with `create_async_engine("sqlite+rapsqlite:///:memory:")`.
 - **Optional dependency** — `pip install 'rapsqlite[sqlalchemy]'` for SQLAlchemy support.
 - **Compatibility docs** — `docs/guides/compatibility.rst` updated with SQLAlchemy usage.
+- **Alembic with rapsqlite** — Documented in `docs/guides/compatibility.rst` (env.py, async engine, `sqlite+rapsqlite` URL). Alembic-style DDL validated in `tests/test_sqlalchemy_rapsqlite.py::test_sqlalchemy_alembic_style_migration`.
+- **FastAPI patterns** — Documented in `docs/guides/compatibility.rst` (lifespan, connection dependency); `examples/fastapi_db.py` and `tests/test_fastapi_example.py` cover the recommended pattern.
+- **`connect()` pathlib.Path** — `connect()` accepts `pathlib.Path` (converted via `os.fspath`) for aiosqlite compatibility.
+
+### Added - Documentation (pool, monitoring, type conversion)
+
+- **Pool metrics and health** — API reference (`docs/api-reference/connection.rst`): `pool_metrics()` returns `{size, num_idle, in_use}`; `pool_health()` runs `SELECT 1`. Advanced usage guide: new **Monitoring** section (pool metrics in production, health checks, query logging and slow-query detection via `set_trace_callback`).
+- **Type conversion strategy** — New `docs/reference/type-conversion.rst`: built-in parameter/result mapping, custom types today (application-layer conversion, `create_function`, `row_factory`, `text_factory`), and future plan for `register_adapter`/`register_converter`. Linked from docs index and compatibility guide.
 
 ### Added - Test isolation and parallel runs
 
@@ -103,6 +111,14 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 
 - **init_hook timing** — init_hook now runs *after* the transaction connection is acquired and set to Active in both `begin()` and `transaction()` context manager, so tables created in init_hook are visible for the rest of the transaction.
 - **init_hook pool isolation** — When init_hook runs inside an active transaction and calls `conn.execute()`, the execute path now uses the transaction connection instead of acquiring from the pool (avoids "pool timed out" when pool size is 1).
+- **Slow tests** — `test_iterdump_quotes_identifiers`: skip `BEGIN TRANSACTION`/`COMMIT` when replaying iterdump to avoid "cannot start a transaction within a transaction". Backup tests in `test_callback_robustness.py`: use a fresh connection for backup after closing the write connection (avoids backup timeouts). `test_connection_pooling_pattern`: sequential inserts to avoid concurrent pool hang/timeout. `test_backup_aiosqlite`: complete test (run backup, close all connections) so teardown no longer triggers Tokio-context panic warning.
+
+### Added - Tokio panic investigation and mitigation
+
+- **`docs/reference/tokio-panic-investigation.md`** — Documents root cause (sqlx `PoolConnection::Drop` calls `crate::rt::spawn`; GC has no Tokio context), reproduction, and mitigation options.
+- **`scripts/repro_tokio_panic.py`** — Minimal repro: create Connection, use once, do not close, then `gc.collect()` to trigger panic.
+- **Resource cleanup docs** — Advanced usage guide and SECURITY.md note: always use `async with` or `await conn.close()`; abandoning a connection can cause "this functionality requires a Tokio context" during GC.
+- **Best-effort `Connection.__del__`** — Schedules `close()` on the running event loop when a connection is GC'd without close; best-effort only (no guarantees about loop lifetime or finalizer order).
 
 ### Changed
 

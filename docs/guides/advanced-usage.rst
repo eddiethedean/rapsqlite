@@ -7,6 +7,7 @@ Table of Contents
 -----------------
 
 * :ref:`connection-pooling`
+* :ref:`monitoring`
 * :ref:`resource-cleanup`
 * :ref:`transaction-patterns`
 * :ref:`error-handling-strategies`
@@ -48,6 +49,58 @@ Pool Size Guidelines
 * **Large (10+)**: Only for high-concurrency scenarios, be mindful of SQLite's write serialization
 
 **Note**: SQLite serializes writes, so increasing pool size mainly helps with concurrent reads.
+
+.. _monitoring:
+
+Monitoring
+---------
+
+Pool metrics
+~~~~~~~~~~~
+
+``Connection.pool_metrics()`` returns a dict with pool usage: ``size`` (total connections), ``num_idle`` (idle), and ``in_use`` (active). Use it to observe pool health in production:
+
+.. code-block:: python
+
+   async with connect("app.db") as conn:
+       metrics = await conn.pool_metrics()
+       # e.g. {"size": 5, "num_idle": 3, "in_use": 2}
+       logger.info("pool %s", metrics)
+       # Or expose via a /metrics endpoint for Prometheus, etc.
+
+Health checks
+~~~~~~~~~~~~~
+
+Use ``pool_health()`` for liveness/readiness probes: it runs ``SELECT 1`` and returns ``True`` on success, or raises on failure.
+
+.. code-block:: python
+
+   try:
+       ok = await conn.pool_health()
+       assert ok
+   except Exception:
+       # Database or pool unavailable
+       pass
+
+Query logging and slow-query detection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``set_trace_callback`` to log every SQL statement executed on the connection. For slow-query detection, record the time before and after the query in your callback (the callback is invoked before the statement runs; you can pair it with a wrapper that measures duration around execute calls, or log and correlate with application metrics).
+
+.. code-block:: python
+
+   import time
+   import logging
+   logger = logging.getLogger("rapsqlite.queries")
+
+   def query_logger(sql: str):
+       logger.info("SQL: %s", sql.strip())
+
+   await conn.set_trace_callback(query_logger)
+   # All subsequent executes on this connection will log SQL
+   # Set to None to disable: await conn.set_trace_callback(None)
+
+For slow-query detection, measure elapsed time around your own execute calls (e.g. with a small helper or middleware) and log when a threshold is exceeded; the trace callback alone does not provide timing. This gives a clear path to observe queries without implementing a full metrics pipeline.
 
 .. _resource-cleanup:
 

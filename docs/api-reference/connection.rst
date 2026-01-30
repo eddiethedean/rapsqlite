@@ -31,3 +31,12 @@ When using callback methods, exceptions in your Python callbacks are handled as 
 - **Progress handlers** (`set_progress_handler`): Exceptions default to **continue** - operation continues even if callback raises
 
 Best practice: Always handle exceptions within your callback functions to avoid unexpected behavior.
+
+Pool metrics and health
+~~~~~~~~~~~~~~~~~~~~~~~
+
+When using a connection (which uses an internal pool), you can observe pool state and run health checks:
+
+- **``pool_metrics()``** (async): Returns a dict with ``size`` (total connections in pool), ``num_idle`` (idle connections), and ``in_use`` (connections currently in use). Use this to monitor pool usage in production (e.g. log periodically or expose via a metrics endpoint).
+
+- **``pool_health()``** (async): Runs a minimal health check (``SELECT 1``) and returns ``True`` on success; raises on failure. Use for liveness/readiness probes.
