@@ -37,25 +37,27 @@ Current Status
 * ✅ Documentation & benchmarking
 
 **Phase 3 (v0.3.0-dev) In Progress:**
-* ✅ API completeness (execute_fetchall, execute_insert, Cursor properties, savepoints, Connection.stop(), Cursor.execute returns self)
+* ✅ API completeness (execute_fetchall, execute_insert, Cursor properties, savepoints, Connection.stop(), Cursor.execute/executemany/executescript return self)
 * ✅ init_hook fixes (run after transaction active; use transaction connection during init_hook)
 * ✅ True Async DBAPI (rapsqlite.dbapi), SQLAlchemy dialect (sqlite+rapsqlite)
 * ✅ Test isolation (xdist_group, loadgroup, optional test deps)
+* ✅ Query helpers (paginate, analyze_query_plan, transaction_with_timeout, set_slow_query_threshold)
+* ✅ Framework integration (FastAPI, Starlette, aiohttp examples and docs)
+* ✅ FTS5 and JSON1 tests and docs
 
 Goal
 ----
 
 Achieve drop-in replacement compatibility with ``aiosqlite`` to enable seamless migration with true async performance.
 
-Phase 3 (Future)
-----------------
+Phase 3 (Remaining)
+-------------------
 
 Future enhancements may include:
 
-* Advanced connection lifecycle management
-* Nested transaction handling (savepoints)
-* Enhanced error recovery strategies
-* Query optimization utilities
-* Ecosystem integration improvements
+* Dynamic pool sizing
+* Deadlock detection and automatic retry
+* register_adapter and register_converter
+* Pass 100% of aiosqlite test suite
 
 For the complete roadmap, see the `ROADMAP.md <https://github.com/eddiethedean/rapsqlite/blob/main/docs/ROADMAP.md>`_ file in the repository.

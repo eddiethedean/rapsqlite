@@ -36,7 +36,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ SQLite busy_timeout support (`timeout` parameter matching aiosqlite)
 - ✅ Comprehensive documentation and benchmarking
 
-**Test Coverage**: 544 tests passing (3 skipped)  
+**Test Coverage**: 560 tests passing (7 skipped)  
 **API Compatibility**: ~95% with aiosqlite (Phase 3.9 additions improve compatibility)  
 **Python Support**: 3.10–3.14  
 **Code Quality**: Full mypy type checking and Ruff formatting/linting
@@ -52,6 +52,10 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ **Test isolation** — `unique_table_prefix` fixture; `xdist_group` for init_hook, concurrency, pool_exhaustion; CI uses `--timeout 90` and `--dist loadgroup`; optional test deps (`.[test]`) for FastAPI/SQLAlchemy tests
 - ✅ aiosqlite test suite runner; `tests/test_phase3_api.py` for Phase 3 APIs
 - ✅ **Session-connection reuse** — Each Connection reuses one pool connection for non-transaction, non-callback operations; released on `close()` and when starting a transaction. Concurrent Reads benchmark (10 workers × 2000 queries) wins vs aiosqlite; benchmarks/README.md updated with latest results.
+- ✅ **Query helpers** — `paginate()`, `analyze_query_plan()`, `transaction_with_timeout()`, `set_slow_query_threshold()`; documented in advanced-usage.
+- ✅ **Starlette and aiohttp** — Integration examples (`examples/starlette_db.py`, `examples/aiohttp_db.py`) and compatibility docs.
+- ✅ **FTS5 and JSON1** — Tests (`tests/test_fts.py`, `tests/test_json1.py`); FTS/JSON usage documented in advanced-usage (Streaming section).
+- ✅ **Cursor chaining** — `Cursor.executemany()` and `Cursor.executescript()` return self (aiosqlite compatibility).
 
 ---
 
@@ -66,7 +70,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Focus**: Advanced query features and performance optimizations
 
 #### Query Optimization
-- ⏳ Query plan analysis and optimization hints
+- ✅ **Query plan analysis** — `analyze_query_plan(conn, sql, parameters=None)` returns dict with `uses_index`, `table_scan`, `details`; documented in advanced-usage.
 - ⏳ Automatic index recommendations
 - ⏳ Query result caching strategies
 - ⏳ Lazy query execution patterns
@@ -74,14 +78,14 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Result Handling
 - ✅ **Streaming / chunked results** — `execute_iter(conn, sql, parameters=None, chunk_size=None)` and `conn.execute_iter(sql, ...)` return an async iterator yielding chunks of rows (LIMIT/OFFSET under the hood); documented in advanced-usage (Streaming and large result sets).
-- ⏳ Cursor-based pagination utilities
+- ✅ **Page-based pagination** — `paginate(conn, sql, parameters=None, page_size=64, offset=0)` returns one page of rows; documented in advanced-usage.
 - ⏳ Result set transformation utilities
 - ⏳ Row-to-object mapping helpers
 - ⏳ Efficient memory usage patterns for large result sets
 
 #### SQLite-Specific Features
-- ⏳ Full-text search (FTS) support
-- ⏳ JSON functions support (JSON1 extension)
+- ✅ **Full-text search (FTS5)** — Create virtual tables with `CREATE VIRTUAL TABLE ... USING fts5(...)`; tests in `tests/test_fts.py`; documented in advanced-usage.
+- ✅ **JSON functions (JSON1)** — Use `json_extract`, `json_object`, `->`, `->>` in SQL; tests in `tests/test_json1.py`; documented in advanced-usage.
 - ⏳ Window functions support
 - ⏳ Common Table Expressions (CTEs) utilities
 - ⏳ UPSERT operations (INSERT OR REPLACE, INSERT OR IGNORE)
@@ -130,7 +134,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ **Nested transaction handling (savepoints)** — `Connection.savepoint(name=None)` context manager
 - ✅ **`Connection.isolation_level`** — Get/set `None` | `"DEFERRED"` | `"IMMEDIATE"` | `"EXCLUSIVE"`; applied to `BEGIN`
 - ⏳ Deadlock detection and automatic retry
-- ⏳ Transaction timeout handling
+- ✅ **Transaction timeout** — `transaction_with_timeout(conn, work, timeout_secs=30)` runs a transaction with `asyncio.wait_for`; documented in advanced-usage.
 - ⏳ Long-running transaction monitoring
 
 #### Transaction Utilities
@@ -160,8 +164,8 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 #### Web Framework Integration
 - ✅ **FastAPI** — Patterns documented in `docs/guides/compatibility.rst` (lifespan, connection dependency); `examples/fastapi_db.py` and `tests/test_fastapi_example.py`.
 - ⏳ Django async database backend (if applicable)
-- ⏳ aiohttp database patterns and middleware
-- ⏳ Starlette async database integration
+- ✅ **aiohttp** — Example (`examples/aiohttp_db.py`), tests (`tests/test_aiohttp_example.py`); documented in compatibility.rst.
+- ✅ **Starlette** — Example (`examples/starlette_db.py`), tests (`tests/test_starlette_example.py`); documented in compatibility.rst.
 - ⏳ Quart async database support
 - ⏳ Sanic async database patterns
 
@@ -174,7 +178,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ SQLAlchemy async driver (`sqlite+rapsqlite`) available; Alembic and FastAPI documented and validated
 - ✅ FastAPI integration examples and patterns documented
 - ✅ Alembic with rapsqlite documented and DDL validated
-- At least 3 major frameworks have integration examples
+- ✅ At least 3 major frameworks have integration examples (FastAPI, Starlette, aiohttp)
 
 ---
 
@@ -187,7 +191,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ **Query timing** — `timed_fetch_all(conn, sql, parameters=None, on_timing=None)` runs fetch_all and records duration; optional callback or returns (rows, duration_secs); documented in advanced-usage (Query timing).
 - ✅ **Connection pool metrics** — `pool_metrics()` and `pool_health()` documented; Monitoring section in advanced-usage.
 - ⏳ Resource usage tracking
-- ⏳ Slow query detection and reporting (approach documented via `set_trace_callback` + app-layer timing)
+- ✅ **Slow query detection** — `set_slow_query_threshold(conn, threshold_secs, callback=None)` invokes callback when `fetch_all` exceeds threshold; documented in advanced-usage.
 
 #### Debugging Tools
 - ✅ **Query logging** — Documented: use `set_trace_callback` to log SQL; slow-query detection via app-layer timing.
@@ -301,7 +305,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Connection Control Methods
 - ✅ **`Connection.interrupt()`** — Interrupts callback connection when present; no-op otherwise
-- ⏳ `Connection.stop()` - Stop background thread (for API compatibility, though less relevant for rapsqlite's architecture)
+- ✅ **`Connection.stop()`** — No-op for aiosqlite API compatibility; use `close()` to close the connection.
 
 #### Connection Properties
 - ✅ **`Connection.isolation_level`** — Get/set `None` | `"DEFERRED"` | `"IMMEDIATE"` | `"EXCLUSIVE"`; applied to `BEGIN`
@@ -380,14 +384,14 @@ Following semantic versioning:
 
 ### Must Have (Blocking v1.0.0)
 - ✅ Phase 1 and Phase 2 complete (achieved in v0.2.0)
-- ⏳ Phase 3.1 (Query Optimization) — `explain_query_plan` added; streaming, FTS, etc. pending
-- ⏳ Phase 3.2 (Advanced Pooling) — `pool_health` added; metrics, dynamic sizing pending
-- ⏳ Phase 3.4 (ORM Integration) — At least SQLAlchemy and FastAPI integration complete
+- ⏳ Phase 3.1 (Query Optimization) — `explain_query_plan`, `analyze_query_plan`, streaming, `paginate`, FTS5, JSON1 done; caching, index recommendations pending
+- ⏳ Phase 3.2 (Advanced Pooling) — `pool_health`, metrics, session-connection reuse done; dynamic sizing pending
+- ✅ Phase 3.4 (ORM Integration) — SQLAlchemy, FastAPI, Starlette, aiohttp integration complete (3+ frameworks)
 - ⏳ Phase 3.8 (Testing) — aiosqlite suite runnable; 100% pass not yet achieved
 - ⏳ Phase 3.9 (API Completeness) — Helpers, Cursor props, isolation_level, __await__, `interrupt`, cursor return-self (execute/executemany/executescript) done
 
 ### Should Have (Target for v1.0.0)
-- ⏳ Phase 3.3 (Advanced Transactions) — `isolation_level` done; savepoints, retry pending
+- ⏳ Phase 3.3 (Advanced Transactions) — `isolation_level`, savepoints, `transaction_retry`, `transaction_with_timeout` done; deadlock detection pending
 - ⏳ Phase 3.5 (Observability) — Basic monitoring and metrics
 - ⏳ Phase 3.6 (Developer Experience) — Core tools and documentation
 - ⏳ Phase 3.10 (Type System) — Core type conversion features complete
@@ -432,4 +436,4 @@ We welcome contributions! See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelin
 
 ---
 
-*Last Updated: 2026-01-29*
+*Last Updated: 2026-01-30*

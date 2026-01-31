@@ -33,6 +33,41 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 
 ## [0.3.0-dev] - Unreleased
 
+### Added - Phase 3.1: Query helpers and pagination (2026-01-30)
+
+- **`paginate(conn, sql, parameters=None, page_size=64, offset=0)`** — Fetch one page of rows; wraps query with `LIMIT`/`OFFSET`. Documented in advanced-usage (Streaming and large result sets).
+- **`analyze_query_plan(conn, sql, parameters=None)`** — Run `EXPLAIN QUERY PLAN` and return structured dict with `rows`, `details`, `uses_index`, `table_scan`. Documented in advanced-usage (Query plan analysis).
+- **`transaction_with_timeout(conn, work, timeout_secs=30)`** — Run a transaction with `asyncio.wait_for`; raises `TimeoutError` if work exceeds timeout. Documented in advanced-usage (Transaction timeout).
+- **`set_slow_query_threshold(conn, threshold_secs, callback=None)`** — Invoke callback when `fetch_all` exceeds threshold; set to 0 to disable. Documented in advanced-usage (Slow query detection).
+
+### Added - Phase 3.4: Starlette and aiohttp integration (2026-01-30)
+
+- **Starlette example** — `examples/starlette_db.py`; lifespan for schema setup, connection per request. Documented in `docs/guides/compatibility.rst`.
+- **aiohttp example** — `examples/aiohttp_db.py`; `on_startup` for schema setup, connection per request. Documented in `docs/guides/compatibility.rst`.
+- **Tests** — `tests/test_starlette_example.py`, `tests/test_aiohttp_example.py` for smoke validation.
+
+### Added - Phase 3.1: FTS5 and JSON1 support (2026-01-30)
+
+- **FTS5 tests** — `tests/test_fts.py` (create virtual table, MATCH queries, bm25 ranking).
+- **JSON1 tests** — `tests/test_json1.py` (json_extract, json_object, `->`, `->>` operators).
+- FTS and JSON usage documented in advanced-usage (Streaming section: FTS, JSON, and UPSERT).
+
+### Added - Phase 3.9: Cursor chaining (2026-01-30)
+
+- **`Cursor.executemany()` returns self** — Wrapper for aiosqlite chaining compatibility.
+- **`Cursor.executescript()` returns self** — Wrapper for aiosqlite chaining compatibility.
+
+### Added - Testing and CI (2026-01-30)
+
+- **Test dependencies** — `greenlet`, `httpx`, `aiohttp` added to `[project.optional-dependencies].test` for SQLAlchemy and framework tests.
+- **aiosqlite-compat CI job** — Runs `scripts/run_aiosqlite_tests.py` on schedule or when `full_suite` is requested via workflow_dispatch.
+
+### Changed (2026-01-30)
+
+- **Dead code removal** — Removed unused Rust functions: `bind_and_execute`, `bind_query_multiple`, `bind_and_fetch_all`, `bind_and_fetch_one`, `bind_and_fetch_optional` (query.rs); `execute_many_raw`, `execute_many_raw_standalone` (batch.rs); `map_sqlite_error` (errors.rs).
+- **Lint and format** — Ruff format, ruff check, mypy, cargo fmt, cargo clippy; all passing.
+- **Test count** — 560 tests passing (7 skipped).
+
 ### Changed
 
 - Version bump to **0.3.0-dev** — Phase 3 development (advanced features, ecosystem integration) toward v1.0.0.
