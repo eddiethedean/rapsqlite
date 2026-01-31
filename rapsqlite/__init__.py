@@ -49,6 +49,7 @@ Example:
 
 import asyncio
 import os
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -265,6 +266,9 @@ __all__: list[str] = [
     "execute_iter",
     "paginate",
     "analyze_query_plan",
+    "suggest_indexes",
+    "in_clause_query",
+    "rows_to_dicts",
     "timed_fetch_all",
     "transaction_retry",
     "transaction_with_timeout",
@@ -602,6 +606,129 @@ async def analyze_query_plan(
         "uses_index": "USING INDEX" in detail_str or "INDEX" in detail_str,
         "table_scan": "SCAN TABLE" in detail_str or "TABLE SCAN" in detail_str,
     }
+
+
+async def suggest_indexes(
+    conn: "Connection",  # type: ignore[valid-type]
+    sql: str,
+    parameters: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Suggest indexes when query plan indicates a full table scan (Phase 3.1).
+
+    Calls analyze_query_plan and, if table_scan without uses_index, parses
+    the plan to extract table names and returns index suggestions.
+
+    Returns a list of dicts, e.g.:
+        [{"table": "users", "column": "", "suggestion": "CREATE INDEX idx_users_<col> ON users(<col>)"}]
+
+    Example:
+        suggestions = await suggest_indexes(conn, "SELECT * FROM users WHERE email = ?", ["x"])
+        for s in suggestions:
+            print(s["suggestion"])
+    """
+    analysis = await analyze_query_plan(conn, sql, parameters)
+    if not analysis.get("table_scan") or analysis.get("uses_index"):
+        return []
+
+    suggestions: list[dict[str, Any]] = []
+    seen_tables: set[str] = set()
+
+    for detail in analysis.get("details", []):
+        detail_upper = str(detail).upper()
+        # SCAN TABLE tablename or SCAN TABLE tablename AS alias
+        match = re.search(r"SCAN\s+TABLE\s+(\w+)", detail_upper, re.IGNORECASE)
+        if match:
+            table = match.group(1)
+            if table not in seen_tables:
+                seen_tables.add(table)
+                suggestions.append(
+                    {
+                        "table": table,
+                        "column": "",
+                        "suggestion": (
+                            f"CREATE INDEX idx_{table}_<columns> ON {table}(<columns>) "
+                            "-- add columns used in WHERE, ORDER BY, or JOIN"
+                        ),
+                    }
+                )
+
+    return suggestions
+
+
+def in_clause_query(
+    sql: str, values: list[Any] | tuple[Any, ...]
+) -> tuple[str, list[Any]]:
+    """Expand IN (?) to IN (?,?,...) for use with fetch_all (Phase 3.7).
+
+    Use when your SQL has a single IN (?) clause and you want to pass a list of values.
+
+    Args:
+        sql: Query containing exactly one ``IN (?)`` placeholder
+        values: List or tuple of values for the IN clause
+
+    Returns:
+        (processed_sql, flattened_params) to pass to ``fetch_all``
+
+    Example:
+        sql, params = in_clause_query("SELECT * FROM users WHERE id IN (?)", [1, 2, 3])
+        rows = await conn.fetch_all(sql, params)
+        # Equivalent to: SELECT * FROM users WHERE id IN (?, ?, ?) with params [1, 2, 3]
+
+    Raises:
+        ValueError: If values is empty (IN () is invalid in SQLite)
+    """
+    if len(values) == 0:
+        raise ValueError(
+            "in_clause_query requires at least one value; IN () is invalid in SQLite"
+        )
+    placeholders = ",".join("?" * len(values))
+    new_sql = re.sub(
+        r"\bIN\s*\(\s*\?\s*\)",
+        f"IN ({placeholders})",
+        sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if new_sql == sql:
+        raise ValueError(
+            "in_clause_query: sql must contain 'IN (?)' placeholder; found no match"
+        )
+    return (new_sql, list(values))
+
+
+def rows_to_dicts(
+    rows: list[Any],
+    columns: list[str] | tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Convert rows (list of list/tuple) to list of dicts using column names (Phase 3.1).
+
+    Use when you have rows from fetch_all and want dicts keyed by column name.
+    Requires columns to be provided (e.g. from cursor.description).
+
+    Args:
+        rows: List of rows, each row a list or tuple of values
+        columns: Column names in order (e.g. from desc[0] for desc in cursor.description)
+
+    Returns:
+        List of dicts, each mapping column name to value
+
+    Example:
+        rows = await conn.fetch_all("SELECT id, name FROM users")
+        cols = ["id", "name"]
+        dicts = rows_to_dicts(rows, cols)
+        # [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+    """
+    if columns is None or len(columns) == 0:
+        return []
+    col_list = list(columns)
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        if hasattr(row, "keys") and callable(getattr(row, "keys")):
+            result.append(dict(row))
+        else:
+            row_iter = row if isinstance(row, (list, tuple)) else list(row)
+            result.append(dict(zip(col_list, row_iter)))
+    return result
 
 
 class _StreamChunksIterator:

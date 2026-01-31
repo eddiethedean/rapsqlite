@@ -10,7 +10,7 @@ Test Execution
 **rapsqlite Version**: 0.3.0-dev  
 **aiosqlite Test Suite**: Latest from https://github.com/omnilib/aiosqlite
 
-**Test baseline**: Run ``scripts/run_aiosqlite_tests.py`` to execute the aiosqlite test suite against rapsqlite (patched imports). Results are written to ``docs/AIOSQLITE_TEST_RESULTS.md``. Summary: ``perf.py`` passes; ``smoke.py`` has multiple failures, most categorized as **document** (intentional differences: async methods for ``total_changes``/``in_transaction``, no transaction queue, backup API) or **environment** (temp dir when run from script). A few are **fix** candidates (e.g. ``test_connection_await``, ``test_cursor_return_self``) for low-risk compatibility tweaks. See ``docs/AIOSQLITE_TEST_RESULTS.md`` for per-test notes.
+**Test baseline**: Run ``scripts/run_aiosqlite_tests.py`` to execute the aiosqlite test suite against rapsqlite (patched imports). Results are written to ``docs/AIOSQLITE_TEST_RESULTS.md`` with a per-test breakdown. Summary: some tests pass in ``perf.py`` and ``smoke.py``; failures are often due to **document** (intentional differences: async methods for ``total_changes``/``in_transaction``, no transaction queue, backup API), **environment** (temp dir, package layout when run from script), or compatibility gaps. See ``docs/AIOSQLITE_TEST_RESULTS.md`` for the per-test breakdown.
 
 Known API Differences
 ---------------------

@@ -8,6 +8,9 @@ from rapsqlite import (
     execute_iter,
     paginate,
     analyze_query_plan,
+    suggest_indexes,
+    in_clause_query,
+    rows_to_dicts,
     pool_metrics_gauges,
     timed_fetch_all,
     transaction_retry,
@@ -273,6 +276,51 @@ async def test_analyze_query_plan(test_db):
         assert "table_scan" in analysis
         assert isinstance(analysis["rows"], list)
         assert isinstance(analysis["details"], list)
+
+
+@pytest.mark.asyncio
+async def test_suggest_indexes(test_db):
+    """suggest_indexes returns list of suggestions when table_scan without index."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
+        await db.execute("INSERT INTO t (id, x) VALUES (1, 'a')")
+        # Full table scan (no index on x) - should suggest
+        suggestions = await suggest_indexes(db, "SELECT * FROM t WHERE x = ?", ["a"])
+        assert isinstance(suggestions, list)
+        if suggestions:
+            assert all("table" in s and "suggestion" in s for s in suggestions)
+            assert any("t" in str(s.get("table", "")) for s in suggestions)
+        # Query using primary key - uses index, no suggestion
+        suggestions_pk = await suggest_indexes(db, "SELECT * FROM t WHERE id = ?", [1])
+        assert suggestions_pk == []
+
+
+@pytest.mark.asyncio
+async def test_in_clause_query(test_db):
+    """in_clause_query expands IN (?) to IN (?,?,...) with flattened params."""
+    sql, params = in_clause_query("SELECT * FROM t WHERE id IN (?)", [1, 2, 3])
+    assert "IN (?,?,?)" in sql or "IN (?, ?, ?)" in sql
+    assert params == [1, 2, 3]
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        await db.execute("INSERT INTO t (id) VALUES (1), (2), (3)")
+        rows = await db.fetch_all(sql, params)
+        assert len(rows) == 3
+        assert {r[0] for r in rows} == {1, 2, 3}
+    with pytest.raises(ValueError, match="at least one value"):
+        in_clause_query("SELECT * FROM t WHERE id IN (?)", [])
+    with pytest.raises(ValueError, match="IN \\(\\?\\)"):
+        in_clause_query("SELECT * FROM t WHERE id = ?", [1])
+
+
+def test_rows_to_dicts():
+    """rows_to_dicts converts list-of-list rows to list-of-dicts using columns."""
+    rows = [[1, "a"], [2, "b"]]
+    cols = ["id", "name"]
+    dicts = rows_to_dicts(rows, cols)
+    assert dicts == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+    assert rows_to_dicts([], ["a"]) == []
+    assert rows_to_dicts(rows, None) == []
 
 
 @pytest.mark.asyncio

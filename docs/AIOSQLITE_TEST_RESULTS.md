@@ -2,7 +2,7 @@
 
 This document contains the results of running the aiosqlite test suite against rapsqlite.
 
-**Date**: 2026-01-30 20:19:09
+**Date**: 2026-01-30 20:42:38
 **rapsqlite Version**: 0.3.0-dev
 **Python Version**: 3.10.19
 
@@ -37,6 +37,59 @@ See [MIGRATION.md](MIGRATION.md) for details on known differences.
 1. Review failed tests to identify compatibility gaps
 2. Fix compatibility issues where possible
 3. Document intentional differences in MIGRATION.md
+
+## Per-Test Breakdown
+
+### `perf.py`
+
+| Test | Status | Error |
+|------|--------|-------|
+| test_atomics | PASSED |  |
+| test_connection_file | PASSED |  |
+| test_connection_memory | PASSED |  |
+| test_insert_ids | PASSED |  |
+| test_insert_macro_ids | FAILED |  |
+| test_inserts | FAILED |  |
+| test_inserts_authorized | FAILED |  |
+| test_iterable_cursor_perf | PASSED |  |
+| test_select | FAILED |  |
+| test_select_macro | FAILED | ________________________ PerfTest.test_insert_macro_ids ________________________ |
+
+### `smoke.py`
+
+| Test | Status | Error |
+|------|--------|-------|
+| test_backup_aiosqlite | FAILED |  |
+| test_backup_sqlite | FAILED |  |
+| test_close_blocking_until_transaction_queue_empty | FAILED |  |
+| test_close_twice | PASSED |  |
+| test_connect_base_exception | FAILED |  |
+| test_connect_error | FAILED |  |
+| test_connection_await | FAILED |  |
+| test_connection_context | FAILED |  |
+| test_connection_locations | FAILED |  |
+| test_connection_properties | FAILED |  |
+| test_context_cursor | FAILED |  |
+| test_create_function | FAILED |  |
+| test_create_function_deterministic | FAILED |  |
+| test_cursor_on_closed_connection | FAILED |  |
+| test_cursor_on_closed_connection_loop | FAILED |  |
+| test_cursor_return_self | FAILED |  |
+| test_emits_warning_when_left_open | FAILED |  |
+| test_enable_load_extension | FAILED |  |
+| test_fetch_all | FAILED |  |
+| test_iterable_cursor | FAILED |  |
+| test_iterdump | FAILED |  |
+| test_multi_loop_usage | FAILED |  |
+| test_multiple_connections | FAILED |  |
+| test_multiple_queries | FAILED |  |
+| test_set_authorizer_deny_drops | FAILED |  |
+| test_set_authorizer_exception_propagation | FAILED |  |
+| test_set_progress_handler | FAILED |  |
+| test_set_trace_callback | FAILED |  |
+| test_stop_after_event_loop_closed | PASSED |  |
+| test_stop_without_close | FAILED | _______________________ SmokeTest.test_backup_aiosqlite ________________________ |
+
 
 ## Notes
 

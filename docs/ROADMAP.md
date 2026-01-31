@@ -71,7 +71,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 #### Query Optimization
 - ✅ **Query plan analysis** — `analyze_query_plan(conn, sql, parameters=None)` returns dict with `uses_index`, `table_scan`, `details`; documented in advanced-usage.
-- ⏳ Automatic index recommendations
+- ✅ **Index suggestions** — `suggest_indexes(conn, sql, parameters=None)` suggests indexes when plan shows table scan; documented in advanced-usage.
 - ⏳ Query result caching strategies
 - ⏳ Lazy query execution patterns
 - ✅ **`Connection.explain_query_plan(sql, parameters=None)`** — Runs `EXPLAIN QUERY PLAN` and returns result rows
@@ -79,7 +79,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 #### Result Handling
 - ✅ **Streaming / chunked results** — `execute_iter(conn, sql, parameters=None, chunk_size=None)` and `conn.execute_iter(sql, ...)` return an async iterator yielding chunks of rows (LIMIT/OFFSET under the hood); documented in advanced-usage (Streaming and large result sets).
 - ✅ **Page-based pagination** — `paginate(conn, sql, parameters=None, page_size=64, offset=0)` returns one page of rows; documented in advanced-usage.
-- ⏳ Result set transformation utilities
+- ✅ **Result transformation** — `rows_to_dicts(rows, columns)` converts list-of-list rows to list-of-dicts; documented in advanced-usage.
 - ⏳ Row-to-object mapping helpers
 - ⏳ Efficient memory usage patterns for large result sets
 
@@ -260,7 +260,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ⏳ Automatic migration generation
 
 #### Parameterized Queries
-- ⏳ Enhanced array parameter binding for IN clauses
+- ✅ **IN clause expansion** — `in_clause_query(sql, values)` expands `IN (?)` to `IN (?,?,...)`; standalone helper; documented in advanced-usage.
 - ⏳ Bulk operation optimizations
 
 **Success Criteria**:
@@ -277,7 +277,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 #### Test Coverage
 - ⏳ Complete edge case coverage
 - ⏳ Fake Async Detector validation passes under load
-- ✅ **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; baseline and per-test categories in `docs/AIOSQLITE_TEST_RESULTS.md` (perf.py passes; smoke.py failures mostly **document** or **environment**; a few **fix** candidates).
+- ✅ **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; per-test breakdown in `docs/AIOSQLITE_TEST_RESULTS.md`; some tests pass; failures mostly **document** or **environment**.
 - ⏳ Pass 100% of aiosqlite test suite as drop-in replacement validation (optional; intentional differences documented)
 - ⏳ Stress testing and performance regression tests
 - ⏳ Cross-platform testing (Linux, macOS, Windows)

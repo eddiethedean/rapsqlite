@@ -450,6 +450,17 @@ To process large SELECT result sets without loading every row into memory:
 
 - **Manual pagination**: You can still run ``fetch_all`` with ``LIMIT``/``OFFSET`` in a loop if you prefer; ``execute_iter`` and ``paginate`` do this for you.
 
+- **Rows to dicts**: Use ``rows_to_dicts(rows, columns)`` to convert list-of-list rows to list-of-dicts using column names from ``cursor.description``:
+
+  .. code-block:: python
+
+     from rapsqlite import connect, rows_to_dicts
+
+     async with connect("app.db") as conn:
+         rows = await conn.fetch_all("SELECT id, name FROM users")
+         dicts = rows_to_dicts(rows, ["id", "name"])
+         # [{"id": 1, "name": "Alice"}, ...]
+
 Query plan analysis
 ~~~~~~~~~~~~~~~~~~~
 
@@ -463,6 +474,17 @@ Use ``analyze_query_plan(conn, sql, parameters=None)`` to inspect how SQLite wil
          analysis = await analyze_query_plan(conn, "SELECT * FROM users WHERE id = ?", [1])
          if analysis["table_scan"] and not analysis["uses_index"]:
              print("Consider adding an index on users(id)")
+
+Use **``suggest_indexes(conn, sql, parameters=None)``** to get index suggestions when the plan shows a full table scan. Returns a list of dicts with ``table``, ``column`` (may be empty), and ``suggestion`` (CREATE INDEX template):
+
+  .. code-block:: python
+
+     from rapsqlite import connect, suggest_indexes
+
+     async with connect("app.db") as conn:
+         suggestions = await suggest_indexes(conn, "SELECT * FROM users WHERE email = ?", ["x"])
+         for s in suggestions:
+             print(s["suggestion"])  # e.g. CREATE INDEX idx_users_<columns> ON users(<columns>) ...
 
 FTS, JSON, and UPSERT
 ~~~~~~~~~~~~~~~~~~~~~
@@ -547,6 +569,22 @@ Use Parameterized Queries
 .. code-block:: python
 
    await conn.execute(f"INSERT INTO users (name) VALUES ('{name}')")  # SQL injection risk, no caching
+
+IN clause expansion
+~~~~~~~~~~~~~~~~~~~
+
+Use **``in_clause_query(sql, values)``** when you have ``WHERE id IN (?)`` and a list of IDs. It returns ``(processed_sql, params)`` to pass to ``fetch_all``:
+
+.. code-block:: python
+
+   from rapsqlite import connect, in_clause_query
+
+   ids = [1, 2, 3]
+   sql, params = in_clause_query("SELECT * FROM users WHERE id IN (?)", ids)
+   rows = await conn.fetch_all(sql, params)
+   # Equivalent to: SELECT * FROM users WHERE id IN (?, ?, ?) with params [1, 2, 3]
+
+Alternatively, build the placeholders manually: ``", ".join("?" * len(ids))``.
 
 Batch Operations
 ~~~~~~~~~~~~~~~~
@@ -825,6 +863,13 @@ Best Practices
 
    # Get table structure
    columns = await conn.get_table_info("users")
+
+9. Prefer Parameterized Queries and Choose the Right Fetch Pattern
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Parameterized queries**: Always use ``?`` placeholders and pass parameters as a list/tuple; never string-format SQL (SQL injection risk, no prepared-statement caching).
+* **Large result sets**: Use ``execute_iter`` for streaming (memory-efficient, async iterator) or ``paginate`` for page-based access (manual offset). Use ``fetch_all`` only when the result set fits in memory.
+* **Pool sizing**: Set ``pool_size`` before first use; default 1 is fine for most apps; increase for concurrent reads.
 
 Further Reading
 ---------------

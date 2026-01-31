@@ -127,9 +127,47 @@ def patch_test_files(aiosqlite_dir: Path, patched_dir: Path):
     (patched_dir / "__init__.py").touch()
 
 
+def parse_pytest_output(output: str, rel_path: str) -> list[dict]:
+    """Parse pytest -v output for per-test results.
+
+    Returns list of dicts: {name, status, error_snippet}
+    """
+    results: list[dict] = []
+    lines = output.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Match: "path::test_name PASSED" or "path::test_name FAILED"
+        match = re.match(r".+::(\w+)\s+(PASSED|FAILED|SKIPPED)", line.strip())
+        if match:
+            test_name = match.group(1)
+            status = match.group(2)
+            error_snippet = ""
+            if status == "FAILED":
+                # Collect next few lines for error context (up to 5 non-empty)
+                snippet_lines = []
+                for j in range(i + 1, min(i + 30, len(lines))):
+                    nl = lines[j].strip()
+                    if not nl or nl.startswith("=") or nl.startswith("-"):
+                        if snippet_lines:
+                            break
+                        continue
+                    if re.match(r".+::\w+\s+(PASSED|FAILED|SKIPPED)", nl):
+                        break  # Next test
+                    snippet_lines.append(nl[:100])
+                    if len(snippet_lines) >= 5:
+                        break
+                error_snippet = " | ".join(snippet_lines[:3]) if snippet_lines else ""
+            results.append(
+                {"name": test_name, "status": status, "error": error_snippet}
+            )
+        i += 1
+    return results
+
+
 def run_tests(
     patched_dir: Path, project_root: Path
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], dict[str, list[dict]]]:
     """Run tests and collect results."""
     print_status("\n🧪 Running tests...", BLUE)
     print_status("=" * 60, BLUE)
@@ -190,6 +228,7 @@ def run_tests(
     passed = []
     failed = []
     skipped = []
+    per_test_results: dict[str, list[dict]] = {}
 
     # Run from parent so patched_dir is a package (enables "from .helpers" in smoke.py)
     run_cwd = patched_dir.parent
@@ -222,6 +261,9 @@ def run_tests(
                 text=True,
             )
 
+            output = result.stdout + result.stderr
+            per_test_results[str(rel_path)] = parse_pytest_output(output, str(rel_path))
+
             if result.returncode == 0:
                 passed.append(str(rel_path))
                 print_status(f"✅ PASSED: {rel_path}", GREEN)
@@ -232,8 +274,6 @@ def run_tests(
                 failed.append(str(rel_path))
                 print_status(f"❌ FAILED: {rel_path}", RED)
                 # Print key error information
-                output = result.stdout + result.stderr
-                # Look for AttributeError, TypeError, etc.
                 error_lines = [
                     line
                     for line in output.split("\n")
@@ -254,15 +294,19 @@ def run_tests(
                         print(f"   {line[:120]}")
         except Exception as e:
             failed.append(str(rel_path))
+            per_test_results[str(rel_path)] = [
+                {"name": "?", "status": "ERROR", "error": str(e)}
+            ]
             print_status(f"❌ ERROR running {rel_path}: {e}", RED)
 
-    return passed, failed, skipped
+    return passed, failed, skipped, per_test_results
 
 
 def generate_report(
     passed: list[str],
     failed: list[str],
     skipped: list[str],
+    per_test_results: dict[str, list[dict]],
     project_root: Path,
     rapsqlite_version: str,
 ):
@@ -309,7 +353,7 @@ This document contains the results of running the aiosqlite test suite against r
 ### Failure Analysis
 
 These tests failed due to compatibility differences between aiosqlite and rapsqlite.
-See [MIGRATION.md](MIGRATION.md) for details on known differences.
+See [migration guide](guides/migration-guide.rst) for details on known differences.
 
 **Common failure reasons:**
 - API differences (intentional or unintentional)
@@ -320,8 +364,31 @@ See [MIGRATION.md](MIGRATION.md) for details on known differences.
 **Next steps:**
 1. Review failed tests to identify compatibility gaps
 2. Fix compatibility issues where possible
-3. Document intentional differences in MIGRATION.md
+3. Document intentional differences in the migration guide
 """
+
+    # Per-test breakdown
+    if per_test_results:
+        content += """
+## Per-Test Breakdown
+
+"""
+        for file_path in sorted(per_test_results.keys()):
+            tests = per_test_results[file_path]
+            if not tests:
+                continue
+            content += f"### `{file_path}`\n\n"
+            content += "| Test | Status | Error |\n"
+            content += "|------|--------|-------|\n"
+            for t in tests:
+                name = t.get("name", "?")
+                status = t.get("status", "?")
+                err = t.get("error", "")
+                err_escaped = (
+                    err.replace("|", "\\|").replace("\n", " ")[:80] if err else ""
+                )
+                content += f"| {name} | {status} | {err_escaped} |\n"
+            content += "\n"
 
     if skipped:
         content += """
@@ -335,7 +402,7 @@ See [MIGRATION.md](MIGRATION.md) for details on known differences.
 ## Notes
 
 - Tests were run by patching aiosqlite imports to use rapsqlite
-- Some failures may be due to intentional differences (see [MIGRATION.md](MIGRATION.md))
+- Some failures may be due to intentional differences (see migration guide)
 - Some failures may indicate areas for improvement in rapsqlite compatibility
 - This is a compatibility validation exercise, not a requirement for 100% pass rate
 """
@@ -374,11 +441,11 @@ def main():
         patch_test_files(aiosqlite_dir, patched_dir)
 
         # Run tests
-        passed, failed, skipped = run_tests(patched_dir, project_root)
+        passed, failed, skipped, per_test_results = run_tests(patched_dir, project_root)
 
         # Generate report
         report_file = generate_report(
-            passed, failed, skipped, project_root, rapsqlite_version
+            passed, failed, skipped, per_test_results, project_root, rapsqlite_version
         )
 
         # Print summary

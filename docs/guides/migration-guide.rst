@@ -146,7 +146,18 @@ Transactions
 Differences and Limitations
 ---------------------------
 
-For a detailed compatibility analysis based on running the aiosqlite test suite, see :doc:`compatibility`.
+For a detailed compatibility analysis based on running the aiosqlite test suite, see :doc:`compatibility`. For per-test results when running the aiosqlite suite against rapsqlite, see ``docs/AIOSQLITE_TEST_RESULTS.md``.
+
+Migrating from aiosqlite: Common Patterns
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Connection lifecycle**: Always use ``async with connect(...)`` or ``await conn.close()``. Abandoning a connection without closing can cause issues during garbage collection.
+
+* **total_changes and in_transaction**: In aiosqlite these may be properties; in rapsqlite they are async methods. Use ``await db.total_changes()`` and ``await db.in_transaction()``.
+
+* **Backup API**: rapsqlite supports backup to both rapsqlite and sqlite3 connections. Backup to sqlite3 requires a file-backed database (not ``:memory:``).
+
+* **Transaction queue**: aiosqlite queues transaction operations on a background thread. rapsqlite does not use a transaction queue; operations run directly on the connection. For most applications this is transparent.
 
 Known Differences
 ~~~~~~~~~~~~~~~~~

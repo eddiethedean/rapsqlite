@@ -33,6 +33,20 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 
 ## [0.3.0-dev] - Unreleased
 
+### Fixed - Test improvements (2026-01-30)
+
+- **aiohttp test** — Refactored `tests/test_aiohttp_example.py` to avoid `TestServer`/`TestClient` which required network socket binding. Test now directly invokes handler function with mock request pattern. Added `filterwarnings` marker to suppress Tokio context cleanup warning (known PyO3 async limitation during GC).
+
+### Added - Phase 3 plan implementation (2026-01-30)
+
+- **aiosqlite compatibility script** — `scripts/run_aiosqlite_tests.py` now outputs per-test breakdown (PASSED/FAILED/SKIPPED with error snippets) in `docs/AIOSQLITE_TEST_RESULTS.md`.
+- **`suggest_indexes(conn, sql, parameters=None)`** — Suggests indexes when query plan shows full table scan; returns list of dicts with `table`, `column`, `suggestion`. Documented in advanced-usage (Query plan analysis).
+- **`in_clause_query(sql, values)`** — Expands `IN (?)` to `IN (?,?,...)` for use with `fetch_all`; standalone helper. Documented in advanced-usage (IN clause expansion).
+- **`rows_to_dicts(rows, columns)`** — Converts list-of-list rows to list-of-dicts using column names. Documented in advanced-usage (Streaming and large result sets).
+- **Migration guide** — Added "Migrating from aiosqlite: Common Patterns" (connection lifecycle, `total_changes`/`in_transaction` async, backup API, transaction queue); link to AIOSQLITE_TEST_RESULTS.md.
+- **Best practices** — Added subsection on parameterized queries, `execute_iter` vs `paginate`, pool sizing in advanced-usage.
+- **Tests** — `test_suggest_indexes`, `test_in_clause_query`, `test_rows_to_dicts` in `tests/test_phase3_api.py`.
+
 ### Added - Phase 3.1: Query helpers and pagination (2026-01-30)
 
 - **`paginate(conn, sql, parameters=None, page_size=64, offset=0)`** — Fetch one page of rows; wraps query with `LIMIT`/`OFFSET`. Documented in advanced-usage (Streaming and large result sets).
