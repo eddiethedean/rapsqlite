@@ -3562,7 +3562,8 @@ impl Connection {
                     guard.insert(name.clone(), (num_params, class_ptr_usize));
                 }
 
-                // Use 16 bytes so the stored pointer is properly aligned on all platforms
+                // Request enough bytes for one pointer; use unaligned read/write so we don't
+                // require sqlite3_aggregate_context to return pointer-aligned memory (avoids Bus error).
                 const AGG_CTX_SIZE: i32 = 16;
 
                 extern "C" fn aggregate_step(
@@ -3582,7 +3583,8 @@ impl Connection {
                             return;
                         }
                         let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
-                        let mut instance_ptr: *mut Py<PyAny> = std::ptr::read(instance_ptr_ptr);
+                        let mut instance_ptr: *mut Py<PyAny> =
+                            std::ptr::read_unaligned(instance_ptr_ptr);
 
                         #[allow(deprecated)]
                         Python::with_gil(|py| {
@@ -3602,7 +3604,7 @@ impl Connection {
                                 };
                                 let instance_box: Box<Py<PyAny>> = Box::new(instance);
                                 instance_ptr = Box::into_raw(instance_box);
-                                std::ptr::write(instance_ptr_ptr, instance_ptr);
+                                std::ptr::write_unaligned(instance_ptr_ptr, instance_ptr);
                             }
 
                             let instance = (*instance_ptr).clone_ref(py);
@@ -3697,7 +3699,8 @@ impl Connection {
                             return;
                         }
                         let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
-                        let instance_ptr: *mut Py<PyAny> = std::ptr::read(instance_ptr_ptr);
+                        let instance_ptr: *mut Py<PyAny> =
+                            std::ptr::read_unaligned(instance_ptr_ptr);
                         if instance_ptr.is_null() {
                             sqlite3_result_null(ctx);
                             return;
@@ -3706,7 +3709,10 @@ impl Connection {
                         #[allow(deprecated)]
                         Python::with_gil(|py| {
                             let instance = Box::from_raw(instance_ptr);
-                            std::ptr::write(instance_ptr_ptr, std::ptr::null_mut::<Py<PyAny>>());
+                            std::ptr::write_unaligned(
+                                instance_ptr_ptr,
+                                std::ptr::null_mut::<Py<PyAny>>(),
+                            );
 
                             let result = instance.bind(py).call_method0("finalize");
                             match result {

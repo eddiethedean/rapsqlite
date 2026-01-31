@@ -14,30 +14,11 @@ pub(crate) fn find_named_parameter_placeholders(query: &str) -> Vec<(usize, usiz
 
     while i < query_chars.len() {
         let ch = query_chars[i];
+        let is_named_prefix = (ch == ':' || ch == '@' || ch == '$')
+            && i + 1 < query_chars.len()
+            && (query_chars[i + 1].is_alphabetic() || query_chars[i + 1] == '_');
 
-        if (ch == ':' || ch == '@')
-            && i + 1 < query_chars.len()
-            && (query_chars[i + 1].is_alphabetic() || query_chars[i + 1] == '_')
-        {
-            let start = i;
-            i += 1;
-            let mut name = String::new();
-            while i < query_chars.len() {
-                let c = query_chars[i];
-                if c.is_alphanumeric() || c == '_' {
-                    name.push(c);
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            if !name.is_empty() {
-                param_placeholders.push((start, i, name));
-            }
-        } else if ch == '$'
-            && i + 1 < query_chars.len()
-            && (query_chars[i + 1].is_alphabetic() || query_chars[i + 1] == '_')
-        {
+        if is_named_prefix {
             let start = i;
             i += 1;
             let mut name = String::new();

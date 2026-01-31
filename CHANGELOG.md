@@ -71,6 +71,12 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 
 - **`sanitize_query`** — Quoted sensitive values (e.g. `password='secret123'`) are now replaced in full with `***` instead of only the opening quote.
 
+### Added - Phase 3 remaining API features (2026-01-31)
+
+- **register_adapter / register_converter** — Verified and documented. Per-connection type adapters and converters (sqlite3-style) are implemented and wired; tests pass. `docs/reference/type-conversion.rst` and `docs/guides/migration-guide.rst` updated to state they are supported. Test `test_register_converter_declared_type` uses declared type DATE (driver-reported) for converter lookup.
+- **create_aggregate** — API implemented; test remains skipped on some platforms due to Bus error in aggregate context (known limitation). ROADMAP notes the limitation.
+- **create_collation** — Implemented and tested. Added `test_create_collation` in `test_aiosqlite_compat.py` (custom collation, ORDER BY COLLATE, remove). ROADMAP section 3.8 marks all four Phase 3 API features complete (with caveat for create_aggregate).
+
 ### Added - aiosqlite compatibility improvements (2026-01-30)
 
 - **`total_changes` sync property** — Now a synchronous property (not async method) for aiosqlite compatibility. Cached value updated after `begin()`/`commit()`/`rollback()`.

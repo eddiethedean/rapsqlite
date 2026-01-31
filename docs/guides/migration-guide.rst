@@ -199,10 +199,14 @@ Known Differences
 
 5. **``init_hook`` parameter**: This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
 
-Future: register_adapter and register_converter
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+register_adapter and register_converter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-rapsqlite does **not** yet implement ``register_adapter`` or ``register_converter`` (sqlite3-style type adapters and converters). Until then, use application-layer conversion (serialize/deserialize before execute and after fetch), ``create_function``, ``row_factory``, or ``text_factory``. See :doc:`../reference/type-conversion` for the full type conversion strategy and workarounds.
+rapsqlite implements per-connection ``register_adapter(type, adapter)`` and
+``register_converter(typename, converter)`` (sqlite3-style). Use
+``conn.register_adapter(MyType, lambda x: ...)`` for parameter binding and
+``conn.register_converter("TYPENAME", lambda b: ...)`` for result column
+decoding. See :doc:`../reference/type-conversion` for details and examples.
 
 Advanced Features
 -----------------

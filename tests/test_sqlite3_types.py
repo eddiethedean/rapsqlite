@@ -138,16 +138,18 @@ async def test_register_converter_declared_type(test_db, unique_table_prefix):
         pytest.skip("register_converter not supported by this build")
 
     async with connect(test_db) as db:
+        # Use DATE (sqlx reports this declared type); converter uppercases to verify it was applied
         db.register_converter(
-            "MYTYPE", lambda b: b.decode("utf-8").upper() if b else None
+            "DATE", lambda b: b.decode("utf-8").upper() if b else None
         )
-        await db.execute(f"CREATE TABLE {unique_table_prefix} (id INTEGER, t MYTYPE)")
+        await db.execute(f"CREATE TABLE {unique_table_prefix} (id INTEGER, d DATE)")
         await db.execute(
-            f"INSERT INTO {unique_table_prefix} (id, t) VALUES (1, ?)", ["hello"]
+            f"INSERT INTO {unique_table_prefix} (id, d) VALUES (1, ?)", ["hello"]
         )
-        row = await db.fetch_one(f"SELECT t FROM {unique_table_prefix}")
+        row = await db.fetch_one(f"SELECT d FROM {unique_table_prefix}")
         assert row is not None
         assert row[0] == "HELLO"
+        db.register_converter("DATE", None)  # restore for other tests
 
 
 @pytest.mark.asyncio

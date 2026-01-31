@@ -2,8 +2,8 @@ Type Conversion Strategy
 ========================
 
 This document describes how rapsqlite maps Python and SQLite types, and how to
-work with custom types today. Full sqlite3-style ``register_adapter`` and
-``register_converter`` are planned but not yet implemented.
+work with custom types. rapsqlite supports per-connection ``register_adapter``
+and ``register_converter`` (sqlite3-style).
 
 Built-in type mapping
 ---------------------
@@ -20,47 +20,45 @@ NULL → ``None``. For dynamic or unknown types, rapsqlite probes the value and
 returns the appropriate Python type. ``text_factory`` (e.g. ``str`` or a callable)
 applies to TEXT columns and can change how text is produced (e.g. return bytes).
 
-Custom types today
-------------------
+register_adapter and register_converter (supported)
+---------------------------------------------------
 
-Without ``register_adapter`` / ``register_converter``, use one of these approaches:
+rapsqlite supports per-connection type adapters and converters (sqlite3-style):
 
-1. **Application-layer conversion (recommended)**  
+- **``conn.register_adapter(type, adapter)``** — When a Python object of that
+  type is used as a parameter, call ``adapter(obj)`` and bind the result. Pass
+  ``adapter=None`` to remove the adapter for that type.
+
+- **``conn.register_converter(typename, converter)``** — When a result column's
+  declared type (as reported by the driver) matches ``typename`` (case-insensitive),
+  call ``converter(bytes)`` and return the result. Pass ``converter=None`` to
+  remove. The converter receives the column value as bytes; for TEXT columns the
+  value is UTF-8 encoded.
+
+Example: custom type for parameters and results:
+
+.. code-block:: python
+
+   conn.register_adapter(Point, lambda p: f"{p.x},{p.y}")
+   conn.register_converter("DATE", lambda b: b.decode("utf-8") if b else None)
+
+Other options for custom types
+------------------------------
+
+You can also use these alternatives (or in combination with adapters/converters):
+
+1. **Application-layer conversion**  
    Convert custom Python objects to a supported type before ``execute``, and
-   convert result values after ``fetch_*``. Example: serialize a dataclass to
-   JSON (str) when inserting, and parse JSON back when reading.
+   convert result values after ``fetch_*``.
 
 2. **``create_function``**  
    For custom SQL functions that accept or return values, use
-   ``conn.create_function(...)``. The callback receives Python values and
-   returns Python values; rapsqlite converts to/from SQLite inside the callback
-   layer. This does not change how normal parameters or result columns are
-   converted.
+   ``conn.create_function(...)``. This does not change how normal parameters
+   or result columns are converted.
 
 3. **``row_factory``**  
-   Set ``conn.row_factory`` to a callable that receives the raw row (list of
-   values) and returns a transformed object (e.g. a named tuple or dataclass).
-   You can convert individual column values inside that callable.
+   Set ``conn.row_factory`` to a callable that receives the raw row and returns
+   a transformed object (e.g. a named tuple or dataclass).
 
 4. **``text_factory``**  
-   Affects only TEXT columns: a callable ``(bytes) -> Any`` or ``str``. Use it
-   to return something other than ``str`` for text (e.g. ``bytes``).
-
-Future: register_adapter and register_converter
------------------------------------------------
-
-The sqlite3 module supports:
-
-- ``sqlite3.register_adapter(type, adapter)`` — when a Python object of that
-  type is used as a parameter, call ``adapter(obj)`` and bind the result.
-- ``sqlite3.register_converter(typename, converter)`` — when a result column
-  has that declared type name, call ``converter(bytes)`` and return the result.
-
-rapsqlite does **not** yet provide these. Binding and decoding are implemented
-in Rust (via ``SqliteParam::from_py`` and ``sqlite_value_to_py``); adding
-adapter/converter support would require a registry (global or per-connection)
-and hooking it into the parameter and row conversion paths. This is planned for
-a future release (see :doc:`../ROADMAP` Phase 3.10).
-
-Until then, use application-layer conversion, ``create_function``, ``row_factory``,
-or ``text_factory`` as above.
+   Affects only TEXT columns: a callable ``(bytes) -> Any`` or ``str``.

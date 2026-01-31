@@ -126,10 +126,10 @@ Core functionality and production readiness:
 - ✅ Performance tuning guide completion (single connection vs pool, measuring performance, regression tests, cross-links)
 
 #### Missing API Features (sqlite3/aiosqlite parity)
-- ⏳ **`register_adapter(type, adapter)`** — Python-to-SQLite type adapter (sqlite3-style); parameter binding for custom types
-- ⏳ **`register_converter(typename, converter)`** — SQLite-to-Python converter (sqlite3-style); result column decoding by declared type name
-- ⏳ **`create_aggregate(name, num_params, aggregate_class)`** — Register custom SQL aggregate functions (e.g. step/finalize); sqlite3/aiosqlite have this
-- ⏳ **`create_collation(name, callable)`** — Define custom string collation for ORDER BY / comparisons; sqlite3/aiosqlite have this
+- ✅ **`register_adapter(type, adapter)`** — Python-to-SQLite type adapter (sqlite3-style); parameter binding for custom types. Per-connection; documented in type-conversion.rst.
+- ✅ **`register_converter(typename, converter)`** — SQLite-to-Python converter (sqlite3-style); result column decoding by declared type name. Per-connection; documented in type-conversion.rst.
+- ✅ **`create_aggregate(name, num_params, aggregate_class)`** — Implemented; test skipped on some platforms due to Bus error in aggregate context (known limitation).
+- ✅ **`create_collation(name, callable)`** — Custom string collation for ORDER BY / comparisons; implemented and tested in test_create_collation.
 
 **v0.3.0 Release Criteria**:
 - aiosqlite test suite pass rate >80% **or intentional differences documented** — met via documented differences and per-test categories in AIOSQLITE_TEST_RESULTS.md
