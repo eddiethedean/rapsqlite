@@ -42,7 +42,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Code Quality**: Full mypy type checking and Ruff formatting/linting
 
 **Phase 3 (v0.3.0-dev) — In progress:**
-- ✅ **3.9 API completeness**: `execute_fetchall`, `execute_insert`, Cursor properties (`arraysize`, `connection`, `description`, `lastrowid`, `rowcount`, `row_factory`), `Cursor.close()`, `isolation_level`, `__await__`, `interrupt` (stub), `Connection.stop()` (no-op), `Cursor.execute()` returns self (aiosqlite chaining)
+- ✅ **3.9 API completeness**: `execute_fetchall`, `execute_insert`, Cursor properties (`arraysize`, `connection`, `description`, `lastrowid`, `rowcount`, `row_factory`), `Cursor.close()`, `isolation_level`, `__await__`, `interrupt` (full implementation), `Connection.stop()` (no-op), `Cursor.execute()`/`executemany()`/`executescript()` return self (aiosqlite chaining)
 - ✅ **3.1**: `explain_query_plan` helper
 - ✅ **3.2**: `pool_health` helper
 - ✅ **3.3**: `isolation_level` applied to transactions
@@ -323,7 +323,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 **Success Criteria**:
 - ✅ Connection helper methods (`execute_fetchall`, `execute_insert`) implemented and tested
 - ✅ Cursor properties and `close()` implemented and tested
-- ⏳ `Connection.interrupt()` full implementation (stub in place)
+- ✅ `Connection.interrupt()` — Full implementation (calls sqlite3_interrupt on callback connection)
 - ✅ Cursor properties reflect query state; isolation_level applied to transactions
 - ⏳ 100% aiosqlite API compatibility (progress toward ~95%+)
 - ✅ New methods/properties covered in `tests/test_phase3_api.py`
@@ -384,7 +384,7 @@ Following semantic versioning:
 - ⏳ Phase 3.2 (Advanced Pooling) — `pool_health` added; metrics, dynamic sizing pending
 - ⏳ Phase 3.4 (ORM Integration) — At least SQLAlchemy and FastAPI integration complete
 - ⏳ Phase 3.8 (Testing) — aiosqlite suite runnable; 100% pass not yet achieved
-- ⏳ Phase 3.9 (API Completeness) — Helpers, Cursor props, isolation_level, __await__ done; `interrupt` stub only
+- ⏳ Phase 3.9 (API Completeness) — Helpers, Cursor props, isolation_level, __await__, `interrupt`, cursor return-self (execute/executemany/executescript) done
 
 ### Should Have (Target for v1.0.0)
 - ⏳ Phase 3.3 (Advanced Transactions) — `isolation_level` done; savepoints, retry pending

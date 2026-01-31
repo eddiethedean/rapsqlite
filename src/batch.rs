@@ -3,14 +3,13 @@
 
 use libsqlite3_sys::{
     sqlite3, sqlite3_bind_blob, sqlite3_bind_double, sqlite3_bind_int64, sqlite3_bind_null,
-    sqlite3_bind_text, sqlite3_busy_timeout, sqlite3_close, sqlite3_errmsg, sqlite3_finalize,
-    sqlite3_last_insert_rowid, sqlite3_open, sqlite3_prepare_v2, sqlite3_reset, sqlite3_step,
-    SQLITE_DONE, SQLITE_OK, SQLITE_ROW, SQLITE_STATIC,
+    sqlite3_bind_text, sqlite3_errmsg, sqlite3_finalize, sqlite3_last_insert_rowid,
+    sqlite3_prepare_v2, sqlite3_reset, sqlite3_step, SQLITE_DONE, SQLITE_OK, SQLITE_ROW,
+    SQLITE_STATIC,
 };
 use std::ffi::{CStr, CString};
 use std::os::raw::c_int;
 
-use crate::errors::map_sqlite_error_from_msg;
 use crate::types::SqliteParam;
 
 fn errmsg_from_db(db: *mut sqlite3) -> String {
@@ -168,56 +167,4 @@ pub(crate) fn execute_many_raw_core(
 
     exec_simple(db, "COMMIT")?;
     Ok((total_changes, last_rowid))
-}
-
-/// Execute batch on an existing raw sqlite3* (caller holds lock). Returns PyErr for Python path.
-pub(crate) fn execute_many_raw(
-    db: *mut sqlite3,
-    query: &str,
-    params: &[Vec<SqliteParam>],
-    path: &str,
-) -> Result<(u64, i64), pyo3::PyErr> {
-    execute_many_raw_core(db, query, params)
-        .map_err(|(rc, msg)| map_sqlite_error_from_msg(path, query, rc, &msg))
-}
-
-/// Open a fresh connection, run the batch, close. Runs on a blocking thread (Send + no PyErr).
-/// Returns (total_changes, last_insert_rowid) or error message string.
-pub(crate) fn execute_many_raw_standalone(
-    path: &str,
-    query: &str,
-    params: &[Vec<SqliteParam>],
-    timeout_ms: i64,
-) -> Result<(u64, i64), String> {
-    if params.is_empty() {
-        return Ok((0, 0));
-    }
-    let path_c = CString::new(path).map_err(|e| format!("Invalid path: {e}"))?;
-    let mut db = std::ptr::null_mut();
-    let rc = unsafe { sqlite3_open(path_c.as_ptr(), &mut db) };
-    if rc != SQLITE_OK {
-        let msg = if db.is_null() {
-            format!("sqlite3_open failed: {rc}")
-        } else {
-            let m = errmsg_from_db(db);
-            let _ = unsafe { sqlite3_close(db) };
-            m
-        };
-        return Err(msg);
-    }
-    if db.is_null() {
-        return Err("sqlite3_open returned null".to_string());
-    }
-    unsafe { sqlite3_busy_timeout(db, timeout_ms as i32) };
-    let result = execute_many_raw_core(db, query, params);
-    let close_rc = unsafe { sqlite3_close(db) };
-    match result {
-        Ok(x) => {
-            if close_rc != SQLITE_OK {
-                // Best-effort: we succeeded but close failed
-            }
-            Ok(x)
-        }
-        Err((_rc, msg)) => Err(msg),
-    }
 }

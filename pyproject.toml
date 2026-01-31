@@ -41,6 +41,9 @@ test = [
     "hypothesis",
     "fastapi",
     "sqlalchemy>=2.0",
+    "greenlet",
+    "httpx",
+    "aiohttp",
 ]
 
 [tool.maturin]

@@ -141,6 +141,31 @@ async def _cursor_execute_return_self(
 
 Cursor.execute = _cursor_execute_return_self  # type: ignore[assignment]
 
+# aiosqlite compat: cursor.executemany() and cursor.executescript() must return self
+_orig_cursor_executemany = Cursor.executemany  # type: ignore[attr-defined]
+_orig_cursor_executescript = Cursor.executescript  # type: ignore[attr-defined]
+
+
+async def _cursor_executemany_return_self(
+    self: "Cursor",  # type: ignore[valid-type]
+    query: str,
+    parameters: Any,
+) -> "Cursor":  # type: ignore[valid-type]
+    await _orig_cursor_executemany(self, query, parameters)  # type: ignore[misc]
+    return self  # type: ignore[return-value]
+
+
+async def _cursor_executescript_return_self(
+    self: "Cursor",  # type: ignore[valid-type]
+    script: str,
+) -> "Cursor":  # type: ignore[valid-type]
+    await _orig_cursor_executescript(self, script)  # type: ignore[misc]
+    return self  # type: ignore[return-value]
+
+
+Cursor.executemany = _cursor_executemany_return_self  # type: ignore[assignment]
+Cursor.executescript = _cursor_executescript_return_self  # type: ignore[assignment]
+
 # Ensure Cursor has close (DBAPI raw cursor contract; fallback if extension built without it)
 # DBAPI compat: commit/rollback no-op when not in a transaction (wrap so old extension doesn't raise)
 _orig_commit = Connection.commit  # type: ignore[attr-defined]
@@ -238,8 +263,11 @@ __all__: list[str] = [
     "connect",
     "pool_metrics_gauges",
     "execute_iter",
+    "paginate",
+    "analyze_query_plan",
     "timed_fetch_all",
     "transaction_retry",
+    "transaction_with_timeout",
     "Error",
     "Warning",
     "InterfaceError",
@@ -459,6 +487,36 @@ async def transaction_retry(
     return None
 
 
+async def transaction_with_timeout(
+    conn: "Connection",  # type: ignore[valid-type]
+    work: Any,
+    timeout_secs: float = 30.0,
+) -> Any:
+    """Run a transaction with a timeout (Phase 3.3).
+
+    Wraps the transaction body in asyncio.wait_for. Raises asyncio.TimeoutError
+    if the transaction (including work) exceeds timeout_secs.
+
+    Args:
+        conn: Database connection
+        work: Callable that returns an awaitable (e.g. async def do_work(): ...)
+        timeout_secs: Maximum seconds for the transaction (default 30)
+
+    Example:
+        async with connect("app.db") as conn:
+            async def do_work():
+                await conn.execute("INSERT INTO t (x) VALUES (?)", ["a"])
+            await transaction_with_timeout(conn, do_work, timeout_secs=5)
+    """
+
+    async def _run() -> Any:
+        async with conn.transaction():  # type: ignore[attr-defined]
+            coro = work() if callable(work) else work
+            return await coro
+
+    return await asyncio.wait_for(_run(), timeout=timeout_secs)
+
+
 def execute_iter(
     conn: "Connection",  # type: ignore[valid-type]
     sql: str,
@@ -478,6 +536,72 @@ def execute_iter(
                     process(row)
     """
     return _StreamChunksIterator(conn, sql, parameters, chunk_size)
+
+
+async def paginate(
+    conn: "Connection",  # type: ignore[valid-type]
+    sql: str,
+    parameters: Any | None = None,
+    page_size: int = 64,
+    offset: int = 0,
+) -> list[Any]:
+    """Fetch one page of rows from a SELECT query.
+
+    Uses LIMIT/OFFSET under the hood. For multiple pages, call with
+    incrementing offset: paginate(conn, sql, params, 100, 0), then
+    paginate(conn, sql, params, 100, 100), etc.
+
+    Args:
+        conn: Database connection
+        sql: SELECT query (no LIMIT/OFFSET; this adds them)
+        parameters: Optional query parameters
+        page_size: Number of rows per page
+        offset: Row offset for this page
+
+    Returns:
+        List of rows for this page (empty if past end)
+    """
+    sql_clean = sql.strip().rstrip(";")
+    wrapped = f"SELECT * FROM ({sql_clean}) LIMIT ? OFFSET ?"
+    params = list(parameters) if parameters is not None else []
+    rows = await conn.fetch_all(wrapped, params + [page_size, offset])  # type: ignore[attr-defined]
+    return rows  # type: ignore[return-value,no-any-return]
+
+
+async def analyze_query_plan(
+    conn: "Connection",  # type: ignore[valid-type]
+    sql: str,
+    parameters: Any | None = None,
+) -> dict[str, Any]:
+    """Run EXPLAIN QUERY PLAN and return structured analysis (Phase 3.1).
+
+    Returns a dict with:
+        - rows: Raw EXPLAIN QUERY PLAN result rows
+        - details: List of detail strings (4th column)
+        - uses_index: True if plan uses an index
+        - table_scan: True if plan does a full table scan
+
+    Example:
+        analysis = await analyze_query_plan(conn, "SELECT * FROM t WHERE id = ?", [1])
+        if analysis["table_scan"] and not analysis["uses_index"]:
+            print("Consider adding an index")
+    """
+    rows = await conn.explain_query_plan(sql, parameters)  # type: ignore[attr-defined]
+    details: list[str] = []
+    for row in rows:
+        if isinstance(row, (list, tuple)) and len(row) >= 4:
+            details.append(str(row[3]))
+        elif isinstance(row, dict) and "detail" in row:
+            details.append(str(row["detail"]))
+        else:
+            details.append(str(row))
+    detail_str = " ".join(details).upper()
+    return {
+        "rows": rows,
+        "details": details,
+        "uses_index": "USING INDEX" in detail_str or "INDEX" in detail_str,
+        "table_scan": "SCAN TABLE" in detail_str or "TABLE SCAN" in detail_str,
+    }
 
 
 class _StreamChunksIterator:
@@ -634,6 +758,54 @@ Connection.pool_health = _pool_health  # type: ignore[attr-defined]
 
 # aiosqlite uses executemany; we expose execute_many. Alias for compat.
 Connection.executemany = Connection.execute_many  # type: ignore[attr-defined,assignment]
+
+
+# Slow query threshold (Phase 3.5) - use module-level dict since Connection may not allow arbitrary attrs
+# Only wrap fetch_all; execute returns ExecuteContextManager (sync) for "async with conn.execute()"
+_slow_query_state: dict[int, tuple[float, Callable[[float, str], None] | None]] = {}
+_orig_connection_fetch_all = Connection.fetch_all  # type: ignore[attr-defined]
+
+
+def set_slow_query_threshold(
+    self: "Connection",  # type: ignore[valid-type]
+    threshold_secs: float,
+    callback: Callable[[float, str], None] | None = None,
+) -> None:
+    """Set threshold and optional callback for slow query detection (Phase 3.5).
+
+    When threshold_secs > 0, fetch_all() is wrapped to measure duration. If
+    duration >= threshold_secs, callback(duration_secs, sql) is called. Set
+    threshold_secs to 0 or negative to disable.
+    """
+    cid = id(self)
+    if threshold_secs <= 0:
+        _slow_query_state.pop(cid, None)
+    else:
+        _slow_query_state[cid] = (threshold_secs, callback)
+
+
+Connection.set_slow_query_threshold = set_slow_query_threshold  # type: ignore[attr-defined,assignment]
+
+
+async def _fetch_all_with_slow_check(
+    self: "Connection",  # type: ignore[valid-type]
+    query: str,
+    parameters: Any = None,
+) -> Any:
+    state = _slow_query_state.get(id(self), (0, None))
+    threshold, cb = state[0], state[1]
+    if threshold <= 0:
+        return await _orig_connection_fetch_all(self, query, parameters)  # type: ignore[misc]
+    t0 = time.perf_counter()
+    try:
+        return await _orig_connection_fetch_all(self, query, parameters)  # type: ignore[misc]
+    finally:
+        duration = time.perf_counter() - t0
+        if duration >= threshold and cb:
+            cb(duration, query)
+
+
+Connection.fetch_all = _fetch_all_with_slow_check  # type: ignore[assignment]
 
 
 def _connection_await(self: "Connection"):  # type: ignore[valid-type]

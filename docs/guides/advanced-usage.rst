@@ -51,6 +51,15 @@ Pool Size Guidelines
 
 **Note**: SQLite serializes writes, so increasing pool size mainly helps with concurrent reads.
 
+Pool size is fixed at first use
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The connection pool is created lazily when the first database operation runs. Once created,
+the pool size cannot be changed. To use a different pool size, set ``conn.pool_size = N``
+**before** any database operation (e.g. before ``execute``, ``fetch_all``, or entering a
+transaction). If you need to resize after the pool exists, create a new connection with
+the desired ``pool_size`` and close the old one.
+
 Idle connection timeout
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -133,6 +142,23 @@ Use ``set_trace_callback`` to log every SQL statement executed on the connection
    # Set to None to disable: await conn.set_trace_callback(None)
 
 For slow-query detection, measure elapsed time around your own execute calls (e.g. with a small helper or middleware) and log when a threshold is exceeded; the trace callback alone does not provide timing. This gives a clear path to observe queries without implementing a full metrics pipeline.
+
+Slow query threshold (Phase 3.5)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use **``Connection.set_slow_query_threshold(threshold_secs, callback=None)``** to automatically detect and report slow queries. When ``fetch_all()`` takes longer than ``threshold_secs``, the optional callback is invoked with ``callback(duration_secs, sql)``. Set ``threshold_secs`` to 0 to disable.
+
+.. code-block:: python
+
+   import logging
+   from rapsqlite import connect
+
+   logger = logging.getLogger("app.queries")
+
+   async with connect("app.db") as conn:
+       conn.set_slow_query_threshold(1.0, lambda d, s: logger.warning("Slow query (%.2fs): %s", d, s[:100]))
+       await conn.execute("CREATE TABLE t (id INT)")
+       rows = await conn.fetch_all("SELECT * FROM t")
 
 Query timing (duration and callbacks)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -265,6 +291,22 @@ For workloads that may hit ``SQLITE_BUSY`` or ``SQLITE_LOCKED``, use **``transac
            await conn.execute("INSERT INTO t (x) VALUES (?)", ["a"])
        await transaction_retry(conn, do_work, max_retries=3)
 
+Transaction timeout
+~~~~~~~~~~~~~~~~~~~
+
+Use **``transaction_with_timeout(conn, work, timeout_secs=30)``** to run a transaction
+with a maximum duration. Raises ``asyncio.TimeoutError`` if the transaction exceeds
+the timeout. Use this to prevent long-running transactions from blocking other work.
+
+.. code-block:: python
+
+   from rapsqlite import connect, transaction_with_timeout
+
+   async with connect("app.db") as conn:
+       async def do_work():
+           await conn.execute("INSERT INTO t (x) VALUES (?)", ["a"])
+       await transaction_with_timeout(conn, do_work, timeout_secs=5)
+
 .. _error-handling-strategies:
 
 Error Handling Strategies
@@ -390,7 +432,37 @@ To process large SELECT result sets without loading every row into memory:
 
   Ensure the query has a deterministic order (e.g. ``ORDER BY id``) so pages are consistent.
 
-- **Manual pagination**: You can still run ``fetch_all`` with ``LIMIT``/``OFFSET`` in a loop if you prefer; ``execute_iter`` does this for you under the hood.
+- **Page-based pagination**: Use ``paginate(conn, sql, parameters=None, page_size=64, offset=0)`` to fetch one page at a time. Returns a list of rows for that page.
+
+  .. code-block:: python
+
+     from rapsqlite import connect, paginate
+
+     async with connect("app.db") as conn:
+         offset = 0
+         while True:
+             rows = await paginate(conn, "SELECT * FROM big_table ORDER BY id", page_size=100, offset=offset)
+             if not rows:
+                 break
+             for row in rows:
+                 process(row)
+             offset += len(rows)
+
+- **Manual pagination**: You can still run ``fetch_all`` with ``LIMIT``/``OFFSET`` in a loop if you prefer; ``execute_iter`` and ``paginate`` do this for you.
+
+Query plan analysis
+~~~~~~~~~~~~~~~~~~~
+
+Use ``analyze_query_plan(conn, sql, parameters=None)`` to inspect how SQLite will execute a query. Returns a dict with ``rows`` (raw EXPLAIN QUERY PLAN output), ``details`` (list of detail strings), ``uses_index`` (True if index is used), and ``table_scan`` (True if full table scan):
+
+  .. code-block:: python
+
+     from rapsqlite import connect, analyze_query_plan
+
+     async with connect("app.db") as conn:
+         analysis = await analyze_query_plan(conn, "SELECT * FROM users WHERE id = ?", [1])
+         if analysis["table_scan"] and not analysis["uses_index"]:
+             print("Consider adding an index on users(id)")
 
 FTS, JSON, and UPSERT
 ~~~~~~~~~~~~~~~~~~~~~

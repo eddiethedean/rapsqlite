@@ -6,9 +6,12 @@ from rapsqlite import (
     Connection,
     connect,
     execute_iter,
+    paginate,
+    analyze_query_plan,
     pool_metrics_gauges,
     timed_fetch_all,
     transaction_retry,
+    transaction_with_timeout,
 )
 
 if not hasattr(Connection, "iter_chunk_size"):
@@ -258,6 +261,43 @@ async def test_explain_query_plan(test_db):
 
 
 @pytest.mark.asyncio
+async def test_analyze_query_plan(test_db):
+    """analyze_query_plan returns structured dict with uses_index, table_scan, details."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
+        await db.execute("INSERT INTO t (id, x) VALUES (1, 'a')")
+        analysis = await analyze_query_plan(db, "SELECT * FROM t WHERE id = ?", [1])
+        assert "rows" in analysis
+        assert "details" in analysis
+        assert "uses_index" in analysis
+        assert "table_scan" in analysis
+        assert isinstance(analysis["rows"], list)
+        assert isinstance(analysis["details"], list)
+
+
+@pytest.mark.asyncio
+async def test_paginate(test_db):
+    """paginate returns one page of rows with LIMIT/OFFSET."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
+        for i in range(5):
+            await db.execute("INSERT INTO t (id, x) VALUES (?, ?)", [i + 1, f"v{i}"])
+        page0 = await paginate(db, "SELECT * FROM t ORDER BY id", page_size=2, offset=0)
+        page1 = await paginate(db, "SELECT * FROM t ORDER BY id", page_size=2, offset=2)
+        page2 = await paginate(db, "SELECT * FROM t ORDER BY id", page_size=2, offset=4)
+        page3 = await paginate(
+            db, "SELECT * FROM t ORDER BY id", page_size=2, offset=10
+        )
+        assert len(page0) == 2
+        assert len(page1) == 2
+        assert len(page2) == 1
+        assert len(page3) == 0
+        assert page0[0][0] == 1 and page0[1][0] == 2
+        assert page1[0][0] == 3 and page1[1][0] == 4
+        assert page2[0][0] == 5
+
+
+@pytest.mark.asyncio
 async def test_interrupt(test_db):
     """interrupt() no-ops without callbacks; with callbacks, interrupts callback connection."""
     async with connect(test_db) as db:
@@ -324,6 +364,45 @@ async def test_savepoint_inside_transaction(test_db):
             # sp1 released; 1,2,3 committed with outer transaction
         rows = await db.fetch_all("SELECT id, x FROM t ORDER BY id")
     assert rows == [[1, "a"], [2, "b"], [3, "c"]]
+
+
+@pytest.mark.asyncio
+async def test_set_slow_query_threshold(test_db):
+    """set_slow_query_threshold invokes callback when queries exceed threshold."""
+    slow_calls: list[tuple[float, str]] = []
+
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        # Disabled (0): callback never called
+        db.set_slow_query_threshold(0)
+        await db.fetch_all("SELECT 1")
+        assert len(slow_calls) == 0
+
+        # Enabled with very low threshold (1ns): callback should fire for any query
+        db.set_slow_query_threshold(1e-9, lambda d, s: slow_calls.append((d, s)))
+        await db.fetch_all("SELECT 1")
+        assert len(slow_calls) >= 1
+        assert "SELECT 1" in slow_calls[-1][1]
+
+        # Disable again
+        db.set_slow_query_threshold(0)
+        slow_calls.clear()
+        await db.fetch_all("SELECT 1")
+        assert len(slow_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_transaction_with_timeout(test_db):
+    """transaction_with_timeout runs work in a transaction with timeout."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
+
+        async def do_work():
+            await db.execute("INSERT INTO t (id, x) VALUES (1, 'a')")
+
+        await transaction_with_timeout(db, do_work, timeout_secs=10)
+        rows = await db.fetch_all("SELECT * FROM t")
+        assert rows == [[1, "a"]]
 
 
 @pytest.mark.asyncio

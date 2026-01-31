@@ -36,6 +36,32 @@ async def test_query_execution_time(test_db):
 
 
 @pytest.mark.performance
+@pytest.mark.perf_smoke
+@pytest.mark.asyncio
+async def test_concurrent_reads_regression(test_db):
+    """Regression: concurrent reads complete in reasonable time (Phase 3.8)."""
+    async with connect(test_db) as db:
+        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
+        for i in range(500):
+            await db.execute("INSERT INTO t (value) VALUES (?)", [i])
+
+    async def reader():
+        async with connect(test_db) as db:  # type: ignore[attr-defined]
+            for _ in range(100):
+                await db.fetch_all("SELECT * FROM t WHERE value = ?", [50])
+
+    start = time.perf_counter()
+    await asyncio.gather(*[reader() for _ in range(5)])
+    elapsed = time.perf_counter() - start
+
+    # 5 workers × 100 queries = 500 queries; should complete in < 15s (CI allowance)
+    max_time = 15.0 if sys.platform != "linux" else 10.0
+    assert elapsed < max_time, (
+        f"5×100 concurrent reads took {elapsed:.3f}s, expected < {max_time}s"
+    )
+
+
+@pytest.mark.performance
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_connection_pool_performance(test_db):

@@ -274,7 +274,9 @@ async def test_cancellation_interrupts_and_connection_usable(unique_table_prefix
             row = await cur.fetchone()
             if row is None:
                 break
-            await asyncio.sleep(0.03)  # ~6s total; enough for cancellation on any platform
+            await asyncio.sleep(
+                0.03
+            )  # ~6s total; enough for cancellation on any platform
 
     t = asyncio.create_task(long_select())
     await asyncio.sleep(0.15)  # Let task start and process a few rows

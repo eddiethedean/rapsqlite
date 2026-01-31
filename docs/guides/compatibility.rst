@@ -158,6 +158,58 @@ Use a connection dependency with ``rapsqlite.connect()`` and lifespan for setup.
 
 Run with ``uvicorn examples.fastapi_db:app --reload``. The test ``tests/test_fastapi_example.py`` validates this pattern.
 
+Starlette
+~~~~~~~~~
+
+Starlette uses the same ASGI base as FastAPI. Use lifespan for setup and create a connection per request. See ``examples/starlette_db.py``:
+
+.. code-block:: python
+
+   from contextlib import asynccontextmanager
+   from starlette.applications import Starlette
+   from starlette.responses import JSONResponse
+   from starlette.routing import Route
+   from rapsqlite import connect
+
+   @asynccontextmanager
+   async def lifespan(app):
+       async with connect("app.db") as conn:
+           await conn.execute("CREATE TABLE IF NOT EXISTS items ...")
+       yield
+
+   async def homepage(request):
+       async with connect("app.db") as conn:
+           rows = await conn.fetch_all("SELECT * FROM items")
+           return JSONResponse({"items": [list(r) for r in rows]})
+
+   app = Starlette(routes=[Route("/", homepage)], lifespan=lifespan)
+
+Run with ``uvicorn examples.starlette_db:app --reload``. The test ``tests/test_starlette_example.py`` validates this pattern.
+
+aiohttp
+~~~~~~~
+
+Use ``on_startup`` for schema setup and create a connection per request. See ``examples/aiohttp_db.py``:
+
+.. code-block:: python
+
+   from aiohttp import web
+   from rapsqlite import connect
+
+   async def init_db(app):
+       async with connect("app.db") as conn:
+           await conn.execute("CREATE TABLE IF NOT EXISTS items ...")
+   async def homepage(request):
+       async with connect("app.db") as conn:
+           rows = await conn.fetch_all("SELECT * FROM items")
+           return web.json_response({"items": [list(r) for r in rows]})
+
+   app = web.Application()
+   app.on_startup.append(init_db)
+   app.router.add_get("/", homepage)
+
+Run with ``python examples/aiohttp_db.py`` or ``aiohttp run examples/aiohttp_db:app``. The test ``tests/test_aiohttp_example.py`` validates this pattern.
+
 Compatibility Summary
 ---------------------
 

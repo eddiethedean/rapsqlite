@@ -190,6 +190,34 @@ jobs:
     - name: Check formatting
       run: cargo fmt -- --check
 
+  aiosqlite-compat:
+    name: aiosqlite test suite (compat)
+    runs-on: ubuntu-latest
+    # Run on schedule (nightly) or when full_suite is requested
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full_suite == 'true')
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install maturin and build
+      run: |
+        pip install maturin
+        maturin develop --release
+
+    - name: Install aiosqlite for comparison
+      run: pip install aiosqlite
+
+    - name: Run aiosqlite test suite against rapsqlite
+      run: python scripts/run_aiosqlite_tests.py
+      continue-on-error: true
+
   build-wheels:
     name: Build wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

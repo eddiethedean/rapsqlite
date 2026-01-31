@@ -1,7 +1,6 @@
 //! Error mapping helpers (sqlx -> Python exceptions, raw SQLite C API).
 
 use pyo3::prelude::*;
-use std::ffi::CStr;
 
 use crate::exceptions::{DatabaseError, IntegrityError, OperationalError, ProgrammingError};
 
@@ -115,43 +114,6 @@ pub(crate) fn map_sqlx_error_with_query_visibility(
             ProgrammingError::new_err(error_msg)
         }
         SqlxError::Decode(_) => ProgrammingError::new_err(error_msg),
-        _ => DatabaseError::new_err(error_msg),
-    }
-}
-
-/// Map raw SQLite C API result code to Python exception.
-/// Uses sqlite3_errmsg(db) for the message. db must be a valid sqlite3* (can be null for message-only).
-pub(crate) fn map_sqlite_error(
-    path: &str,
-    query: &str,
-    rc: i32,
-    db: *mut libsqlite3_sys::sqlite3,
-) -> PyErr {
-    let msg = if db.is_null() {
-        format!("SQLite error {rc}")
-    } else {
-        let c_msg = unsafe { libsqlite3_sys::sqlite3_errmsg(db) };
-        if c_msg.is_null() {
-            format!("SQLite error {rc}")
-        } else {
-            let s = unsafe { CStr::from_ptr(c_msg).to_string_lossy() };
-            format!("{s}")
-        }
-    };
-    let sanitized = sanitize_query(query);
-    let error_msg =
-        format!("Failed to execute query on database {path}: {msg}\nQuery: {sanitized}");
-
-    // Map primary result code (extended codes share the same high bytes).
-    let primary = rc & 0xff;
-    match primary {
-        libsqlite3_sys::SQLITE_CONSTRAINT => IntegrityError::new_err(error_msg),
-        libsqlite3_sys::SQLITE_BUSY | libsqlite3_sys::SQLITE_LOCKED => {
-            OperationalError::new_err(error_msg)
-        }
-        libsqlite3_sys::SQLITE_MISUSE | libsqlite3_sys::SQLITE_ERROR => {
-            ProgrammingError::new_err(error_msg)
-        }
         _ => DatabaseError::new_err(error_msg),
     }
 }
