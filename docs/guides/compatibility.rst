@@ -230,8 +230,8 @@ Performance Characteristics
 * **Prepared statements**: sqlx (the underlying library) caches prepared statements per connection automatically.
 * **True async**: All operations execute outside the GIL, providing better concurrency under load.
 
-For type conversion and custom types (including the current approach without
-``register_adapter``/``register_converter``), see :doc:`../reference/type-conversion`.
+For type conversion and custom types (including ``register_adapter`` and
+``register_converter``), see :doc:`../reference/type-conversion`.
 
 For the aiosqlite test suite baseline and per-test failure categories, see ``docs/AIOSQLITE_TEST_RESULTS.md``.
 

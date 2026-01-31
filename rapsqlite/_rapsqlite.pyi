@@ -201,22 +201,30 @@ class Connection:
         name: str,
         num_params: int,
         aggregate_class: Optional[Any],
-    ) -> Coroutine[Any, Any, None]: ...
+    ) -> Coroutine[Any, Any, None]:
+        """Register a custom SQL aggregate. aggregate_class must implement step(...) and finalize(); pass None to remove."""
+        ...
     def create_collation(
         self,
         name: str,
         callable: Optional[Any],
-    ) -> Coroutine[Any, Any, None]: ...
+    ) -> Coroutine[Any, Any, None]:
+        """Register a custom collation for ORDER BY. callable(s1, s2) returns -1, 0, or 1; pass None to remove."""
+        ...
     def register_adapter(
         self,
         type: Type[Any],
         adapter: Optional[Callable[[Any], Any]],
-    ) -> None: ...
+    ) -> None:
+        """Register adapter for a Python type when binding parameters. adapter(value) is used; pass None to remove."""
+        ...
     def register_converter(
         self,
         typename: str,
         converter: Optional[Callable[[bytes], Any]],
-    ) -> None: ...
+    ) -> None:
+        """Register converter for a declared column type when reading rows. converter(bytes) is used; pass None to remove."""
+        ...
     def set_trace_callback(
         self, callback: Optional[Any]
     ) -> Coroutine[Any, Any, None]: ...

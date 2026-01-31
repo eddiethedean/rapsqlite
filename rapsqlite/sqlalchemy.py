@@ -74,6 +74,8 @@ class _RapsqliteDialectModule:
 
 
 class SQLiteDialect_rapsqlite(SQLiteDialect_pysqlite):
+    """Async SQLite dialect using rapsqlite. Use with create_async_engine('sqlite+rapsqlite:///...')."""
+
     driver = "rapsqlite"
     supports_statement_cache = True
     is_async = True

@@ -57,6 +57,7 @@ Features
 * ✅ **Connection pooling** (configurable pool size and timeouts)
 * ✅ **Row factories** (dict, tuple, callable, and `rapsqlite.Row` class)
 * ✅ **Advanced SQLite features** (callbacks, extensions, schema introspection, backup, dump)
+* ✅ **Type adapters and converters, custom aggregates and collations** (register_adapter, register_converter, create_aggregate, create_collation; sqlite3-style)
 * ✅ **Database initialization hooks** (automatic schema setup)
 * ✅ **True Async DBAPI 2.0** (``rapsqlite.dbapi``) for SQLAlchemy-style async drivers
 
@@ -89,6 +90,12 @@ Quick Example
            print(rows)
 
    asyncio.run(main())
+
+Output:
+
+.. code-block:: text
+
+   [[1, 'hello']]
 
 Indices and tables
 ==================

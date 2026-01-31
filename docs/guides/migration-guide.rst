@@ -105,7 +105,9 @@ Basic Connection
        await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
        await db.execute("INSERT INTO test (value) VALUES ('hello')")
        rows = await db.fetch_all("SELECT * FROM test")
-       print(rows)  # [[1, 'hello']]
+       print(rows)
+
+Output: ``[[1, 'hello']]``
 
 Parameterized Queries
 ~~~~~~~~~~~~~~~~~~~~~
@@ -337,5 +339,7 @@ Here's a complete example of migrating an application:
            print(rows)
 
    asyncio.run(main())
+
+Output (for one row: id=1, name="Alice"): ``[[1, 'Alice']]``
 
 The migration is complete! Your code now uses true async SQLite operations.

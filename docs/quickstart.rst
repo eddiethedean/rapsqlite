@@ -22,6 +22,12 @@ The simplest way to use rapsqlite is with the ``connect()`` function:
 
    asyncio.run(main())
 
+Output:
+
+.. code-block:: text
+
+   [[1, 'Alice']]
+
 The connection is automatically closed when exiting the ``async with`` block.
 
 Creating Tables
@@ -123,6 +129,13 @@ Using Cursors
        async for row in cursor:
            print(row)
 
+Output (for two rows: Alice, Bob):
+
+.. code-block:: text
+
+   [1, 'Alice']
+   [2, 'Bob']
+
 Row Factories
 -------------
 
@@ -145,7 +158,9 @@ Customize how rows are returned:
        from rapsqlite import Row
        conn.row_factory = Row
        rows = await conn.fetch_all("SELECT * FROM users")
-       # rows[0]["name"] or rows[0][0]
+       # rows[0]["name"] or rows[0][0]  -> e.g. "Alice" and 1
+
+Example output for one row (id=1, name="Alice"): ``rows[0]["name"]`` is ``"Alice"``, ``rows[0][0]`` is ``1``.
 
 Next Steps
 ----------

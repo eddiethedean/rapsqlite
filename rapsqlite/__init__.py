@@ -3,7 +3,9 @@
 rapsqlite provides true async SQLite operations for Python, backed by Rust,
 Tokio, and sqlx. Unlike libraries that wrap blocking database calls in async
 syntax, rapsqlite guarantees that all database operations execute outside the
-Python GIL, ensuring event loops never stall under load.
+Python GIL, ensuring event loops never stall under load. Supports type adapters
+and converters (register_adapter, register_converter) and custom aggregates and
+collations (create_aggregate, create_collation) per-connection (sqlite3-style).
 
 Example:
     Basic usage::
@@ -911,6 +913,13 @@ def set_slow_query_threshold(
     When threshold_secs > 0, fetch_all() is wrapped to measure duration. If
     duration >= threshold_secs, callback(duration_secs, sql) is called. Set
     threshold_secs to 0 or negative to disable.
+
+    Args:
+        self: Connection instance (bound when used as conn.set_slow_query_threshold).
+        threshold_secs: Minimum duration in seconds to trigger the callback.
+        callback: Optional callable(duration_secs, sql) invoked when fetch_all
+            exceeds threshold_secs. If None, only the threshold is stored (e.g.
+            for use with timed_fetch_all or custom logging).
     """
     cid = id(self)
     if threshold_secs <= 0:

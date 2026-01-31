@@ -44,20 +44,21 @@ Current Status
 * ✅ Query helpers (paginate, analyze_query_plan, transaction_with_timeout, set_slow_query_threshold)
 * ✅ Framework integration (FastAPI, Starlette, aiohttp examples and docs)
 * ✅ FTS5 and JSON1 tests and docs
+* ✅ Type adapters and converters (register_adapter, register_converter; per-connection, sqlite3-style)
+* ✅ Custom aggregates and collations (create_aggregate, create_collation)
 
 Goal
 ----
 
 Achieve drop-in replacement compatibility with ``aiosqlite`` to enable seamless migration with true async performance.
 
-Phase 3 (Remaining)
--------------------
+Phase 3 (Remaining) / Future Enhancements
+-----------------------------------------
 
 Future enhancements may include:
 
 * Dynamic pool sizing
 * Deadlock detection and automatic retry
-* register_adapter and register_converter
 * Pass 100% of aiosqlite test suite
 
-For the complete roadmap, see the `ROADMAP.md <https://github.com/eddiethedean/rapsqlite/blob/main/docs/ROADMAP.md>`_ file in the repository.
+For the complete roadmap, see the `ROADMAP.md <https://github.com/eddiethedean/rapsqlite/blob/main/docs/ROADMAP.md>`_ file in the repository (canonical source).

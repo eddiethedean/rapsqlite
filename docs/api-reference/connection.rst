@@ -26,11 +26,18 @@ Callback Exception Handling
 When using callback methods, exceptions in your Python callbacks are handled as follows:
 
 - **User-defined functions** (`create_function`): Exceptions are converted to SQLite errors, causing the query to fail with an ``OperationalError``
+- **User-defined aggregates** (`create_aggregate`): Exceptions in step/finalize are converted to SQLite errors, causing the query to fail with an ``OperationalError``
+- **Custom collations** (`create_collation`): Exceptions in the callable may cause comparison/ORDER BY to fail
 - **Trace callbacks** (`set_trace_callback`): Exceptions are silently ignored to prevent affecting database operations
 - **Authorizer callbacks** (`set_authorizer`): Exceptions default to **DENY** (fail-secure) - operations are denied if callback raises
 - **Progress handlers** (`set_progress_handler`): Exceptions default to **continue** - operation continues even if callback raises
 
 Best practice: Always handle exceptions within your callback functions to avoid unexpected behavior.
+
+Type adapters and converters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Type adapters and converters (``register_adapter``, ``register_converter``) are supported per-connection (sqlite3-style). See :doc:`../reference/type-conversion` for details and examples.
 
 Pool metrics and health
 ~~~~~~~~~~~~~~~~~~~~~~~

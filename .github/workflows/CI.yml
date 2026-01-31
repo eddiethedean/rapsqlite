@@ -88,6 +88,15 @@ jobs:
           cd /tmp && python -c "import rapsqlite; print('Version:', rapsqlite.__version__)"
         fi
 
+    - name: Run doc examples (verify code in docs runs)
+      shell: bash
+      run: |
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          python "${{ github.workspace }}/scripts/run_doc_examples.py"
+        else
+          python ${{ github.workspace }}/scripts/run_doc_examples.py
+        fi
+
     - name: Run tests
       shell: bash
       timeout-minutes: 25

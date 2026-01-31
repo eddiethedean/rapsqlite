@@ -25,3 +25,11 @@ Example
        print(rows[0][0])
        # Get column names
        print(rows[0].keys())
+
+Output (for a row with id=1, name="Alice"):
+
+.. code-block:: text
+
+   Alice
+   1
+   ['id', 'name']
