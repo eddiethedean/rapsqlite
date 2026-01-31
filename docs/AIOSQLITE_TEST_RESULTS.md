@@ -2,7 +2,7 @@
 
 This document contains the results of running the aiosqlite test suite against rapsqlite.
 
-**Date**: 2026-01-30 20:42:38
+**Date**: 2026-01-30 21:16:22
 **rapsqlite Version**: 0.3.0-dev
 **Python Version**: 3.10.19
 
@@ -25,7 +25,7 @@ This document contains the results of running the aiosqlite test suite against r
 ### Failure Analysis
 
 These tests failed due to compatibility differences between aiosqlite and rapsqlite.
-See [MIGRATION.md](MIGRATION.md) for details on known differences.
+See [migration guide](guides/migration-guide.rst) for details on known differences.
 
 **Common failure reasons:**
 - API differences (intentional or unintentional)
@@ -36,7 +36,7 @@ See [MIGRATION.md](MIGRATION.md) for details on known differences.
 **Next steps:**
 1. Review failed tests to identify compatibility gaps
 2. Fix compatibility issues where possible
-3. Document intentional differences in MIGRATION.md
+3. Document intentional differences in the migration guide
 
 ## Per-Test Breakdown
 
@@ -48,12 +48,12 @@ See [MIGRATION.md](MIGRATION.md) for details on known differences.
 | test_connection_file | PASSED |  |
 | test_connection_memory | PASSED |  |
 | test_insert_ids | PASSED |  |
-| test_insert_macro_ids | FAILED |  |
+| test_insert_macro_ids | PASSED |  |
 | test_inserts | FAILED |  |
 | test_inserts_authorized | FAILED |  |
 | test_iterable_cursor_perf | PASSED |  |
 | test_select | FAILED |  |
-| test_select_macro | FAILED | ________________________ PerfTest.test_insert_macro_ids ________________________ |
+| test_select_macro | FAILED | ____________________________ PerfTest.test_inserts _____________________________ |
 
 ### `smoke.py`
 
@@ -94,6 +94,6 @@ See [MIGRATION.md](MIGRATION.md) for details on known differences.
 ## Notes
 
 - Tests were run by patching aiosqlite imports to use rapsqlite
-- Some failures may be due to intentional differences (see [MIGRATION.md](MIGRATION.md))
+- Some failures may be due to intentional differences (see migration guide)
 - Some failures may indicate areas for improvement in rapsqlite compatibility
 - This is a compatibility validation exercise, not a requirement for 100% pass rate

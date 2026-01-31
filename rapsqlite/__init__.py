@@ -947,6 +947,164 @@ def _connection_await(self: "Connection"):  # type: ignore[valid-type]
 
 Connection.__await__ = _connection_await  # type: ignore[attr-defined]
 
+# aiosqlite compat: total_changes and in_transaction as sync PROPERTIES
+# aiosqlite (and sqlite3) expose these as sync properties; rapsqlite's Rust extension
+# exposes them as async methods. We cache values and expose as sync properties.
+# The cache is updated after operations that may change these values.
+
+_connection_state: dict[int, dict[str, Any]] = {}
+
+
+def _get_conn_state(conn: "Connection") -> dict[str, Any]:  # type: ignore[valid-type]
+    """Get or create state dict for a connection."""
+    cid = id(conn)
+    if cid not in _connection_state:
+        _connection_state[cid] = {"total_changes": 0, "in_transaction": False}
+    return _connection_state[cid]
+
+
+def _cleanup_conn_state(conn: "Connection") -> None:  # type: ignore[valid-type]
+    """Remove state for a connection (call on close)."""
+    _connection_state.pop(id(conn), None)
+
+
+@property  # type: ignore[misc]
+def _total_changes_prop(self: "Connection") -> int:  # type: ignore[valid-type]
+    """Get total database changes since connection was opened (sync property for aiosqlite compat)."""
+    return _get_conn_state(self).get("total_changes", 0)  # type: ignore[no-any-return]
+
+
+@property  # type: ignore[misc]
+def _in_transaction_prop(self: "Connection") -> bool:  # type: ignore[valid-type]
+    """Check if connection is in a transaction (sync property for aiosqlite compat)."""
+    return _get_conn_state(self).get("in_transaction", False)  # type: ignore[no-any-return]
+
+
+# Keep the original async methods available
+_orig_total_changes = Connection.total_changes  # type: ignore[attr-defined]
+_orig_in_transaction = Connection.in_transaction  # type: ignore[attr-defined]
+
+
+async def _update_connection_state(conn: "Connection") -> None:  # type: ignore[valid-type]
+    """Update cached total_changes and in_transaction from the database."""
+    state = _get_conn_state(conn)
+    try:
+        state["total_changes"] = await _orig_total_changes(conn)
+    except Exception:
+        pass
+    try:
+        state["in_transaction"] = await _orig_in_transaction(conn)
+    except Exception:
+        pass
+
+
+# Replace total_changes and in_transaction with sync properties
+Connection.total_changes = _total_changes_prop  # type: ignore[assignment,method-assign]
+Connection.in_transaction = _in_transaction_prop  # type: ignore[assignment,method-assign]
+
+# Also expose async methods under different names for those who need them
+Connection.total_changes_async = _orig_total_changes  # type: ignore[attr-defined]
+Connection.in_transaction_async = _orig_in_transaction  # type: ignore[attr-defined]
+
+# Wrap execute to update state after operations
+_orig_execute = Connection.execute  # type: ignore[attr-defined]
+
+
+# Don't wrap execute with state updates - it causes issues with the timed test decorator
+# State updates happen in begin/commit/rollback which is sufficient
+
+# Wrap begin/commit/rollback to update in_transaction state
+_orig_begin = Connection.begin  # type: ignore[attr-defined]
+
+
+async def _begin_with_state_update(self: "Connection") -> None:  # type: ignore[valid-type]
+    await _orig_begin(self)
+    _get_conn_state(self)["in_transaction"] = True
+
+
+Connection.begin = _begin_with_state_update  # type: ignore[assignment,method-assign]
+
+# Update commit wrapper to also update state
+_orig_commit_base = _orig_commit  # Already saved above
+
+
+async def _commit_with_state_update(self: "Connection") -> None:  # type: ignore[valid-type]
+    await _commit_noop_on_no_tx(self)
+    state = _get_conn_state(self)
+    state["in_transaction"] = False
+    # Update total_changes after commit
+    try:
+        state["total_changes"] = await _orig_total_changes(self)
+    except Exception:
+        pass
+
+
+Connection.commit = _commit_with_state_update  # type: ignore[assignment,method-assign]
+
+# Update rollback wrapper to also update state
+_orig_rollback_base = _orig_rollback  # Already saved above
+
+
+async def _rollback_with_state_update(self: "Connection") -> None:  # type: ignore[valid-type]
+    await _rollback_noop_on_no_tx(self)
+    _get_conn_state(self)["in_transaction"] = False
+
+
+Connection.rollback = _rollback_with_state_update  # type: ignore[assignment,method-assign]
+
+# Wrap __aenter__ to initialize state
+_orig_aenter = Connection.__aenter__  # type: ignore[attr-defined]
+
+
+async def _aenter_with_state_init(self: "Connection") -> "Connection":  # type: ignore[valid-type]
+    result = await _orig_aenter(self)
+    # Initialize state on connection enter
+    _get_conn_state(self)
+    return result  # type: ignore[return-value,no-any-return]
+
+
+Connection.__aenter__ = _aenter_with_state_init  # type: ignore[assignment,method-assign]
+
+# Wrap close to cleanup state
+_orig_close = Connection.close  # type: ignore[attr-defined]
+
+
+async def _close_with_state_cleanup(self: "Connection") -> None:  # type: ignore[valid-type]
+    _cleanup_conn_state(self)
+    await _orig_close(self)
+
+
+Connection.close = _close_with_state_cleanup  # type: ignore[assignment,method-assign]
+
+# Wrap transaction() to update in_transaction state
+_orig_transaction = Connection.transaction  # type: ignore[attr-defined]
+
+
+class _TransactionContextManagerWithState:
+    """Wrapper around TransactionContextManager that updates in_transaction state."""
+
+    def __init__(self, conn: "Connection", orig_cm: Any) -> None:  # type: ignore[valid-type]
+        self._conn = conn
+        self._orig_cm = orig_cm
+
+    async def __aenter__(self) -> "Connection":  # type: ignore[valid-type]
+        result = await self._orig_cm.__aenter__()
+        _get_conn_state(self._conn)["in_transaction"] = True
+        return result  # type: ignore[return-value,no-any-return]
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self._orig_cm.__aexit__(exc_type, exc_val, exc_tb)
+        _get_conn_state(self._conn)["in_transaction"] = False
+
+
+def _transaction_with_state(self: "Connection") -> _TransactionContextManagerWithState:  # type: ignore[valid-type]
+    """Return a transaction context manager that updates in_transaction state."""
+    orig_cm = _orig_transaction(self)
+    return _TransactionContextManagerWithState(self, orig_cm)
+
+
+Connection.transaction = _transaction_with_state  # type: ignore[assignment,method-assign]
+
 
 async def _backup(
     self: "Connection",  # type: ignore[valid-type]

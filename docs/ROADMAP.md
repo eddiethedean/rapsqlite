@@ -36,8 +36,9 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ SQLite busy_timeout support (`timeout` parameter matching aiosqlite)
 - ✅ Comprehensive documentation and benchmarking
 
-**Test Coverage**: 560 tests passing (7 skipped)  
+**Test Coverage**: 563 tests passing (7 skipped)  
 **API Compatibility**: ~95% with aiosqlite (Phase 3.9 additions improve compatibility)  
+**aiosqlite Test Suite**: perf.py: 6/10 passing, smoke.py: 3/30 passing (row format and pooling differences documented)  
 **Python Support**: 3.10–3.14  
 **Code Quality**: Full mypy type checking and Ruff formatting/linting
 
@@ -56,6 +57,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ **Starlette and aiohttp** — Integration examples (`examples/starlette_db.py`, `examples/aiohttp_db.py`) and compatibility docs.
 - ✅ **FTS5 and JSON1** — Tests (`tests/test_fts.py`, `tests/test_json1.py`); FTS/JSON usage documented in advanced-usage (Streaming section).
 - ✅ **Cursor chaining** — `Cursor.executemany()` and `Cursor.executescript()` return self (aiosqlite compatibility).
+- ✅ **Sync properties** — `total_changes` and `in_transaction` are now sync properties (not async methods) for aiosqlite compatibility. Updated via begin/commit/rollback wrappers and transaction() context manager.
 
 ---
 

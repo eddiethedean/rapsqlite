@@ -172,7 +172,7 @@ async def test_transaction_state_consistency(test_db, unique_table_prefix):
         await db.begin()
 
         # Verify we're in a transaction
-        in_tx = await db.in_transaction()
+        in_tx = db.in_transaction  # sync property
         assert in_tx is True
 
         # Try concurrent operations - they should use the transaction connection
@@ -183,7 +183,7 @@ async def test_transaction_state_consistency(test_db, unique_table_prefix):
         await asyncio.gather(*[insert_value(i) for i in range(5)])
 
         # Verify all inserts are in the transaction
-        in_tx = await db.in_transaction()
+        in_tx = db.in_transaction  # sync property
         assert in_tx is True
 
         await db.commit()

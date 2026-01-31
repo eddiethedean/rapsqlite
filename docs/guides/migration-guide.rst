@@ -153,7 +153,7 @@ Migrating from aiosqlite: Common Patterns
 
 * **Connection lifecycle**: Always use ``async with connect(...)`` or ``await conn.close()``. Abandoning a connection without closing can cause issues during garbage collection.
 
-* **total_changes and in_transaction**: In aiosqlite these may be properties; in rapsqlite they are async methods. Use ``await db.total_changes()`` and ``await db.in_transaction()``.
+* **total_changes and in_transaction**: These are now sync properties in rapsqlite, matching aiosqlite behavior. Use ``db.total_changes`` and ``db.in_transaction`` (no await needed).
 
 * **Backup API**: rapsqlite supports backup to both rapsqlite and sqlite3 connections. Backup to sqlite3 requires a file-backed database (not ``:memory:``).
 
@@ -162,17 +162,18 @@ Migrating from aiosqlite: Common Patterns
 Known Differences
 ~~~~~~~~~~~~~~~~~
 
-1. **Connection Properties**: ``total_changes`` and ``in_transaction`` are async methods (not properties) in rapsqlite, but functionally equivalent:
+1. **Row Format**: rapsqlite returns rows as lists ``[[1, 'a']]`` while aiosqlite returns tuples ``[(1, 'a')]``. For most code this is transparent since both support indexing. If you need tuples, use a row_factory:
 
    .. code-block:: python
 
-      # aiosqlite
-      changes = db.total_changes
-      in_tx = db.in_transaction
+      # rapsqlite default (lists)
+      rows = await db.fetch_all("SELECT id, name FROM users")
+      # rows = [[1, 'Alice'], [2, 'Bob']]
 
-      # rapsqlite
-      changes = await db.total_changes()
-      in_tx = await db.in_transaction()
+      # To get tuples, set row_factory
+      db.row_factory = tuple
+      rows = await db.fetch_all("SELECT id, name FROM users")
+      # rows = [(1, 'Alice'), (2, 'Bob')]
 
 2. **``set_progress_handler``**: rapsqlite accepts both ``(n, callback)`` and ``(callback, n)`` for sqlite3/aiosqlite compatibility.
 

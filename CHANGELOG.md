@@ -33,6 +33,15 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 
 ## [0.3.0-dev] - Unreleased
 
+### Added - aiosqlite compatibility improvements (2026-01-30)
+
+- **`total_changes` sync property** — Now a synchronous property (not async method) for aiosqlite compatibility. Cached value updated after `begin()`/`commit()`/`rollback()`.
+- **`in_transaction` sync property** — Now a synchronous property (not async method) for aiosqlite compatibility. Properly tracks explicit transactions and `transaction()` context manager.
+- **`transaction()` state tracking** — Wrapped to properly update `in_transaction` state on enter/exit.
+- **Tests updated** — `test_aiosqlite_compat.py` and `test_concurrent_transactions.py` updated to use sync properties.
+- **Migration guide updated** — Documents row format difference (lists vs tuples) and current sync property behavior.
+- **aiosqlite test suite status** — perf.py: 6/10 passing, smoke.py: 3/30 passing. Row format and pooling differences are documented as intentional.
+
 ### Fixed - Test improvements (2026-01-30)
 
 - **aiohttp test** — Refactored `tests/test_aiohttp_example.py` to avoid `TestServer`/`TestClient` which required network socket binding. Test now directly invokes handler function with mock request pattern. Added `filterwarnings` marker to suppress Tokio context cleanup warning (known PyO3 async limitation during GC).
