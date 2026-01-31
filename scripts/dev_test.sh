@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and run tests using a single Python interpreter (Python 3.10+ required).
+# Build and run all tests (Rust unit tests + Python pytest) using a single Python interpreter (Python 3.10+ required).
 # Use this to avoid version mismatches between maturin build and pytest run.
 #
 # Usage: ./scripts/dev_test.sh [pytest options...]
@@ -27,5 +27,21 @@ echo "Building (maturin develop)..."
 "$PYTHON" -m maturin develop
 
 echo ""
-echo "Running tests..."
+echo "Running Rust unit tests..."
+case "$(uname -s)" in
+    Darwin*|Linux*)
+        if [[ -x "$SCRIPT_DIR/run_rust_tests.sh" ]]; then
+            "$SCRIPT_DIR/run_rust_tests.sh" || { echo "Rust tests failed."; exit 1; }
+        else
+            cargo test --no-default-features --lib || { echo "Rust tests failed."; exit 1; }
+        fi
+        ;;
+    *)
+        # Windows and other: run cargo test with env so test binary can find libpython if needed
+        cargo test --no-default-features --lib || { echo "Rust tests failed."; exit 1; }
+        ;;
+esac
+
+echo ""
+echo "Running Python tests..."
 "$PYTHON" -m pytest tests/ -v "$@"

@@ -42,19 +42,28 @@ fn sanitize_query(query: &str) -> String {
                     .map(|i| start + i)
                     .unwrap_or(start);
 
-                // Find the end of the value (space, comma, quote, or end of string)
-                let end = query[start..]
-                    .find(|c: char| {
-                        c == ' '
-                            || c == ','
-                            || c == '\''
-                            || c == '"'
-                            || c == ';'
-                            || c == '\n'
-                            || c == '\r'
-                    })
-                    .map(|i| start + i)
-                    .unwrap_or(query.len());
+                let end = if start < query.len() {
+                    let first = query[start..].chars().next().unwrap();
+                    if first == '\'' || first == '"' {
+                        // Quoted value: find matching closing quote
+                        let rest = &query[start + first.len_utf8()..];
+                        if let Some(close) = rest.find(first) {
+                            start + first.len_utf8() + close + first.len_utf8()
+                        } else {
+                            query.len()
+                        }
+                    } else {
+                        // Find the end of the value (space, comma, or end of string)
+                        query[start..]
+                            .find(|c: char| {
+                                c == ' ' || c == ',' || c == ';' || c == '\n' || c == '\r'
+                            })
+                            .map(|i| start + i)
+                            .unwrap_or(query.len())
+                    }
+                } else {
+                    start
+                };
 
                 if end > start {
                     sanitized.replace_range(start..end, "***");
@@ -133,5 +142,33 @@ pub(crate) fn map_sqlite_error_from_msg(path: &str, query: &str, rc: i32, msg: &
             ProgrammingError::new_err(error_msg)
         }
         _ => DatabaseError::new_err(error_msg),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_query;
+
+    #[test]
+    fn test_sanitize_query_removes_password() {
+        let q = "SELECT * FROM users WHERE password='secret123'";
+        let out = sanitize_query(q);
+        assert!(out.contains("***"));
+        assert!(!out.contains("secret123"));
+    }
+
+    #[test]
+    fn test_sanitize_query_unchanged_for_safe_query() {
+        let q = "SELECT id, name FROM users WHERE id = 1";
+        let out = sanitize_query(q);
+        assert_eq!(out, q);
+    }
+
+    #[test]
+    fn test_sanitize_query_token_value() {
+        let q = "token=abc123";
+        let out = sanitize_query(q);
+        assert!(out.contains("***"));
+        assert!(!out.contains("abc123"));
     }
 }

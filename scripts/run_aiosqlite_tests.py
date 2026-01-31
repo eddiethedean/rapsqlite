@@ -4,7 +4,8 @@
 This script:
 1. Clones/downloads aiosqlite test suite
 2. Patches imports to use rapsqlite
-3. Runs tests and documents results
+3. Injects aiosqlite_compat=True for all connect() calls (tuple rows, aiosqlite default)
+4. Runs tests and documents results to docs/AIOSQLITE_TEST_RESULTS.md
 """
 
 import os
@@ -100,6 +101,29 @@ def patch_imports(content: str) -> str:
     return "\n".join(patched_lines)
 
 
+def patch_aiosqlite_compat(content: str) -> str:
+    """Inject aiosqlite_compat=True so connect() returns tuple rows (aiosqlite default).
+
+    Inserts a wrapper after the first 'import rapsqlite as aiosqlite' so all
+    connect() calls in the file use aiosqlite_compat=True.
+    """
+    if "import rapsqlite as aiosqlite" not in content:
+        return content
+    compat_block = """
+# rapsqlite adapter: force tuple rows (aiosqlite default) for compatibility
+_rapsqlite_orig_connect = aiosqlite.connect
+def _rapsqlite_connect_compat(path, *args, **kwargs):
+    kwargs.setdefault("aiosqlite_compat", True)
+    return _rapsqlite_orig_connect(path, *args, **kwargs)
+aiosqlite.connect = _rapsqlite_connect_compat
+"""
+    return content.replace(
+        "import rapsqlite as aiosqlite",
+        "import rapsqlite as aiosqlite" + compat_block,
+        1,
+    )
+
+
 def patch_test_files(aiosqlite_dir: Path, patched_dir: Path):
     """Copy and patch test files."""
     test_dir = aiosqlite_dir / "aiosqlite" / "tests"
@@ -116,9 +140,10 @@ def patch_test_files(aiosqlite_dir: Path, patched_dir: Path):
         target_file = patched_dir / rel_path
         target_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Read and patch
+        # Read and patch (imports + aiosqlite_compat for tuple rows)
         content = py_file.read_text(encoding="utf-8")
         patched_content = patch_imports(content)
+        patched_content = patch_aiosqlite_compat(patched_content)
         target_file.write_text(patched_content, encoding="utf-8")
 
         print_status(f"   ✓ Patched: {rel_path}", GREEN)

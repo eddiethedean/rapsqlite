@@ -51,7 +51,7 @@ Core functionality and production readiness:
 
 ### Current Stats
 
-- **Test Coverage**: 563+ tests passing (7 skipped)
+- **Test Coverage**: 614+ Python tests passing (14 skipped); 16 Rust unit tests (parameters, errors, utils)
 - **API Compatibility**: ~95% with aiosqlite
 - **aiosqlite Test Suite**: perf.py: 6/10 passing, smoke.py: 3/30 passing; intentional differences and per-test categories documented in `docs/AIOSQLITE_TEST_RESULTS.md`
 - **Python Support**: 3.10–3.14
@@ -125,6 +125,12 @@ Core functionality and production readiness:
 - ✅ Best practices and anti-patterns guide (expanded in advanced-usage; connection lifecycle, blocking, transaction boundaries)
 - ✅ Performance tuning guide completion (single connection vs pool, measuring performance, regression tests, cross-links)
 
+#### Missing API Features (sqlite3/aiosqlite parity)
+- ⏳ **`register_adapter(type, adapter)`** — Python-to-SQLite type adapter (sqlite3-style); parameter binding for custom types
+- ⏳ **`register_converter(typename, converter)`** — SQLite-to-Python converter (sqlite3-style); result column decoding by declared type name
+- ⏳ **`create_aggregate(name, num_params, aggregate_class)`** — Register custom SQL aggregate functions (e.g. step/finalize); sqlite3/aiosqlite have this
+- ⏳ **`create_collation(name, callable)`** — Define custom string collation for ORDER BY / comparisons; sqlite3/aiosqlite have this
+
 **v0.3.0 Release Criteria**:
 - aiosqlite test suite pass rate >80% **or intentional differences documented** — met via documented differences and per-test categories in AIOSQLITE_TEST_RESULTS.md
 - All Phase 3 features tested and documented
@@ -147,8 +153,8 @@ Core functionality and production readiness:
 
 ### 4.2 Type System Enhancements
 
-- ⏳ `register_adapter(type, adapter)` — Python-to-SQLite type adapter
-- ⏳ `register_converter(typename, converter)` — SQLite-to-Python converter
+- ✅ `register_adapter(type, adapter)` — Python-to-SQLite type adapter
+- ✅ `register_converter(typename, converter)` — SQLite-to-Python converter
 - ⏳ Date/time type handling utilities
 - ⏳ UUID type support
 - ⏳ Decimal type support
@@ -157,7 +163,7 @@ Core functionality and production readiness:
 
 - ⏳ Database introspection CLI
 - ⏳ Migration generation utilities
-- ⏳ Testing utilities and fixtures
+- ✅ **Testing utilities and fixtures** — Documented in `tests/README.md` and `tests/conftest.py` (test_db, unique_table_prefix, test_db_file, target_db_file, dbapi_conn, cleanup_db). Full test run (Rust + Python) via `scripts/dev_test.sh`; Rust tests on all CI platforms.
 - ⏳ Database mocking for tests
 - ⏳ Query profiling utilities
 
@@ -232,7 +238,7 @@ Following semantic versioning:
 ### Must Have (Blocking)
 - ✅ Phase 1 and Phase 2 complete
 - ⏳ Phase 3 complete (v0.3.0 released)
-- ⏳ Type system: `register_adapter` and `register_converter`
+- ✅ Type system: `register_adapter` and `register_converter`
 - ⏳ Cross-platform CI (Linux, macOS, Windows)
 - ⏳ Performance regression tests
 

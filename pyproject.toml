@@ -71,6 +71,12 @@ markers = [
     "xdist_group(name): group name for pytest-xdist loadgroup (tests in same group run on same worker)",
 ]
 addopts = "-v --tb=short"
+# Suppress known unraisable-exception warnings from background cleanup (e.g. connection
+# drop when Tokio runtime is shutting down). See tests/README.md.
+filterwarnings = [
+    "ignore:Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
+    "ignore:.*[Tt]okio.*:pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.coverage.run]
 source = ["rapsqlite"]

@@ -17,7 +17,10 @@ use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, get_or_create_pool, has_callbacks,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
-use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
+use crate::types::{
+    Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
+    UserCollations, UserFunctions,
+};
 use crate::utils::is_select_query;
 use crate::{Connection, OperationalError, ProgrammingError};
 
@@ -46,6 +49,10 @@ pub(crate) struct Cursor {
     pub(crate) callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
     pub(crate) user_functions: UserFunctions,
+    pub(crate) user_aggregates: UserAggregates,
+    pub(crate) user_collations: UserCollations,
+    pub(crate) adapters: Adapters,
+    pub(crate) converters: Converters,
     pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) progress_handler: ProgressHandler,
@@ -220,6 +227,8 @@ impl Cursor {
         let callback_connection = Arc::clone(&self.callback_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -227,6 +236,8 @@ impl Cursor {
         let pending_description = Arc::clone(&self.pending_description);
         let row_factory_override = Arc::clone(&self.row_factory_override);
         let closed = Arc::clone(&self.closed);
+        let adapters = Arc::clone(&self.adapters);
+        let converters = Arc::clone(&self.converters);
 
         Python::attach(|py| {
             let future = async move {
@@ -254,15 +265,27 @@ impl Cursor {
                                 if let Some(ref params_py) = *params_guard {
                                     let params_bound = params_py.bind(py);
                                     if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                                        let (proc_query, param_values) =
-                                            process_named_parameters(&query, dict)?;
+                                        let (proc_query, param_values) = process_named_parameters(
+                                            py,
+                                            &query,
+                                            dict,
+                                            Some(&adapters),
+                                        )?;
                                         return Ok((proc_query, param_values));
                                     }
                                     if let Ok(list) = params_bound.cast::<PyList>() {
-                                        let param_values = process_positional_parameters(list)?;
+                                        let param_values = process_positional_parameters(
+                                            py,
+                                            list,
+                                            Some(&adapters),
+                                        )?;
                                         return Ok((query.clone(), param_values));
                                     }
-                                    let param = SqliteParam::from_py(params_bound)?;
+                                    let param = SqliteParam::apply_adapters_then_from_py(
+                                        py,
+                                        params_bound,
+                                        Some(&adapters),
+                                    )?;
                                     return Ok((query.clone(), vec![param]));
                                 }
                                 Ok((query.clone(), Vec::new()))
@@ -278,6 +301,8 @@ impl Cursor {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -367,14 +392,25 @@ impl Cursor {
                             drop(o_guard);
                             let c_guard = row_factory.lock().unwrap();
                             for row in rows.iter() {
-                                let out =
-                                    row_to_py_with_factory(py, row, c_guard.as_ref(), tf_opt)?;
+                                let out = row_to_py_with_factory(
+                                    py,
+                                    row,
+                                    c_guard.as_ref(),
+                                    tf_opt,
+                                    Some(&converters),
+                                )?;
                                 vec.push(out.unbind());
                             }
                             return Ok(vec);
                         };
                         for row in rows.iter() {
-                            let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
+                            let out = row_to_py_with_factory(
+                                py,
+                                row,
+                                factory_opt,
+                                tf_opt,
+                                Some(&converters),
+                            )?;
                             vec.push(out.unbind());
                         }
                         Ok(vec)
@@ -464,6 +500,8 @@ impl Cursor {
         let callback_connection = Arc::clone(&self.callback_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -496,6 +534,8 @@ impl Cursor {
         let stored_proc_query = self.processed_query.clone();
         let stored_proc_params = self.processed_params.clone();
         let closed = Arc::clone(&self.closed);
+        let adapters = Arc::clone(&self.adapters);
+        let converters = Arc::clone(&self.converters);
 
         Python::attach(|py| {
             let future = async move {
@@ -540,8 +580,12 @@ impl Cursor {
 
                                     // Try dict first (named parameters)
                                     if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                                        let (proc_query, param_values) =
-                                            process_named_parameters(&query, dict)?;
+                                        let (proc_query, param_values) = process_named_parameters(
+                                            py,
+                                            &query,
+                                            dict,
+                                            Some(&adapters),
+                                        )?;
                                         // Verify we got parameters if query contains named placeholders
                                         if param_values.is_empty()
                                             && (query.contains(':')
@@ -563,12 +607,20 @@ impl Cursor {
 
                                     // Try list (positional parameters)
                                     if let Ok(list) = params_bound.cast::<PyList>() {
-                                        let param_values = process_positional_parameters(list)?;
+                                        let param_values = process_positional_parameters(
+                                            py,
+                                            list,
+                                            Some(&adapters),
+                                        )?;
                                         return Ok((query.clone(), param_values));
                                     }
 
                                     // Single value
-                                    let param = SqliteParam::from_py(params_bound)?;
+                                    let param = SqliteParam::apply_adapters_then_from_py(
+                                        py,
+                                        params_bound,
+                                        Some(&adapters),
+                                    )?;
                                     return Ok((query.clone(), vec![param]));
                                 }
                                 Ok((query.clone(), Vec::new()))
@@ -585,6 +637,8 @@ impl Cursor {
                         let has_callbacks_flag = has_callbacks(
                             &load_extension_enabled,
                             &user_functions,
+                            &user_aggregates,
+                            &user_collations,
                             &trace_callback,
                             &authorizer_callback,
                             &progress_handler,
@@ -677,14 +731,25 @@ impl Cursor {
                                 drop(o_guard);
                                 let c_guard = row_factory.lock().unwrap();
                                 for row in rows.iter() {
-                                    let out =
-                                        row_to_py_with_factory(py, row, c_guard.as_ref(), tf_opt)?;
+                                    let out = row_to_py_with_factory(
+                                        py,
+                                        row,
+                                        c_guard.as_ref(),
+                                        tf_opt,
+                                        Some(&converters),
+                                    )?;
                                     vec.push(out.unbind());
                                 }
                                 return Ok(vec);
                             };
                             for row in rows.iter() {
-                                let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
+                                let out = row_to_py_with_factory(
+                                    py,
+                                    row,
+                                    factory_opt,
+                                    tf_opt,
+                                    Some(&converters),
+                                )?;
                                 vec.push(out.unbind());
                             }
                             Ok(vec)
@@ -787,6 +852,8 @@ impl Cursor {
         let callback_connection = Arc::clone(&self.callback_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -795,6 +862,8 @@ impl Cursor {
         let pending_description = Arc::clone(&self.pending_description);
         let row_factory_override = Arc::clone(&self.row_factory_override);
         let closed = Arc::clone(&self.closed);
+        let adapters = Arc::clone(&self.adapters);
+        let converters = Arc::clone(&self.converters);
 
         Python::attach(|py| {
             let future = async move {
@@ -824,19 +893,31 @@ impl Cursor {
 
                                     // Check if it's a dict (named parameters)
                                     if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                                        let (proc_query, param_values) =
-                                            process_named_parameters(&query, dict)?;
+                                        let (proc_query, param_values) = process_named_parameters(
+                                            py,
+                                            &query,
+                                            dict,
+                                            Some(&adapters),
+                                        )?;
                                         return Ok((proc_query, param_values));
                                     }
 
                                     // Check if it's a list (positional parameters)
                                     if let Ok(list) = params_bound.cast::<PyList>() {
-                                        let param_values = process_positional_parameters(list)?;
+                                        let param_values = process_positional_parameters(
+                                            py,
+                                            list,
+                                            Some(&adapters),
+                                        )?;
                                         return Ok((query.clone(), param_values));
                                     }
 
                                     // Single value
-                                    let param = SqliteParam::from_py(params_bound)?;
+                                    let param = SqliteParam::apply_adapters_then_from_py(
+                                        py,
+                                        params_bound,
+                                        Some(&adapters),
+                                    )?;
                                     return Ok((query.clone(), vec![param]));
                                 }
                                 Ok((query.clone(), Vec::new()))
@@ -852,6 +933,8 @@ impl Cursor {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -942,14 +1025,25 @@ impl Cursor {
                             drop(o_guard);
                             let c_guard = row_factory.lock().unwrap();
                             for row in rows.iter() {
-                                let out =
-                                    row_to_py_with_factory(py, row, c_guard.as_ref(), tf_opt)?;
+                                let out = row_to_py_with_factory(
+                                    py,
+                                    row,
+                                    c_guard.as_ref(),
+                                    tf_opt,
+                                    Some(&converters),
+                                )?;
                                 vec.push(out.unbind());
                             }
                             return Ok(vec);
                         };
                         for row in rows.iter() {
-                            let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
+                            let out = row_to_py_with_factory(
+                                py,
+                                row,
+                                factory_opt,
+                                tf_opt,
+                                Some(&converters),
+                            )?;
                             vec.push(out.unbind());
                         }
                         Ok(vec)
@@ -1093,6 +1187,8 @@ impl Cursor {
         let callback_connection = Arc::clone(&self.callback_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -1123,6 +1219,8 @@ impl Cursor {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,

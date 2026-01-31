@@ -150,8 +150,11 @@ jobs:
         fail_ci_if_error: false
 
   rust-tests:
-    name: Rust unit tests
-    runs-on: ubuntu-latest
+    name: Rust unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
     - uses: actions/checkout@v4
 
@@ -163,12 +166,27 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
 
-    - name: Run cargo test
+    - name: Run Rust tests (Linux)
+      if: matrix.os == 'ubuntu-latest'
       shell: bash
       run: |
         set -e
-        # Run tests without extension-module so the test binary links against libpython.
-        # Use --lib to skip doc tests (they contain Python examples, not Rust code).
+        export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+        cargo test --no-default-features --lib
+
+    - name: Run Rust tests (macOS)
+      if: matrix.os == 'macos-latest'
+      shell: bash
+      run: |
+        set -e
+        export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+        ./scripts/run_rust_tests.sh
+
+    - name: Run Rust tests (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: bash
+      run: |
+        set -e
         export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
         cargo test --no-default-features --lib
 

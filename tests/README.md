@@ -9,6 +9,9 @@ Tests are organized into the following files:
 ### Core Tests
 - **`test_rapsqlite.py`** - Basic functionality tests
 - **`test_aiosqlite_compat.py`** - aiosqlite compatibility tests (migrated from aiosqlite test suite)
+- **`test_sqlite3_dbapi.py`** - DB-API and sqlite3-style behavior (ported from CPython test_sqlite3)
+- **`test_sqlite3_types.py`** - Type handling and register_adapter/register_converter (ported from CPython test_sqlite3)
+- **`test_sqlite3_hooks.py`** - Authorizer and progress handler (ported from CPython test_sqlite3)
 
 ### Feature Tests
 - **`test_pool_config.py`** - Connection pool configuration tests
@@ -28,6 +31,16 @@ Tests are organized into the following files:
 - **`test_properties.py`** - Hypothesis property-based tests
 - **`test_integration.py`** - Integration and real-world scenario tests
 - **`test_performance.py`** - Performance regression tests
+
+## External test sources
+
+Tests in this suite are derived from or validated against the following external sources:
+
+- **CPython test_sqlite3** — Tests in `test_sqlite3_dbapi.py`, `test_sqlite3_types.py`, and `test_sqlite3_hooks.py` are converted from the CPython stdlib sqlite3 test package ([Lib/test/test_sqlite3](https://github.com/python/cpython/tree/main/Lib/test/test_sqlite3)). They have been adapted to async pytest and rapsqlite’s API; tests that require unsupported features (e.g. blobopen, setlimit) are skipped. See the file headers for CPython/pysqlite license attribution.
+
+- **aiosqlite** — The aiosqlite test suite is run against rapsqlite via `scripts/run_aiosqlite_tests.py` (import patching). Results and intentional differences are documented in `docs/AIOSQLITE_TEST_RESULTS.md`. Selected aiosqlite smoke tests are also ported into `test_aiosqlite_compat.py` for in-tree coverage.
+
+- **SQL logic tests** — A minimal runner in `scripts/run_sql_logic_tests.py` runs simple-format test files (SQL statements, then `----`, then expected rows) against rapsqlite `:memory:` and compares results. Test files live in `scripts/sql_logic_tests/*.sql`.
 
 ## Running Tests
 
@@ -66,12 +79,22 @@ PYO3_PYTHON="$(python3 -c 'import sys; print(sys.executable)')" cargo test --no-
 This builds the crate **without** the `extension-module` feature, so the Rust test binary links
 against `libpython` and can run standalone.
 
-### Run All Tests
+### Run All Tests (Rust + Python)
+A full test run includes **Rust unit tests** and **Python pytest**. Use either:
+
+```bash
+./scripts/dev_test.sh
+```
+
+This builds with maturin, runs Rust unit tests (via `scripts/run_rust_tests.sh` on macOS/Linux, or `cargo test` on Windows), then runs `pytest tests/`. You can pass pytest options: `./scripts/dev_test.sh -m "not slow"`.
+
+To run only Python tests:
+
 ```bash
 python -m pytest tests/
 ```
 
-Use the same Python you used to install the package (`python -m pip install -e .` or `python -m maturin develop`). Alternatively, run `./scripts/dev_test.sh` to build and test with one interpreter.
+Use the same Python you used to install the package (`python -m pip install -e .` or `python -m maturin develop`). On macOS, to run Rust tests alone use `./scripts/run_rust_tests.sh` (or set `PYO3_PYTHON` and `cargo test --no-default-features --lib`); on Windows, run `cargo test --no-default-features --lib` with Python on PATH if needed.
 
 ### Recommended fast local run (matches PR CI defaults)
 ```bash
@@ -91,6 +114,8 @@ python -m pytest tests/ -n 12 --timeout 60 --dist loadgroup
 A default per-test timeout (90s) is set in `pyproject.toml`; tests marked `@pytest.mark.slow` get a 120s timeout via conftest. `--dist loadgroup` runs tests in the same `xdist_group` on one worker (e.g. init_hook, pool_exhaustion, concurrency), avoiding pool/DB contention and timeout flakiness.
 
 **CI** uses pytest-timeout, `--timeout 90`, and `--dist loadgroup` for stable parallel runs.
+
+Known **Tokio context** / unraisable-exception warnings when running with many workers (e.g. `-n 10`) come from background connection cleanup after the event loop or Tokio runtime is shutting down. These are filtered in `pyproject.toml` (`filterwarnings`) so CI logs stay readable; see CONTRIBUTING or this README for details.
 
 Tests use unique table names per test (via the `unique_table_prefix` fixture) so parallel runs avoid table-name collisions. Use this fixture for any new tests that create tables.
 
@@ -215,9 +240,17 @@ async def test_error_handling(test_db):
 ## Test Utilities
 
 ### Shared Fixtures (`conftest.py`)
-- `test_db` - Temporary database file fixture
-- `test_db_memory` - In-memory database fixture
-- `cleanup_db()` - Database cleanup helper
+Use these for consistent isolation and parallel-safe runs (`-n 10`):
+
+- **`test_db`** — Unique temp database file per test (path includes test name hash). Use for tests that need a real path; each test is fully isolated.
+- **`test_db_memory`** — In-memory database (`:memory:`).
+- **`test_db_file`** — Single temp file for tests that need a real path (e.g. backup, locking); use when you need one extra file alongside `test_db`.
+- **`target_db_file`** — Second temp file (e.g. backup target).
+- **`unique_table_prefix`** — Unique table name prefix per test to avoid cross-test collisions when using `-n 10`. Use for all `CREATE TABLE` / `INSERT` / `SELECT` in parallel runs.
+- **`dbapi_conn`** — Isolated async DBAPI connection (`:memory:`), guaranteed closed after test.
+- **`cleanup_db(path)`** — Helper to unlink a database file (fixtures use this for teardown).
+
+For parallel runs, prefer `test_db` and `unique_table_prefix` so tests do not share state. See `tests/conftest.py` for fixture implementations.
 
 ## Test Coverage
 

@@ -16,14 +16,15 @@ use tokio::sync::Mutex;
 
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{
-    sqlite3, sqlite3_backup_finish, sqlite3_backup_init, sqlite3_backup_pagecount,
-    sqlite3_backup_remaining, sqlite3_backup_step, sqlite3_busy_timeout, sqlite3_context,
-    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg,
-    sqlite3_free, sqlite3_get_autocommit, sqlite3_interrupt, sqlite3_libversion,
-    sqlite3_libversion_number, sqlite3_load_extension, sqlite3_progress_handler,
-    sqlite3_result_null, sqlite3_set_authorizer, sqlite3_total_changes, sqlite3_trace_v2,
-    sqlite3_user_data, sqlite3_value, SQLITE_BUSY, SQLITE_DENY, SQLITE_DETERMINISTIC, SQLITE_DONE,
-    SQLITE_LOCKED, SQLITE_OK, SQLITE_TRACE_STMT, SQLITE_UTF8,
+    sqlite3, sqlite3_aggregate_context, sqlite3_backup_finish, sqlite3_backup_init,
+    sqlite3_backup_pagecount, sqlite3_backup_remaining, sqlite3_backup_step, sqlite3_busy_timeout,
+    sqlite3_context, sqlite3_create_collation_v2, sqlite3_create_function_v2,
+    sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg, sqlite3_free,
+    sqlite3_get_autocommit, sqlite3_interrupt, sqlite3_libversion, sqlite3_libversion_number,
+    sqlite3_load_extension, sqlite3_progress_handler, sqlite3_result_null, sqlite3_set_authorizer,
+    sqlite3_total_changes, sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_BUSY,
+    SQLITE_DENY, SQLITE_DETERMINISTIC, SQLITE_DONE, SQLITE_LOCKED, SQLITE_OK, SQLITE_TRACE_STMT,
+    SQLITE_UTF8,
 };
 
 use crate::context_managers::next_savepoint_name;
@@ -38,7 +39,10 @@ use crate::query::{
     bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
     bind_and_fetch_one_on_connection, bind_and_fetch_optional_on_connection,
 };
-use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
+use crate::types::{
+    Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
+    UserCollations, UserFunctions,
+};
 use crate::utils::{
     cstr_from_c_char_ptr, is_select_query, parse_connection_string, track_query_usage,
     validate_path,
@@ -79,9 +83,13 @@ pub(crate) struct Connection {
     callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>, // Dedicated connection for callbacks
     load_extension_enabled: Arc<StdMutex<bool>>, // Track load_extension state
     user_functions: UserFunctions,               // name -> (nargs, callback)
+    user_aggregates: UserAggregates,             // name -> (num_params, user_data ptr for cleanup)
+    user_collations: UserCollations,             // name -> user_data ptr for cleanup on remove
+    adapters: Adapters,                          // (type, callable) for register_adapter
+    converters: Converters, // typename -> callable(bytes)->Any for register_converter
     trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Trace callback
     authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Authorizer callback
-    progress_handler: ProgressHandler,           // (n, callback)
+    progress_handler: ProgressHandler, // (n, callback)
     // Error message security: control whether query strings are included in errors
     include_query_in_errors: Arc<StdMutex<bool>>, // If false, exclude query strings from error messages
     // SQLite busy_timeout (aiosqlite compatibility) - timeout in seconds for database locks
@@ -242,6 +250,10 @@ impl Connection {
             callback_connection: Arc::new(Mutex::new(None)),
             load_extension_enabled: Arc::new(StdMutex::new(false)),
             user_functions: Arc::new(StdMutex::new(HashMap::new())),
+            user_aggregates: Arc::new(StdMutex::new(HashMap::new())),
+            user_collations: Arc::new(StdMutex::new(HashMap::new())),
+            adapters: Arc::new(StdMutex::new(Vec::new())),
+            converters: Arc::new(StdMutex::new(HashMap::new())),
             trace_callback: Arc::new(StdMutex::new(None)),
             authorizer_callback: Arc::new(StdMutex::new(None)),
             progress_handler: Arc::new(StdMutex::new(None)),
@@ -317,6 +329,8 @@ impl Connection {
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -347,6 +361,8 @@ impl Connection {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -729,6 +745,8 @@ impl Connection {
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
         let callback_connection = Arc::clone(&self.callback_connection);
         let user_functions = Arc::clone(&self.user_functions);
+        let _user_aggregates = Arc::clone(&self.user_aggregates);
+        let _user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -812,6 +830,8 @@ impl Connection {
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
         let callback_connection = Arc::clone(&self.callback_connection);
         let user_functions = Arc::clone(&self.user_functions);
+        let _user_aggregates = Arc::clone(&self.user_aggregates);
+        let _user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -891,6 +911,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -978,6 +1000,8 @@ impl Connection {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -1107,6 +1131,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self.callback_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -1122,6 +1148,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -1175,6 +1203,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self.callback_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -1190,6 +1220,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -1304,6 +1336,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -1317,6 +1351,8 @@ impl Connection {
         let timeout = Arc::clone(&self_.timeout);
         let isolation_level = Arc::clone(&self_.isolation_level);
         let closed = Arc::clone(&self_.closed);
+        let adapters = Arc::clone(&self_.adapters);
+        let converters = Arc::clone(&self_.converters);
         let connection_self: Py<Connection> = self_.into();
 
         // Raise immediately if connection is closed (cursor.execute() on closed connection, etc.)
@@ -1329,7 +1365,7 @@ impl Connection {
         // Note: Python::with_gil is used here for sync parameter processing before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
@@ -1338,17 +1374,17 @@ impl Connection {
 
             // Check if it's a dict (named parameters)
             if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(&query, &dict);
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
             }
 
             // Check if it's a list or tuple (positional parameters)
             if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(&list)?;
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
 
             // Single value (treat as single positional parameter)
-            let param = SqliteParam::from_py(&params)?;
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
 
@@ -1409,6 +1445,10 @@ impl Connection {
                     callback_connection: Arc::clone(&callback_connection),
                     load_extension_enabled: Arc::clone(&load_extension_enabled),
                     user_functions: Arc::clone(&user_functions),
+                    user_aggregates: Arc::clone(&user_aggregates),
+                    user_collations: Arc::clone(&user_collations),
+                    adapters: Arc::clone(&adapters),
+                    converters: Arc::clone(&converters),
                     trace_callback: Arc::clone(&trace_callback),
                     authorizer_callback: Arc::clone(&authorizer_callback),
                     progress_handler: Arc::clone(&progress_handler),
@@ -1458,6 +1498,10 @@ impl Connection {
                 callback_connection: Arc::clone(&callback_connection),
                 load_extension_enabled: Arc::clone(&load_extension_enabled),
                 user_functions: Arc::clone(&user_functions),
+                user_aggregates: Arc::clone(&user_aggregates),
+                user_collations: Arc::clone(&user_collations),
+                adapters: Arc::clone(&adapters),
+                converters: Arc::clone(&converters),
                 trace_callback: Arc::clone(&trace_callback),
                 authorizer_callback: Arc::clone(&authorizer_callback),
                 progress_handler: Arc::clone(&progress_handler),
@@ -1494,6 +1538,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -1502,6 +1548,7 @@ impl Connection {
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let closed = Arc::clone(&self_.closed);
         let _timeout = Arc::clone(&self_.timeout);
+        let adapters = Arc::clone(&self_.adapters);
         let connection_self = self_.into();
 
         // Process all parameter sets
@@ -1516,7 +1563,8 @@ impl Connection {
                 let mut params_vec = Vec::new();
                 for param in param_set {
                     let bound_param = param.bind(py);
-                    let sqlx_param = SqliteParam::from_py(bound_param)?;
+                    let sqlx_param =
+                        SqliteParam::apply_adapters_then_from_py(py, bound_param, Some(&adapters))?;
                     params_vec.push(sqlx_param);
                 }
                 result.push(params_vec);
@@ -1555,6 +1603,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -1718,6 +1768,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -1727,13 +1779,15 @@ impl Connection {
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let closed = Arc::clone(&self_.closed);
+        let adapters = Arc::clone(&self_.adapters);
+        let converters = Arc::clone(&self_.converters);
         let connection_self = self_.into();
 
         // Process parameters
         // Note: Python::with_gil is used here for sync parameter processing before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
@@ -1742,17 +1796,17 @@ impl Connection {
 
             // Check if it's a dict (named parameters)
             if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(&query, &dict);
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
             }
 
             // Check if it's a list or tuple (positional parameters)
             if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(&list)?;
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
 
             // Single value (treat as single positional parameter)
-            let param = SqliteParam::from_py(&params)?;
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
 
@@ -1788,6 +1842,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -1845,9 +1901,10 @@ impl Connection {
                     let factory_opt = guard.as_ref();
                     let tf_guard = text_factory.lock().unwrap();
                     let tf_opt = tf_guard.as_ref();
+                    let conv_opt = Some(&converters);
                     let result_list = PyList::empty(py);
                     for row in rows.iter() {
-                        let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
+                        let out = row_to_py_with_factory(py, row, factory_opt, tf_opt, conv_opt)?;
                         result_list.append(out)?;
                     }
                     Ok(result_list.into())
@@ -1910,6 +1967,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -1917,13 +1976,15 @@ impl Connection {
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let closed = Arc::clone(&self_.closed);
+        let adapters = Arc::clone(&self_.adapters);
+        let converters = Arc::clone(&self_.converters);
         let connection_self = self_.into();
 
         // Process parameters
         // Note: Python::with_gil is used here for sync parameter processing before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
@@ -1931,13 +1992,13 @@ impl Connection {
             let params = params.as_borrowed();
 
             if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(&query, &dict);
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
             }
             if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(&list)?;
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
-            let param = SqliteParam::from_py(&params)?;
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
 
@@ -1970,6 +2031,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -2042,7 +2105,8 @@ impl Connection {
                     let factory_opt = guard.as_ref();
                     let tf_guard = text_factory.lock().unwrap();
                     let tf_opt = tf_guard.as_ref();
-                    let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt)?;
+                    let conv_opt = Some(&converters);
+                    let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt, conv_opt)?;
                     Ok(out.unbind())
                 })
             };
@@ -2107,6 +2171,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -2114,13 +2180,15 @@ impl Connection {
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let closed = Arc::clone(&self_.closed);
+        let adapters = Arc::clone(&self_.adapters);
+        let converters = Arc::clone(&self_.converters);
         let connection_self = self_.into();
 
         // Process parameters
         // Note: Python::with_gil is used here for sync parameter processing before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
@@ -2128,13 +2196,13 @@ impl Connection {
             let params = params.as_borrowed();
 
             if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(&query, &dict);
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
             }
             if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(&list)?;
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
-            let param = SqliteParam::from_py(&params)?;
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
 
@@ -2167,6 +2235,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -2250,7 +2320,8 @@ impl Connection {
                         let factory_opt = guard.as_ref();
                         let tf_guard = text_factory.lock().unwrap();
                         let tf_opt = tf_guard.as_ref();
-                        let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt)?;
+                        let conv_opt = Some(&converters);
+                        let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt, conv_opt)?;
                         Ok(out.unbind())
                     }),
                     None => Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) }),
@@ -2281,26 +2352,29 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         let last_rowid = Arc::clone(&self_.last_rowid);
         let last_changes = Arc::clone(&self_.last_changes);
+        let adapters = Arc::clone(&self_.adapters);
 
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
             let params = params.as_borrowed();
             if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(&query, &dict);
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
             }
             if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(&list)?;
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
-            let param = SqliteParam::from_py(&params)?;
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
 
@@ -2333,6 +2407,8 @@ impl Connection {
                     if has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -2440,10 +2516,14 @@ impl Connection {
         let callback_connection = Arc::clone(&slf.callback_connection);
         let load_extension_enabled = Arc::clone(&slf.load_extension_enabled);
         let user_functions = Arc::clone(&slf.user_functions);
+        let user_aggregates = Arc::clone(&slf.user_aggregates);
+        let user_collations = Arc::clone(&slf.user_collations);
         let trace_callback = Arc::clone(&slf.trace_callback);
         let authorizer_callback = Arc::clone(&slf.authorizer_callback);
         let progress_handler = Arc::clone(&slf.progress_handler);
         let closed = Arc::clone(&slf.closed);
+        let adapters = Arc::clone(&slf.adapters);
+        let converters = Arc::clone(&slf.converters);
         Ok(Cursor {
             connection: slf.into(),
             query: String::new(),
@@ -2465,6 +2545,10 @@ impl Connection {
             callback_connection,
             load_extension_enabled,
             user_functions,
+            user_aggregates,
+            user_collations,
+            adapters,
+            converters,
             trace_callback,
             authorizer_callback,
             progress_handler,
@@ -2498,10 +2582,14 @@ impl Connection {
         let callback_connection = Arc::clone(&slf.callback_connection);
         let load_extension_enabled = Arc::clone(&slf.load_extension_enabled);
         let user_functions = Arc::clone(&slf.user_functions);
+        let user_aggregates = Arc::clone(&slf.user_aggregates);
+        let user_collations = Arc::clone(&slf.user_collations);
         let trace_callback = Arc::clone(&slf.trace_callback);
         let authorizer_callback = Arc::clone(&slf.authorizer_callback);
         let progress_handler = Arc::clone(&slf.progress_handler);
         let closed = Arc::clone(&slf.closed);
+        let adapters = Arc::clone(&slf.adapters);
+        let converters = Arc::clone(&slf.converters);
         Ok(Cursor {
             connection: slf.into(),
             query,
@@ -2523,6 +2611,10 @@ impl Connection {
             callback_connection,
             load_extension_enabled,
             user_functions,
+            user_aggregates,
+            user_collations,
+            adapters,
+            converters,
             trace_callback,
             authorizer_callback,
             progress_handler,
@@ -2725,6 +2817,8 @@ impl Connection {
         let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -2735,6 +2829,8 @@ impl Connection {
                 if !has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -2977,6 +3073,8 @@ impl Connection {
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let trace_callback = Arc::clone(&self.trace_callback);
@@ -3053,6 +3151,8 @@ impl Connection {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -3337,6 +3437,581 @@ impl Connection {
         })
     }
 
+    /// Create or remove a custom SQL aggregate function.
+    /// The aggregate class must implement `step(self, *args)` and `finalize(self)`.
+    /// If aggregate_class is None, the aggregate is removed.
+    #[pyo3(signature = (name, num_params, aggregate_class))]
+    fn create_aggregate(
+        &self,
+        name: String,
+        num_params: i32,
+        aggregate_class: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if !(-1..=127).contains(&num_params) {
+            return Err(ProgrammingError::new_err(format!(
+                "Invalid num_params for create_aggregate: {num_params}. Expected -1..=127."
+            )));
+        }
+
+        let path = self.path.clone();
+        let pool = Arc::clone(&self.pool);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
+
+        Python::attach(|py| {
+            let class_clone = aggregate_class.as_ref().map(|c| c.clone_ref(py));
+
+            let future = async move {
+                ensure_not_closed(&closed)?;
+                ensure_callback_connection(
+                    &path,
+                    &pool,
+                    &callback_connection,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                    &idle_timeout_secs,
+                )
+                .await?;
+
+                let mut conn_guard = callback_connection.lock().await;
+                let conn = conn_guard.as_mut().ok_or_else(|| {
+                    OperationalError::new_err("Callback connection not available")
+                })?;
+
+                let sqlite_conn: &mut SqliteConnection = conn;
+                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
+                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
+                })?;
+                let raw_db = handle.as_raw_handle().as_ptr();
+
+                if class_clone.is_none() {
+                    // Remove: free stored user_data pointer if any, then unregister from SQLite
+                    let old_ptr = {
+                        let mut guard = user_aggregates.lock().unwrap();
+                        guard.remove(&name).map(|(_, ptr)| ptr)
+                    };
+                    if let Some(ptr) = old_ptr {
+                        if ptr != 0 {
+                            unsafe {
+                                let _ = Box::from_raw(ptr as *mut Py<PyAny>);
+                            }
+                        }
+                    }
+
+                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                        OperationalError::new_err(format!("Aggregate name contains null byte: {e}"))
+                    })?;
+                    let result = unsafe {
+                        sqlite3_create_function_v2(
+                            raw_db,
+                            name_cstr.as_ptr(),
+                            num_params,
+                            SQLITE_UTF8,
+                            std::ptr::null_mut(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    };
+                    if result != SQLITE_OK {
+                        return Err(OperationalError::new_err(format!(
+                            "Failed to remove aggregate '{name}': SQLite error code {result}"
+                        )));
+                    }
+
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &user_aggregates,
+                        &user_collations,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        drop(handle);
+                        drop(conn_guard);
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                    }
+                    return Ok(());
+                }
+
+                #[allow(deprecated)]
+                let class_for_storage =
+                    Python::with_gil(|py| class_clone.as_ref().unwrap().clone_ref(py));
+                let class_box: Box<Py<PyAny>> = Box::new(class_for_storage);
+                let class_ptr = Box::into_raw(class_box) as *mut std::ffi::c_void;
+                let class_ptr_usize = class_ptr as usize;
+
+                {
+                    let mut guard = user_aggregates.lock().unwrap();
+                    guard.insert(name.clone(), (num_params, class_ptr_usize));
+                }
+
+                // Use 16 bytes so the stored pointer is properly aligned on all platforms
+                const AGG_CTX_SIZE: i32 = 16;
+
+                extern "C" fn aggregate_step(
+                    ctx: *mut sqlite3_context,
+                    argc: std::ffi::c_int,
+                    argv: *mut *mut sqlite3_value,
+                ) {
+                    unsafe {
+                        let user_data = sqlite3_user_data(ctx);
+                        if user_data.is_null() {
+                            return;
+                        }
+                        let class_ptr = user_data as *mut Py<PyAny>;
+
+                        let ctx_buf = sqlite3_aggregate_context(ctx, AGG_CTX_SIZE);
+                        if ctx_buf.is_null() {
+                            return;
+                        }
+                        let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
+                        let mut instance_ptr: *mut Py<PyAny> = std::ptr::read(instance_ptr_ptr);
+
+                        #[allow(deprecated)]
+                        Python::with_gil(|py| {
+                            if instance_ptr.is_null() {
+                                let class = (*class_ptr).clone_ref(py);
+                                let instance = match class.call0(py) {
+                                    Ok(inst) => inst,
+                                    Err(e) => {
+                                        let msg = format!("Python aggregate error: {e}");
+                                        libsqlite3_sys::sqlite3_result_error(
+                                            ctx,
+                                            msg.as_ptr() as *const std::ffi::c_char,
+                                            msg.len() as i32,
+                                        );
+                                        return;
+                                    }
+                                };
+                                let instance_box: Box<Py<PyAny>> = Box::new(instance);
+                                instance_ptr = Box::into_raw(instance_box);
+                                std::ptr::write(instance_ptr_ptr, instance_ptr);
+                            }
+
+                            let instance = (*instance_ptr).clone_ref(py);
+                            let mut py_args: Vec<Py<PyAny>> = Vec::new();
+                            for i in 0..argc {
+                                let value_ptr = *argv.add(i as usize);
+                                match sqlite_c_value_to_py(py, value_ptr) {
+                                    Ok(py_val) => py_args.push(py_val),
+                                    Err(e) => {
+                                        let msg = format!("Error converting argument {i}: {e}");
+                                        libsqlite3_sys::sqlite3_result_error(
+                                            ctx,
+                                            msg.as_ptr() as *const std::ffi::c_char,
+                                            msg.len() as i32,
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+
+                            let step_result = match py_args.len() {
+                                0 => instance.bind(py).call_method0("step"),
+                                1 => instance
+                                    .bind(py)
+                                    .call_method1("step", (py_args[0].clone_ref(py),)),
+                                2 => instance.bind(py).call_method1(
+                                    "step",
+                                    (py_args[0].clone_ref(py), py_args[1].clone_ref(py)),
+                                ),
+                                3 => instance.bind(py).call_method1(
+                                    "step",
+                                    (
+                                        py_args[0].clone_ref(py),
+                                        py_args[1].clone_ref(py),
+                                        py_args[2].clone_ref(py),
+                                    ),
+                                ),
+                                4 => instance.bind(py).call_method1(
+                                    "step",
+                                    (
+                                        py_args[0].clone_ref(py),
+                                        py_args[1].clone_ref(py),
+                                        py_args[2].clone_ref(py),
+                                        py_args[3].clone_ref(py),
+                                    ),
+                                ),
+                                5 => instance.bind(py).call_method1(
+                                    "step",
+                                    (
+                                        py_args[0].clone_ref(py),
+                                        py_args[1].clone_ref(py),
+                                        py_args[2].clone_ref(py),
+                                        py_args[3].clone_ref(py),
+                                        py_args[4].clone_ref(py),
+                                    ),
+                                ),
+                                _ => {
+                                    let args_tuple =
+                                        PyTuple::new(py, py_args.iter().map(|a| a.clone_ref(py)));
+                                    match args_tuple {
+                                        Ok(t) => instance.bind(py).call_method1("step", (t,)),
+                                        Err(e) => {
+                                            let msg = format!("Error building step args: {e}");
+                                            libsqlite3_sys::sqlite3_result_error(
+                                                ctx,
+                                                msg.as_ptr() as *const std::ffi::c_char,
+                                                msg.len() as i32,
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                            };
+
+                            if let Err(e) = step_result {
+                                let msg = format!("Python aggregate step error: {e}");
+                                libsqlite3_sys::sqlite3_result_error(
+                                    ctx,
+                                    msg.as_ptr() as *const std::ffi::c_char,
+                                    msg.len() as i32,
+                                );
+                            }
+                        });
+                    }
+                }
+
+                extern "C" fn aggregate_final(ctx: *mut sqlite3_context) {
+                    unsafe {
+                        let ctx_buf = sqlite3_aggregate_context(ctx, AGG_CTX_SIZE);
+                        if ctx_buf.is_null() {
+                            sqlite3_result_null(ctx);
+                            return;
+                        }
+                        let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
+                        let instance_ptr: *mut Py<PyAny> = std::ptr::read(instance_ptr_ptr);
+                        if instance_ptr.is_null() {
+                            sqlite3_result_null(ctx);
+                            return;
+                        }
+
+                        #[allow(deprecated)]
+                        Python::with_gil(|py| {
+                            let instance = Box::from_raw(instance_ptr);
+                            std::ptr::write(instance_ptr_ptr, std::ptr::null_mut::<Py<PyAny>>());
+
+                            let result = instance.bind(py).call_method0("finalize");
+                            match result {
+                                Ok(r) => {
+                                    let _ = py_to_sqlite_c_result(py, ctx, &r);
+                                }
+                                Err(e) => {
+                                    let msg = format!("Python aggregate finalize error: {e}");
+                                    libsqlite3_sys::sqlite3_result_error(
+                                        ctx,
+                                        msg.as_ptr() as *const std::ffi::c_char,
+                                        msg.len() as i32,
+                                    );
+                                }
+                            }
+                        });
+                    }
+                }
+
+                extern "C" fn aggregate_destructor(user_data: *mut std::ffi::c_void) {
+                    unsafe {
+                        if !user_data.is_null() {
+                            let _ = Box::from_raw(user_data as *mut Py<PyAny>);
+                        }
+                    }
+                }
+
+                let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                    OperationalError::new_err(format!("Aggregate name contains null byte: {e}"))
+                })?;
+
+                let result = unsafe {
+                    sqlite3_create_function_v2(
+                        raw_db,
+                        name_cstr.as_ptr(),
+                        num_params,
+                        SQLITE_UTF8,
+                        class_ptr,
+                        None,                  // xFunc
+                        Some(aggregate_step),  // xStep
+                        Some(aggregate_final), // xFinal
+                        Some(aggregate_destructor),
+                    )
+                };
+
+                if result != SQLITE_OK {
+                    unsafe {
+                        let _ = Box::from_raw(class_ptr as *mut Py<PyAny>);
+                    }
+                    {
+                        let mut guard = user_aggregates.lock().unwrap();
+                        guard.remove(&name);
+                    }
+                    return Err(OperationalError::new_err(format!(
+                        "Failed to create aggregate '{name}': SQLite error code {result}"
+                    )));
+                }
+
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Create or remove a custom collation. The callable receives (s1: str, s2: str) and returns -1, 0, or 1.
+    /// If callable is None, the collation is removed.
+    #[pyo3(signature = (name, callable))]
+    fn create_collation(&self, name: String, callable: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let path = self.path.clone();
+        let pool = Arc::clone(&self.pool);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
+        let user_collations = Arc::clone(&self.user_collations);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
+
+        Python::attach(|py| {
+            let callable_clone = callable.as_ref().map(|c| c.clone_ref(py));
+
+            let future = async move {
+                ensure_not_closed(&closed)?;
+                ensure_callback_connection(
+                    &path,
+                    &pool,
+                    &callback_connection,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                    &idle_timeout_secs,
+                )
+                .await?;
+
+                let mut conn_guard = callback_connection.lock().await;
+                let conn = conn_guard.as_mut().ok_or_else(|| {
+                    OperationalError::new_err("Callback connection not available")
+                })?;
+
+                let sqlite_conn: &mut SqliteConnection = conn;
+                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
+                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
+                })?;
+                let raw_db = handle.as_raw_handle().as_ptr();
+
+                if callable_clone.is_none() {
+                    let old_ptr = {
+                        let mut guard = user_collations.lock().unwrap();
+                        guard.remove(&name)
+                    };
+                    if let Some(ptr) = old_ptr {
+                        if ptr != 0 {
+                            unsafe {
+                                let _ = Box::from_raw(ptr as *mut Py<PyAny>);
+                            }
+                        }
+                    }
+
+                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                        OperationalError::new_err(format!("Collation name contains null byte: {e}"))
+                    })?;
+                    let result = unsafe {
+                        sqlite3_create_collation_v2(
+                            raw_db,
+                            name_cstr.as_ptr(),
+                            SQLITE_UTF8,
+                            std::ptr::null_mut(),
+                            None,
+                            None,
+                        )
+                    };
+                    if result != SQLITE_OK {
+                        return Err(OperationalError::new_err(format!(
+                            "Failed to remove collation '{name}': SQLite error code {result}"
+                        )));
+                    }
+
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &user_aggregates,
+                        &user_collations,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        drop(handle);
+                        drop(conn_guard);
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                    }
+                    return Ok(());
+                }
+
+                #[allow(deprecated)]
+                let callback_for_storage =
+                    Python::with_gil(|py| callable_clone.as_ref().unwrap().clone_ref(py));
+                let callback_box: Box<Py<PyAny>> = Box::new(callback_for_storage);
+                let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
+                let callback_ptr_usize = callback_ptr as usize;
+
+                {
+                    let mut guard = user_collations.lock().unwrap();
+                    guard.insert(name.clone(), callback_ptr_usize);
+                }
+
+                extern "C" fn collation_trampoline(
+                    p_arg: *mut std::ffi::c_void,
+                    len1: std::ffi::c_int,
+                    ptr1: *const std::ffi::c_void,
+                    len2: std::ffi::c_int,
+                    ptr2: *const std::ffi::c_void,
+                ) -> std::ffi::c_int {
+                    unsafe {
+                        if p_arg.is_null() || ptr1.is_null() || ptr2.is_null() {
+                            return 0;
+                        }
+                        let len1 = len1 as usize;
+                        let len2 = len2 as usize;
+                        let s1 = if len1 == 0 {
+                            ""
+                        } else {
+                            let slice = std::slice::from_raw_parts(ptr1 as *const u8, len1);
+                            std::str::from_utf8(slice).unwrap_or("")
+                        };
+                        let s2 = if len2 == 0 {
+                            ""
+                        } else {
+                            let slice = std::slice::from_raw_parts(ptr2 as *const u8, len2);
+                            std::str::from_utf8(slice).unwrap_or("")
+                        };
+
+                        #[allow(deprecated)]
+                        let result = Python::with_gil(|py| {
+                            let callback_ptr = p_arg as *mut Py<PyAny>;
+                            let callback = (*callback_ptr).clone_ref(py);
+                            let s1_py = PyString::new(py, s1);
+                            let s2_py = PyString::new(py, s2);
+                            match callback.bind(py).call1((s1_py, s2_py)) {
+                                Ok(ret) => {
+                                    let cmp: i32 = ret.extract().unwrap_or(0);
+                                    if cmp < 0 {
+                                        -1
+                                    } else if cmp > 0 {
+                                        1
+                                    } else {
+                                        0
+                                    }
+                                }
+                                Err(_) => 0,
+                            }
+                        });
+                        result
+                    }
+                }
+
+                extern "C" fn collation_destructor(p_arg: *mut std::ffi::c_void) {
+                    unsafe {
+                        if !p_arg.is_null() {
+                            let _ = Box::from_raw(p_arg as *mut Py<PyAny>);
+                        }
+                    }
+                }
+
+                let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                    OperationalError::new_err(format!("Collation name contains null byte: {e}"))
+                })?;
+
+                let result = unsafe {
+                    sqlite3_create_collation_v2(
+                        raw_db,
+                        name_cstr.as_ptr(),
+                        SQLITE_UTF8,
+                        callback_ptr,
+                        Some(collation_trampoline),
+                        Some(collation_destructor),
+                    )
+                };
+
+                if result != SQLITE_OK {
+                    unsafe {
+                        let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
+                    }
+                    {
+                        let mut guard = user_collations.lock().unwrap();
+                        guard.remove(&name);
+                    }
+                    return Err(OperationalError::new_err(format!(
+                        "Failed to create collation '{name}': SQLite error code {result}"
+                    )));
+                }
+
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Register an adapter for a Python type. When binding parameters, if the value's type
+    /// matches, adapter(value) is called and the result is used. Pass adapter=None to remove
+    /// adapters for that type.
+    #[pyo3(signature = (type_, adapter))]
+    fn register_adapter(&self, type_: Py<PyAny>, adapter: Option<Py<PyAny>>) -> PyResult<()> {
+        let adapters = Arc::clone(&self.adapters);
+        if let Some(adapter) = adapter {
+            #[allow(deprecated)]
+            Python::with_gil(|py| {
+                let mut guard = adapters.lock().unwrap();
+                guard.push((type_.clone_ref(py), adapter.clone_ref(py)));
+                Ok(())
+            })
+        } else {
+            #[allow(deprecated)]
+            Python::with_gil(|py| {
+                let type_bound = type_.bind(py);
+                let mut guard = adapters.lock().unwrap();
+                guard.retain(|(t, _)| !t.bind(py).get_type().is(type_bound.get_type()));
+                Ok(())
+            })
+        }
+    }
+
+    /// Register a converter for a declared column type. When reading rows, if the column's
+    /// declared type matches typename, converter(bytes) is called and the result is used.
+    /// Pass converter=None to remove the converter for that type.
+    #[pyo3(signature = (typename, converter))]
+    fn register_converter(&self, typename: &str, converter: Option<Py<PyAny>>) -> PyResult<()> {
+        let key = typename.to_uppercase();
+        let converters = Arc::clone(&self.converters);
+        let mut guard = converters.lock().unwrap();
+        if let Some(c) = converter {
+            guard.insert(key, c);
+        } else {
+            guard.remove(&key);
+        }
+        Ok(())
+    }
+
     /// Set or clear the trace callback.
     /// The callback receives SQL strings as they are executed.
     fn set_trace_callback(&self, callback: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
@@ -3351,6 +4026,8 @@ impl Connection {
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         let closed = Arc::clone(&self.closed);
@@ -3500,6 +4177,8 @@ impl Connection {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -3534,6 +4213,8 @@ impl Connection {
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         let closed = Arc::clone(&self.closed);
@@ -3555,6 +4236,8 @@ impl Connection {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -3722,6 +4405,8 @@ impl Connection {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -3756,6 +4441,8 @@ impl Connection {
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let closed = Arc::clone(&self.closed);
@@ -3777,6 +4464,8 @@ impl Connection {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -3900,6 +4589,8 @@ impl Connection {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -3935,6 +4626,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -3952,6 +4645,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4194,6 +4889,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -4231,6 +4928,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4329,6 +5028,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -4374,6 +5075,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4504,6 +5207,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -4551,6 +5256,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4671,6 +5378,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -4712,6 +5421,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4844,6 +5555,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -4860,6 +5573,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -5211,6 +5926,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -5248,6 +5965,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -5348,6 +6067,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -5389,6 +6110,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -5507,6 +6230,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -5548,6 +6273,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -5655,6 +6382,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -5696,6 +6425,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -5838,6 +6569,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -5865,6 +6598,8 @@ impl Connection {
                 target_callback_connection_opt,
                 target_load_extension_enabled_opt,
                 target_user_functions_opt,
+                target_user_aggregates_opt,
+                target_user_collations_opt,
                 target_trace_callback_opt,
                 target_authorizer_callback_opt,
                 target_progress_handler_opt,
@@ -5886,6 +6621,8 @@ impl Connection {
                     Some(target_conn_borrowed.callback_connection.clone()),
                     Some(target_conn_borrowed.load_extension_enabled.clone()),
                     Some(target_conn_borrowed.user_functions.clone()),
+                    Some(target_conn_borrowed.user_aggregates.clone()),
+                    Some(target_conn_borrowed.user_collations.clone()),
                     Some(target_conn_borrowed.trace_callback.clone()),
                     Some(target_conn_borrowed.authorizer_callback.clone()),
                     Some(target_conn_borrowed.progress_handler.clone()),
@@ -5893,7 +6630,7 @@ impl Connection {
             } else {
                 (
                     None, None, None, None, None, None, None, None, None, None, None, None, None,
-                    None,
+                    None, None, None,
                 )
             };
 
@@ -5928,6 +6665,8 @@ impl Connection {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -6019,6 +6758,10 @@ impl Connection {
                         let target_load_extension_enabled: Arc<StdMutex<bool>> =
                             target_load_extension_enabled_opt.clone().unwrap();
                         let target_user_functions: UserFunctions = target_user_functions_opt.clone().unwrap();
+                        let target_user_aggregates: UserAggregates =
+                            target_user_aggregates_opt.clone().unwrap();
+                        let target_user_collations: UserCollations =
+                            target_user_collations_opt.clone().unwrap();
                         let target_trace_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
                             target_trace_callback_opt.clone().unwrap();
                         let target_authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
@@ -6034,6 +6777,8 @@ impl Connection {
                         let target_has_callbacks_flag = has_callbacks(
                             &target_load_extension_enabled,
                             &target_user_functions,
+                            &target_user_aggregates,
+                            &target_user_collations,
                             &target_trace_callback,
                             &target_authorizer_callback,
                             &target_progress_handler,

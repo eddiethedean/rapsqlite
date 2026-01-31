@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use crate::types::{ProgressHandler, UserFunctions};
+use crate::types::{ProgressHandler, UserAggregates, UserCollations, UserFunctions};
 use crate::OperationalError;
 
 /// Minimum pool size when creating a shared pool so many concurrent
@@ -340,6 +340,8 @@ pub(crate) async fn release_session_connection(
 pub(crate) fn has_callbacks(
     load_extension_enabled: &Arc<StdMutex<bool>>,
     user_functions: &UserFunctions,
+    user_aggregates: &UserAggregates,
+    user_collations: &UserCollations,
     trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
     authorizer_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
     progress_handler: &ProgressHandler,
@@ -349,9 +351,17 @@ pub(crate) fn has_callbacks(
     // These are read-only operations, so unwrap() is acceptable.
     let load_ext = *load_extension_enabled.lock().unwrap();
     let has_functions = !user_functions.lock().unwrap().is_empty();
+    let has_aggregates = !user_aggregates.lock().unwrap().is_empty();
+    let has_collations = !user_collations.lock().unwrap().is_empty();
     let has_trace = trace_callback.lock().unwrap().is_some();
     let has_authorizer = authorizer_callback.lock().unwrap().is_some();
     let has_progress = progress_handler.lock().unwrap().is_some();
 
-    load_ext || has_functions || has_trace || has_authorizer || has_progress
+    load_ext
+        || has_functions
+        || has_aggregates
+        || has_collations
+        || has_trace
+        || has_authorizer
+        || has_progress
 }

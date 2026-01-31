@@ -24,7 +24,10 @@ use crate::pool::{
     execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
-use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
+use crate::types::{
+    Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
+    UserCollations, UserFunctions,
+};
 use crate::utils::is_dml_query;
 use crate::{map_sqlx_error, Connection, Cursor, OperationalError};
 
@@ -49,6 +52,11 @@ pub(crate) struct ExecuteContextManager {
     pub(crate) callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
     pub(crate) user_functions: UserFunctions,
+    pub(crate) user_aggregates: UserAggregates,
+    pub(crate) user_collations: UserCollations,
+    #[allow(dead_code)]
+    pub(crate) adapters: Adapters,
+    pub(crate) converters: Converters,
     pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) progress_handler: ProgressHandler,
@@ -84,6 +92,8 @@ impl ExecuteContextManager {
             let callback_connection = Arc::clone(&slf.borrow(py).callback_connection);
             let load_extension_enabled = Arc::clone(&slf.borrow(py).load_extension_enabled);
             let user_functions = Arc::clone(&slf.borrow(py).user_functions);
+            let user_aggregates = Arc::clone(&slf.borrow(py).user_aggregates);
+            let user_collations = Arc::clone(&slf.borrow(py).user_collations);
             let trace_callback = Arc::clone(&slf.borrow(py).trace_callback);
             let authorizer_callback = Arc::clone(&slf.borrow(py).authorizer_callback);
             let progress_handler = Arc::clone(&slf.borrow(py).progress_handler);
@@ -97,6 +107,7 @@ impl ExecuteContextManager {
             let timeout = Arc::clone(&slf.borrow(py).timeout);
             let isolation_level = Arc::clone(&slf.borrow(py).isolation_level);
             let closed = Arc::clone(&slf.borrow(py).closed);
+            let converters = Arc::clone(&slf.borrow(py).converters);
             // Get cursor's results Arc to mark it as executed for non-SELECT queries
             // Note: Python::with_gil is used here for sync result caching in async context.
             // The deprecation warning is acceptable as this is a sync operation within async.
@@ -157,6 +168,8 @@ impl ExecuteContextManager {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -333,6 +346,8 @@ impl ExecuteContextManager {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -385,12 +400,14 @@ impl ExecuteContextManager {
                         let rf_bound = rf.as_ref().map(|r| r.bind(py));
                         let tf_bound = tf.as_ref().map(|t| t.bind(py));
                         let mut py_vec = Vec::with_capacity(rows.len());
+                        let conv_opt = Some(&converters);
                         for row in &rows {
                             let out = row_to_py_with_factory(
                                 py,
                                 row,
                                 rf_bound.as_ref().map(|b| b.as_ref()),
                                 tf_bound.as_ref().map(|b| b.as_ref()),
+                                conv_opt,
                             )?;
                             py_vec.push(out.unbind());
                         }

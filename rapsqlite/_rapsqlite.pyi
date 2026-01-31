@@ -196,6 +196,27 @@ class Connection:
         func: Optional[Any],
         deterministic: bool = False,
     ) -> Coroutine[Any, Any, None]: ...
+    def create_aggregate(
+        self,
+        name: str,
+        num_params: int,
+        aggregate_class: Optional[Any],
+    ) -> Coroutine[Any, Any, None]: ...
+    def create_collation(
+        self,
+        name: str,
+        callable: Optional[Any],
+    ) -> Coroutine[Any, Any, None]: ...
+    def register_adapter(
+        self,
+        type: Type[Any],
+        adapter: Optional[Callable[[Any], Any]],
+    ) -> None: ...
+    def register_converter(
+        self,
+        typename: str,
+        converter: Optional[Callable[[bytes], Any]],
+    ) -> None: ...
     def set_trace_callback(
         self, callback: Optional[Any]
     ) -> Coroutine[Any, Any, None]: ...

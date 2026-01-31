@@ -4,6 +4,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use sqlx::{Column, Row, TypeInfo};
 
+use crate::types::Converters;
+
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{sqlite3_context, sqlite3_value};
 
@@ -154,39 +156,79 @@ pub(crate) unsafe fn py_to_sqlite_c_result(
     Ok(())
 }
 
+/// Get column value as Python bytes for register_converter (callable receives bytes).
+fn get_column_bytes<'py>(
+    py: Python<'py>,
+    row: &sqlx::sqlite::SqliteRow,
+    col: usize,
+) -> PyResult<Option<Bound<'py, PyBytes>>> {
+    use sqlx::Row;
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(col) {
+        return Ok(Some(PyBytes::new(py, &v)));
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<String>, _>(col) {
+        return Ok(Some(PyBytes::new(py, v.as_bytes())));
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(col) {
+        let b = v.to_string().into_bytes();
+        return Ok(Some(PyBytes::new(py, &b)));
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(col) {
+        let b = v.to_string().into_bytes();
+        return Ok(Some(PyBytes::new(py, &b)));
+    }
+    Ok(None)
+}
+
 /// Convert a SQLite value from sqlx Row to Python object.
+/// If converters is set and has a converter for the column's declared type, that converter(bytes) is used.
 pub(crate) fn sqlite_value_to_py<'py>(
     py: Python<'py>,
     row: &sqlx::sqlite::SqliteRow,
     col: usize,
     text_factory: Option<&Py<PyAny>>,
+    converters: Option<&Converters>,
 ) -> PyResult<Py<PyAny>> {
     use sqlx::{Column, Row, TypeInfo};
+
+    let type_name = row.columns()[col].type_info().name().to_ascii_uppercase();
+
+    // register_converter: if we have a converter for this declared type, call it with bytes
+    if let Some(conv) = converters {
+        let callable = {
+            let guard = conv.lock().unwrap();
+            guard.get(&type_name).map(|c| c.clone_ref(py))
+        };
+        if let Some(callable) = callable {
+            let callable_bound = callable.bind(py);
+            let bytes_py = get_column_bytes(py, row, col)?;
+            return Ok(match bytes_py {
+                Some(b) => callable_bound.call1((b,))?.unbind(),
+                None => py.None(),
+            });
+        }
+    }
 
     // Apply `text_factory` only for declared TEXT columns (aiosqlite/sqlite3 semantics).
     if let Some(tf) = text_factory {
         let tf_bound = tf.bind(py);
-        if !tf_bound.is_none() {
-            let declared = row.columns()[col].type_info().name().to_ascii_uppercase();
-            if declared == "TEXT" {
-                // Prefer String decoding (sqlx already decodes TEXT as UTF-8).
-                // We pass bytes to the text_factory, matching sqlite3's callable(bytes)->Any behavior.
-                if let Ok(opt_val) = row.try_get::<Option<String>, _>(col) {
-                    return Ok(match opt_val {
-                        Some(val) => {
-                            let arg = PyBytes::new(py, val.as_bytes());
-                            tf_bound.call1((arg,))?.unbind()
-                        }
-                        None => py.None(),
-                    });
-                }
+        if !tf_bound.is_none() && type_name == "TEXT" {
+            // Prefer String decoding (sqlx already decodes TEXT as UTF-8).
+            // We pass bytes to the text_factory, matching sqlite3's callable(bytes)->Any behavior.
+            if let Ok(opt_val) = row.try_get::<Option<String>, _>(col) {
+                return Ok(match opt_val {
+                    Some(val) => {
+                        let arg = PyBytes::new(py, val.as_bytes());
+                        tf_bound.call1((arg,))?.unbind()
+                    }
+                    None => py.None(),
+                });
             }
         }
     }
 
     // Fallback path: use column type information to reduce redundant probes.
     // Check declared type first, then fall back to type probing for robustness.
-    let type_name = row.columns()[col].type_info().name().to_ascii_uppercase();
 
     // Try type-specific extraction based on declared type (more efficient)
     match type_name.as_str() {
@@ -268,11 +310,12 @@ pub(crate) fn row_to_py_list<'py>(
     py: Python<'py>,
     row: &sqlx::sqlite::SqliteRow,
     text_factory: Option<&Py<PyAny>>,
+    converters: Option<&Converters>,
 ) -> PyResult<Bound<'py, PyList>> {
     let list = PyList::empty(py);
     let n = row_column_count(row);
     for i in 0..n {
-        let val = sqlite_value_to_py(py, row, i, text_factory)?;
+        let val = sqlite_value_to_py(py, row, i, text_factory, converters)?;
         list.append(val)?;
     }
     Ok(list)
@@ -285,8 +328,9 @@ pub(crate) fn row_to_py_with_factory<'py>(
     row: &sqlx::sqlite::SqliteRow,
     factory: Option<&Py<PyAny>>,
     text_factory: Option<&Py<PyAny>>,
+    converters: Option<&Converters>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let default = || row_to_py_list(py, row, text_factory).map(|l| l.into_any());
+    let default = || row_to_py_list(py, row, text_factory, converters).map(|l| l.into_any());
     let Some(f) = factory else {
         return default();
     };
@@ -302,7 +346,7 @@ pub(crate) fn row_to_py_with_factory<'py>(
                 let dict = PyDict::new(py);
                 for i in 0..n {
                     let col_name = row.columns()[i].name();
-                    let val = sqlite_value_to_py(py, row, i, text_factory)?;
+                    let val = sqlite_value_to_py(py, row, i, text_factory, converters)?;
                     dict.set_item(col_name, val)?;
                 }
                 Ok(dict.into_any())
@@ -310,7 +354,7 @@ pub(crate) fn row_to_py_with_factory<'py>(
             "tuple" => {
                 let mut vals = Vec::new();
                 for i in 0..n {
-                    vals.push(sqlite_value_to_py(py, row, i, text_factory)?);
+                    vals.push(sqlite_value_to_py(py, row, i, text_factory, converters)?);
                 }
                 let tuple = PyTuple::new(py, vals)?;
                 Ok(tuple.into_any())
@@ -333,7 +377,7 @@ pub(crate) fn row_to_py_with_factory<'py>(
                 let n = row_column_count(row);
                 for i in 0..n {
                     columns.push(row.columns()[i].name().to_string());
-                    let val = sqlite_value_to_py(py, row, i, text_factory)?;
+                    let val = sqlite_value_to_py(py, row, i, text_factory, converters)?;
                     values.push(val);
                 }
                 let raprow = raprow_class.call1((columns, values))?;
@@ -343,7 +387,7 @@ pub(crate) fn row_to_py_with_factory<'py>(
     }
 
     // Fallback: treat as callable
-    let list = row_to_py_list(py, row, text_factory)?;
+    let list = row_to_py_list(py, row, text_factory, converters)?;
     let result = f.call1((list,))?;
     Ok(result)
 }

@@ -60,6 +60,17 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 - **ROADMAP** — Section 3.8 items marked complete; v0.3.0 release criteria noted as met via documented differences; Last Updated 2026-01-31.
 - **Tests** — `test_connect_aiosqlite_compat_tuple_rows` in `test_aiosqlite_compat.py` verifies `connect(..., aiosqlite_compat=True)` yields tuple rows.
 
+### Added - Test improvements (Rust and Python) (2026-01-31)
+
+- **Rust unit tests** — `src/parameters.rs`: tests for `find_named_parameter_placeholders` (colon, at, dollar, multiple, underscore/numbers, none, colon-not-param). `src/errors.rs`: existing tests for `sanitize_query`. Total 16 Rust unit tests.
+- **Unified dev test run** — `scripts/dev_test.sh` now runs Rust unit tests first (via `scripts/run_rust_tests.sh` on macOS/Linux, or `cargo test` on Windows), then Python pytest. Single command for full test run.
+- **CI Rust tests** — Rust unit tests run on all platforms: `ubuntu-latest`, `macos-latest`, `windows-latest` (macOS uses `run_rust_tests.sh` for libpython).
+- **Python test noise** — `pyproject.toml` filterwarnings for Tokio/unraisable-exception warnings during parallel runs; `tests/README.md` documents full test run (Rust + Python), fixtures, and warning filter.
+
+### Fixed - Error sanitization (2026-01-31)
+
+- **`sanitize_query`** — Quoted sensitive values (e.g. `password='secret123'`) are now replaced in full with `***` instead of only the opening quote.
+
 ### Added - aiosqlite compatibility improvements (2026-01-30)
 
 - **`total_changes` sync property** — Now a synchronous property (not async method) for aiosqlite compatibility. Cached value updated after `begin()`/`commit()`/`rollback()`.
