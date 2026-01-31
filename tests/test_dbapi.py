@@ -263,7 +263,9 @@ async def test_cancellation_interrupts_and_connection_usable(unique_table_prefix
     tbl = unique_table_prefix
     conn = await dbapi.connect(":memory:")
     await conn.execute(f"CREATE TABLE {tbl} (a INT)")
-    await conn.executemany(f"INSERT INTO {tbl} VALUES (?)", [[i] for i in range(50)])
+    # Use enough rows and sleep so the task runs long enough for cancellation
+    # on slower CI (e.g. Windows) where timing can vary
+    await conn.executemany(f"INSERT INTO {tbl} VALUES (?)", [[i] for i in range(200)])
     await conn.commit()
 
     async def long_select():
@@ -272,10 +274,10 @@ async def test_cancellation_interrupts_and_connection_usable(unique_table_prefix
             row = await cur.fetchone()
             if row is None:
                 break
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.03)  # ~6s total; enough for cancellation on any platform
 
     t = asyncio.create_task(long_select())
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.15)  # Let task start and process a few rows
     t.cancel()
     with pytest.raises(asyncio.CancelledError):
         await t
