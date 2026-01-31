@@ -148,6 +148,8 @@ Differences and Limitations
 
 For a detailed compatibility analysis based on running the aiosqlite test suite, see :doc:`compatibility`. For per-test results when running the aiosqlite suite against rapsqlite, see ``docs/AIOSQLITE_TEST_RESULTS.md``.
 
+If you see test failures when running the aiosqlite test suite against rapsqlite (e.g. via ``scripts/run_aiosqlite_tests.py``), see ``docs/AIOSQLITE_TEST_RESULTS.md`` for a per-test breakdown and failure categories (fix / document / environment). Known intentional differences are listed there and in :doc:`compatibility`.
+
 Migrating from aiosqlite: Common Patterns
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -162,16 +164,21 @@ Migrating from aiosqlite: Common Patterns
 Known Differences
 ~~~~~~~~~~~~~~~~~
 
-1. **Row Format**: rapsqlite returns rows as lists ``[[1, 'a']]`` while aiosqlite returns tuples ``[(1, 'a')]``. For most code this is transparent since both support indexing. If you need tuples, use a row_factory:
+1. **Row Format**: rapsqlite returns rows as lists ``[[1, 'a']]`` by default; aiosqlite/sqlite3 return tuples ``[(1, 'a')]``. For drop-in compatibility (e.g. ``import rapsqlite as aiosqlite``) use ``aiosqlite_compat=True`` so rows are tuples by default. Otherwise set ``row_factory`` to the string ``"tuple"``:
 
    .. code-block:: python
 
-      # rapsqlite default (lists)
+      # Option A: Tuple rows by default (aiosqlite-compatible)
+      async with connect("example.db", aiosqlite_compat=True) as db:
+          rows = await db.fetch_all("SELECT id, name FROM users")
+          # rows = [(1, 'Alice'), (2, 'Bob')]
+
+      # Option B: rapsqlite default (lists)
       rows = await db.fetch_all("SELECT id, name FROM users")
       # rows = [[1, 'Alice'], [2, 'Bob']]
 
-      # To get tuples, set row_factory
-      db.row_factory = tuple
+      # Option C: Set row_factory on an existing connection
+      db.row_factory = "tuple"
       rows = await db.fetch_all("SELECT id, name FROM users")
       # rows = [(1, 'Alice'), (2, 'Bob')]
 
@@ -283,6 +290,8 @@ Testing Your Migration
 1. **Run existing tests**: Your aiosqlite tests should work with minimal changes
 2. **Use compatibility tests**: See ``tests/test_dropin_replacement.py`` for examples
 3. **Verify performance**: Use benchmarks to ensure performance meets expectations
+
+For best practices and common anti-patterns when using rapsqlite, see :doc:`advanced-usage`.
 
 Example: Complete Migration
 ---------------------------

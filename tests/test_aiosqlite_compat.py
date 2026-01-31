@@ -222,6 +222,20 @@ async def test_connection_properties(test_db):
 
 
 @pytest.mark.asyncio
+async def test_connect_aiosqlite_compat_tuple_rows(test_db):
+    """connect(..., aiosqlite_compat=True) sets row_factory to tuple for aiosqlite-style rows."""
+    async with connect(test_db, aiosqlite_compat=True) as db:
+        assert db.row_factory == "tuple"
+        await db.execute("CREATE TABLE ac (id INTEGER PRIMARY KEY, name TEXT)")
+        await db.execute("INSERT INTO ac (name) VALUES (?)", ["Alice"])
+        rows = await db.fetch_all("SELECT * FROM ac")
+        assert len(rows) == 1
+        assert isinstance(rows[0], tuple)
+        assert rows[0][0] == 1
+        assert rows[0][1] == "Alice"
+
+
+@pytest.mark.asyncio
 async def test_total_changes_and_in_transaction_semantics(test_db):
     """total_changes and in_transaction are now sync properties for aiosqlite compat."""
     async with connect(test_db) as db:

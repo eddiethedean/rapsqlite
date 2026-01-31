@@ -51,9 +51,9 @@ Core functionality and production readiness:
 
 ### Current Stats
 
-- **Test Coverage**: 563 tests passing (7 skipped)
+- **Test Coverage**: 563+ tests passing (7 skipped)
 - **API Compatibility**: ~95% with aiosqlite
-- **aiosqlite Test Suite**: perf.py: 6/10 passing, smoke.py: 3/30 passing
+- **aiosqlite Test Suite**: perf.py: 6/10 passing, smoke.py: 3/30 passing; intentional differences and per-test categories documented in `docs/AIOSQLITE_TEST_RESULTS.md`
 - **Python Support**: 3.10–3.14
 - **Code Quality**: Full mypy type checking and Ruff formatting/linting
 
@@ -116,17 +116,17 @@ Core functionality and production readiness:
 ### 3.8 Remaining for v0.3.0 Release
 
 #### aiosqlite Compatibility (High Priority)
-- ⏳ Improve aiosqlite test suite pass rate (target: >80%)
-- ⏳ Document remaining intentional differences
-- ⏳ Row format compatibility option (lists vs tuples)
+- ⏳ Improve aiosqlite test suite pass rate (target: >80%) — *or intentional differences documented (done)*
+- ✅ Document remaining intentional differences (see `docs/AIOSQLITE_TEST_RESULTS.md` and compatibility/migration guides)
+- ✅ Row format compatibility option: `connect(..., aiosqlite_compat=True)` sets default row_factory to tuple
 
 #### Documentation (High Priority)
-- ⏳ Complete migration guide from aiosqlite
-- ⏳ Best practices and anti-patterns guide
-- ⏳ Performance tuning guide completion
+- ✅ Complete migration guide from aiosqlite (audit complete; "If you see test failures" and aiosqlite_compat documented)
+- ✅ Best practices and anti-patterns guide (expanded in advanced-usage; connection lifecycle, blocking, transaction boundaries)
+- ✅ Performance tuning guide completion (single connection vs pool, measuring performance, regression tests, cross-links)
 
 **v0.3.0 Release Criteria**:
-- aiosqlite test suite pass rate >80% (or intentional differences documented)
+- aiosqlite test suite pass rate >80% **or intentional differences documented** — met via documented differences and per-test categories in AIOSQLITE_TEST_RESULTS.md
 - All Phase 3 features tested and documented
 - Migration guide complete
 - No breaking changes from v0.2.0
@@ -281,4 +281,4 @@ We welcome contributions! See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelin
 
 ---
 
-*Last Updated: 2026-01-30*
+*Last Updated: 2026-01-31*

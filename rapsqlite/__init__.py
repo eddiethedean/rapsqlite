@@ -294,6 +294,7 @@ def connect(
     iter_chunk_size: int = 64,
     idle_timeout: int | None = None,
     loop: Any = None,
+    aiosqlite_compat: bool = False,
     **kwargs: Any,
 ) -> "Connection":  # type: ignore[valid-type]
     """Connect to a SQLite database.
@@ -321,6 +322,11 @@ def connect(
             longer than this are closed. None (default) means no idle timeout.
         loop: Deprecated. Event loop (ignored). Accept-only for aiosqlite
             compatibility.
+        aiosqlite_compat: If True, set default row_factory to tuple so that
+            fetch_all, fetchone, cursor fetchall/fetchone return tuples (like
+            aiosqlite/sqlite3). Use for drop-in ``import rapsqlite as aiosqlite``
+            without changing code that expects tuple rows. Default False (rows
+            are lists).
         **kwargs: Additional arguments (currently ignored, reserved for future use)
 
     Returns:
@@ -400,6 +406,8 @@ def connect(
             raise
     if idle_timeout is not None:
         conn.idle_timeout = idle_timeout  # type: ignore[attr-defined]
+    if aiosqlite_compat:
+        conn.row_factory = "tuple"  # type: ignore[assignment]
     return conn  # type: ignore[no-any-return]
 
 

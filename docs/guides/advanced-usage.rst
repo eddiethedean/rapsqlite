@@ -767,13 +767,51 @@ Common Anti-Patterns
    async with connect("example.db") as conn:
        user = await conn.fetch_one("SELECT * FROM users WHERE id = ?", [user_id])
 
+❌ Abandoning Connections Without Closing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   # Bad: Connection left open; GC cleanup is best-effort and can cause issues
+   conn = await connect("example.db").__await__()
+   await conn.execute("INSERT INTO test VALUES (1)")
+   # conn never closed
+
+.. code-block:: python
+
+   # Good: Always use async with or explicitly close
+   async with connect("example.db") as conn:
+       await conn.execute("INSERT INTO test VALUES (1)")
+   # conn closed on exit
+
+❌ Blocking the Event Loop
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   # Bad: Blocking call inside async code stalls the event loop
+   async def bad():
+       async with connect("example.db") as conn:
+           time.sleep(1)  # Blocks entire event loop
+           await conn.fetch_all("SELECT * FROM test")
+
+.. code-block:: python
+
+   # Good: Use async sleep and keep I/O in rapsqlite (already non-blocking)
+   async def good():
+       await asyncio.sleep(1)
+       async with connect("example.db") as conn:
+           await conn.fetch_all("SELECT * FROM test")
+
 .. _best-practices:
 
 Best Practices
 --------------
 
-1. Always Use Context Managers
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1. Always Use Context Managers for Connections
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``async with connect(...)`` or ``async with Connection(...)`` so connections are always closed. Avoid holding a connection reference without ensuring ``close()`` is called (e.g. on error paths or when storing in globals).
 
 .. code-block:: python
 
@@ -781,8 +819,10 @@ Best Practices
    async with connect("example.db") as conn:
        await conn.execute("CREATE TABLE test (id INTEGER)")
 
-2. Use Transactions for Related Operations
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+2. Use Transactions for Related Operations and Keep Them Short
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Wrap related reads/writes in a single transaction. Keep transaction boundaries tight so locks are held briefly; avoid long-running work (e.g. network calls) inside a transaction.
 
 .. code-block:: python
 

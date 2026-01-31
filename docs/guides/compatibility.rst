@@ -32,31 +32,34 @@ Known API Differences
 3. Connection Properties
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Status**: ✅ **ALL PROPERTIES NOW SUPPORTED** - All connection properties are implemented.
+**Status**: ✅ **ALL PROPERTIES NOW SUPPORTED** - All connection properties are implemented. ``total_changes`` and ``in_transaction`` are synchronous properties in rapsqlite (no ``await``), matching aiosqlite behavior.
 
-**Note**: ``total_changes`` and ``in_transaction`` are async methods (not properties) in rapsqlite due to internal implementation, but functionally equivalent.
+4. Row Format (lists vs tuples)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-4. Row Factory: ``aiosqlite.Row``
+**Status**: ✅ **CONFIGURABLE** - rapsqlite default is list rows; aiosqlite/sqlite3 use tuples. Use ``connect(..., aiosqlite_compat=True)`` for tuple rows by default (drop-in ``import rapsqlite as aiosqlite``), or set ``conn.row_factory = "tuple"`` on an existing connection. See :doc:`migration-guide` for examples.
+
+5. Row Factory: ``aiosqlite.Row``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Status**: ✅ **NOW SUPPORTED** - ``rapsqlite.Row`` class is implemented with dict-like access (``row["column"]``, ``row[0]``, ``keys()``, ``values()``, ``items()``).
 
-5. ``executescript()`` Method
+6. ``executescript()`` Method
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Status**: ✅ **NOW IMPLEMENTED**
 
-6. ``load_extension()`` Method
+7. ``load_extension()`` Method
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Status**: ✅ **NOW IMPLEMENTED**
 
-7. Backup to sqlite3.Connection
+8. Backup to sqlite3.Connection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``rapsqlite.Connection.backup()`` now supports both ``rapsqlite.Connection`` and ``sqlite3.Connection`` targets. For sqlite3 targets, it uses Python's sqlite3 backup API over the on-disk database file (file-backed databases only; ``:memory:`` and non-file URIs are not supported).
 
-8. ``iterdump()`` Return Type
+9. ``iterdump()`` Return Type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 rapsqlite supports both async iteration and await-to-list:
@@ -70,7 +73,7 @@ rapsqlite supports both async iteration and await-to-list:
    # rapsqlite (backwards compatible)
    lines = await db.iterdump()  # Returns List[str]
 
-9. ``init_hook`` parameter
+10. ``init_hook`` parameter
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.

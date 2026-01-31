@@ -49,6 +49,17 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 
 ## [0.3.0-dev] - Unreleased
 
+### Added - Phase 3.8: v0.3.0 release readiness (2026-01-31)
+
+- **`connect(..., aiosqlite_compat=True)`** — When True, sets default row_factory to tuple so fetch_all/cursor fetchall return tuples (aiosqlite/sqlite3 default). Use for drop-in ``import rapsqlite as aiosqlite`` without code changes for row type.
+- **aiosqlite test results** — `docs/AIOSQLITE_TEST_RESULTS.md` updated with known intentional differences, per-test failure categories (fix/document/environment), and link to migration/compatibility guides. v0.3.0 release criterion "intentional differences documented" satisfied.
+- **Migration guide** — "If you see test failures" subsection; row format section updated with aiosqlite_compat and ``row_factory = "tuple"`` examples; cross-reference to advanced-usage for best practices.
+- **Compatibility guide** — Row format (lists vs tuples) and aiosqlite_compat documented; total_changes/in_transaction noted as sync properties.
+- **Best practices and anti-patterns** — Expanded in advanced-usage: connection lifecycle (abandoning connections without close), avoiding blocking the event loop, transaction boundaries (keep transactions short). Migration guide links to advanced-usage for best practices.
+- **Performance guide** — Single connection vs pool subsection; measuring performance and regression testing (timed_fetch_all, tests/test_performance.py); cross-links to migration-guide and advanced-usage.
+- **ROADMAP** — Section 3.8 items marked complete; v0.3.0 release criteria noted as met via documented differences; Last Updated 2026-01-31.
+- **Tests** — `test_connect_aiosqlite_compat_tuple_rows` in `test_aiosqlite_compat.py` verifies `connect(..., aiosqlite_compat=True)` yields tuple rows.
+
 ### Added - aiosqlite compatibility improvements (2026-01-30)
 
 - **`total_changes` sync property** — Now a synchronous property (not async method) for aiosqlite compatibility. Cached value updated after `begin()`/`commit()`/`rollback()`.
