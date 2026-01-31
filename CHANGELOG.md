@@ -7,29 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Versioning Strategy
 
-- **v0.1.x**: Phase 1 development (MVP and core features)
-- **v0.2.x**: Phase 2 development and release (feature-complete drop-in replacement)
-- **v0.3.x+**: Phase 3 development (advanced features, ecosystem integration) - **Current: v0.3.0-dev**
-- **v1.0.0**: Stable API release after Phase 3 completion, production-ready
+- **v0.1.x**: Phase 1 — Core functionality (MVP and core features)
+- **v0.2.x**: Phase 2 — Feature-complete drop-in replacement
+- **v0.3.x**: Phase 3 — Advanced features & aiosqlite parity - **Current: v0.3.0-dev**
+- **v1.0.0**: Phase 4 — Production ready (stable API release)
 
-## [1.0.0] - TBA (After Phase 3 Completion)
+## [1.0.0] - TBA (Phase 4: Production Ready)
 
 ### Overview
 
-- v1.0.0 will be released after Phase 3 completion, marking production stability
-- Phase 3 includes advanced features, ecosystem integration, and optimizations
-- See Phase 3 roadmap for planned features leading to v1.0.0
+- v1.0.0 will be released after Phase 4 completion, marking production stability
+- Phase 4 focuses on production tooling, cross-platform validation, and advanced features
+- See ROADMAP.md for detailed Phase 4 features
 
 ### Checklist for v1.0 Release (Future)
 
-- Phase 3 features complete
+- Phase 3 complete (v0.3.0 released)
+- Type system: `register_adapter` and `register_converter`
+- Cross-platform CI (Linux, macOS, Windows)
+- Performance regression tests
 - All tests passing across supported Python versions (3.10–3.14)
 - Comprehensive documentation and examples
-- Ecosystem integrations validated
-- Performance benchmarks meet targets
 - Production stability validated
 
-_Note: v1.0.0 release details will be added after Phase 3 completion._
+_Note: v1.0.0 release details will be added after Phase 4 completion._
+
+## [0.3.0] - TBA (Phase 3: Advanced Features & aiosqlite Parity)
+
+### Overview
+
+- v0.3.0 focuses on advanced features and aiosqlite API parity
+- Query helpers, transaction utilities, and framework integrations
+- Target: >80% aiosqlite test suite compatibility
+
+### Release Criteria
+
+- aiosqlite test suite pass rate >80% (or intentional differences documented)
+- All Phase 3 features tested and documented
+- Migration guide complete
+- No breaking changes from v0.2.0
 
 ## [0.3.0-dev] - Unreleased
 
