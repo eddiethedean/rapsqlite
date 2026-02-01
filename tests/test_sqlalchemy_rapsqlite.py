@@ -126,7 +126,9 @@ async def test_engine_begin_commit(
     engine = async_engine_sqlite
     table = unique_table_prefix
     async with engine.begin() as conn:
-        await conn.execute(text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, x INTEGER)"))
+        await conn.execute(
+            text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, x INTEGER)")
+        )
         await conn.execute(text(f"INSERT INTO {table} (id, x) VALUES (1, 42)"))
     async with engine.connect() as conn:
         res = await conn.execute(text(f"SELECT id, x FROM {table} WHERE id = 1"))
@@ -158,7 +160,9 @@ async def test_connection_explicit_transaction(
         await conn.execute(text(f"INSERT INTO {table} (id) VALUES (2)"))
         await conn.rollback()
     async with engine.connect() as conn:
-        rows = (await conn.execute(text(f"SELECT id FROM {table} ORDER BY id"))).fetchall()
+        rows = (
+            await conn.execute(text(f"SELECT id FROM {table} ORDER BY id"))
+        ).fetchall()
         assert len(rows) == 1 and rows[0][0] == 1
 
 
@@ -174,7 +178,9 @@ async def test_run_sync_create_drop_all(
     engine = async_engine_sqlite
     meta = MetaData()
     tname = unique_table_prefix
-    t = Table(tname, meta, Column("id", Integer, primary_key=True), Column("name", String(50)))
+    t = Table(
+        tname, meta, Column("id", Integer, primary_key=True), Column("name", String(50))
+    )
     async with engine.begin() as conn:
         await conn.run_sync(meta.drop_all)
         await conn.run_sync(meta.create_all)
@@ -198,18 +204,31 @@ async def test_result_all_scalars_mappings(
     engine = async_engine_sqlite
     meta = MetaData()
     tname = unique_table_prefix
-    t = Table(tname, meta, Column("id", Integer, primary_key=True), Column("label", String(20)))
+    t = Table(
+        tname,
+        meta,
+        Column("id", Integer, primary_key=True),
+        Column("label", String(20)),
+    )
     async with engine.begin() as conn:
         await conn.run_sync(meta.create_all)
-        await conn.execute(text(f"INSERT INTO {tname} (id, label) VALUES (1, 'a'), (2, 'b')"))
+        await conn.execute(
+            text(f"INSERT INTO {tname} (id, label) VALUES (1, 'a'), (2, 'b')")
+        )
     async with engine.connect() as conn:
         rows_all = (await conn.execute(select(t).order_by(t.c.id))).all()
         rows_scalars = (await conn.execute(select(t).order_by(t.c.id))).scalars().all()
-        rows_mappings = (await conn.execute(select(t).order_by(t.c.id))).mappings().all()
+        rows_mappings = (
+            (await conn.execute(select(t).order_by(t.c.id))).mappings().all()
+        )
         assert len(rows_all) == 2 and rows_all[0][0] == 1 and rows_all[0][1] == "a"
         # .scalars() returns first column only
         assert rows_scalars == [1, 2]
-        assert len(rows_mappings) == 2 and dict(rows_mappings[0])["id"] == 1 and dict(rows_mappings[0])["label"] == "a"
+        assert (
+            len(rows_mappings) == 2
+            and dict(rows_mappings[0])["id"] == 1
+            and dict(rows_mappings[0])["label"] == "a"
+        )
 
 
 @pytest.mark.asyncio
@@ -222,7 +241,12 @@ async def test_core_zero_row_select_result(
     engine = async_engine_sqlite
     meta = MetaData()
     tname = unique_table_prefix
-    t = Table(tname, meta, Column("id", Integer, primary_key=True), Column("label", String(20)))
+    t = Table(
+        tname,
+        meta,
+        Column("id", Integer, primary_key=True),
+        Column("label", String(20)),
+    )
     async with engine.begin() as conn:
         await conn.run_sync(meta.create_all)
     async with engine.connect() as conn:
@@ -252,7 +276,9 @@ async def test_core_scalars_first_and_one_or_none_zero_rows(
     engine = async_engine_sqlite
     meta = MetaData()
     tname = unique_table_prefix
-    t = Table(tname, meta, Column("id", Integer, primary_key=True), Column("x", Integer))
+    t = Table(
+        tname, meta, Column("id", Integer, primary_key=True), Column("x", Integer)
+    )
     async with engine.begin() as conn:
         await conn.run_sync(meta.create_all)
     async with engine.connect() as conn:
@@ -272,7 +298,9 @@ async def test_core_cursor_reuse_same_connection(
     engine = async_engine_sqlite
     meta = MetaData()
     tname = unique_table_prefix
-    t = Table(tname, meta, Column("id", Integer, primary_key=True), Column("n", Integer))
+    t = Table(
+        tname, meta, Column("id", Integer, primary_key=True), Column("n", Integer)
+    )
     async with engine.begin() as conn:
         await conn.run_sync(meta.create_all)
         await conn.execute(text(f"INSERT INTO {tname} (id, n) VALUES (1, 10), (2, 20)"))
@@ -298,7 +326,8 @@ async def test_parameterized_select_insert(
     meta = MetaData()
     tname = unique_table_prefix
     t = Table(
-        tname, meta,
+        tname,
+        meta,
         Column("id", Integer, primary_key=True),
         Column("a", Integer),
         Column("b", String(20)),
@@ -339,7 +368,9 @@ async def test_async_session_add_commit_get(
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         async with session.begin():
             session.add_all([User(name="alice"), User(name="bob")])
@@ -378,9 +409,13 @@ async def test_async_session_run_sync_metadata(
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text(f"INSERT INTO {table_name} (id, value) VALUES (1, 'x')"))
+        await conn.execute(
+            text(f"INSERT INTO {table_name} (id, value) VALUES (1, 'x')")
+        )
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         result = await session.execute(select(Item))
         items = result.scalars().all()
@@ -411,7 +446,9 @@ async def test_async_session_rollback(
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         session.add(Log(msg="first"))
         await session.commit()
@@ -443,10 +480,14 @@ async def test_integrity_error_propagates(
         await conn.execute(
             text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, email TEXT UNIQUE)")
         )
-        await conn.execute(text(f"INSERT INTO {table} (id, email) VALUES (1, 'a@b.com')"))
+        await conn.execute(
+            text(f"INSERT INTO {table} (id, email) VALUES (1, 'a@b.com')")
+        )
     with pytest.raises((sqlalchemy.exc.IntegrityError, Exception)) as exc_info:
         async with engine.begin() as conn:
-            await conn.execute(text(f"INSERT INTO {table} (id, email) VALUES (2, 'a@b.com')"))
+            await conn.execute(
+                text(f"INSERT INTO {table} (id, email) VALUES (2, 'a@b.com')")
+            )
     msg = str(exc_info.value).lower()
     assert "unique" in msg or "constraint" in msg or "integrity" in msg
 
@@ -524,7 +565,9 @@ async def test_concurrent_sessions(
     engine = async_engine_sqlite
     table = unique_table_prefix
     async with engine.begin() as conn:
-        await conn.execute(text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, n INTEGER)"))
+        await conn.execute(
+            text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, n INTEGER)")
+        )
         await conn.execute(text(f"INSERT INTO {table} (id, n) VALUES (1, 10)"))
 
     async def query_one(session_id: int):
@@ -561,9 +604,13 @@ async def test_concurrent_zero_row_selects(
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text(f"INSERT INTO {table_name} (id, name) VALUES (1, 'alice')"))
+        await conn.execute(
+            text(f"INSERT INTO {table_name} (id, name) VALUES (1, 'alice')")
+        )
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
 
     async def get_missing(_: int):
         async with async_session() as session:
@@ -600,7 +647,9 @@ async def test_async_session_add_all_many_rows(
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         async with session.begin():
             session.add_all([Item(name=f"item_{i}") for i in range(20)])
@@ -634,9 +683,13 @@ async def test_async_session_get_missing_key(
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text(f"INSERT INTO {table_name} (id, name) VALUES (1, 'alice')"))
+        await conn.execute(
+            text(f"INSERT INTO {table_name} (id, name) VALUES (1, 'alice')")
+        )
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         u1 = await session.get(User, 1)
         u_missing = await session.get(User, 999)
@@ -667,9 +720,13 @@ async def test_async_session_two_get_missing_in_row(
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text(f"INSERT INTO {table_name} (id, name) VALUES (1, 'alice')"))
+        await conn.execute(
+            text(f"INSERT INTO {table_name} (id, name) VALUES (1, 'alice')")
+        )
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         u_missing_999 = await session.get(User, 999)
         u_missing_998 = await session.get(User, 998)
@@ -700,9 +757,13 @@ async def test_async_session_select_one_or_none_zero_rows(
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text(f"INSERT INTO {table_name} (id, name) VALUES (1, 'alice')"))
+        await conn.execute(
+            text(f"INSERT INTO {table_name} (id, name) VALUES (1, 'alice')")
+        )
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         result = await session.execute(select(User).where(User.id == 999))
         one = result.scalars().one_or_none()
@@ -735,10 +796,14 @@ async def test_async_session_get_composite_pk_missing(
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.execute(
-            text(f"INSERT INTO {table_name} (id_a, id_b, name) VALUES (10, 20, 'exists')")
+            text(
+                f"INSERT INTO {table_name} (id_a, id_b, name) VALUES (10, 20, 'exists')"
+            )
         )
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         existing = await session.get(CompositeModel, (10, 20))
         missing = await session.get(CompositeModel, (1, 2))
@@ -755,10 +820,14 @@ async def test_result_multiple_fetches(
     engine = async_engine_sqlite
     tname = unique_table_prefix
     meta = MetaData()
-    t = Table(tname, meta, Column("id", Integer, primary_key=True), Column("x", Integer))
+    t = Table(
+        tname, meta, Column("id", Integer, primary_key=True), Column("x", Integer)
+    )
     async with engine.begin() as conn:
         await conn.run_sync(meta.create_all)
-        await conn.execute(text(f"INSERT INTO {tname} (id, x) VALUES (1, 10), (2, 20), (3, 30)"))
+        await conn.execute(
+            text(f"INSERT INTO {tname} (id, x) VALUES (1, 10), (2, 20), (3, 30)")
+        )
     async with engine.connect() as conn:
         res = await conn.execute(select(t).order_by(t.c.id))
         one = res.fetchone()
@@ -791,7 +860,9 @@ async def test_core_insert_returning(
     async with engine.begin() as conn:
         await conn.run_sync(meta.create_all)
     async with engine.connect() as conn:
-        res = await conn.execute(insert(t).values(label="a").returning(t.c.id, t.c.label))
+        res = await conn.execute(
+            insert(t).values(label="a").returning(t.c.id, t.c.label)
+        )
         row = res.fetchone()
         await conn.commit()
     assert row is not None
@@ -821,7 +892,9 @@ async def test_async_session_rollback_then_commit(
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         session.add(Event(name="rolled"))
         await session.rollback()

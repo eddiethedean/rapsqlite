@@ -35,6 +35,7 @@ def _parse_select_column_names(sql: str) -> list[str] | None:
         return None
     return names
 
+
 # DBAPI exception hierarchy: ensure OperationalError etc. are subclasses of DatabaseError
 # (pyo3 create_exception can expose types where issubclass(OperationalError, DatabaseError) is False)
 try:
@@ -124,7 +125,13 @@ class AsyncCursor:
     the driver's runtime (e.g. Tokio) is not available.
     """
 
-    __slots__ = ("_conn", "_raw", "_result_buffer", "_result_index", "_cached_description")
+    __slots__ = (
+        "_conn",
+        "_raw",
+        "_result_buffer",
+        "_result_index",
+        "_cached_description",
+    )
 
     def __init__(self, conn: "AsyncConnection", raw: _Cursor) -> None:
         self._conn = conn
@@ -231,6 +238,7 @@ class AsyncCursor:
                     (f"column_{i}", None, None, None, None, None, None)
                     for i in range(n)
                 )
+
         await self._with_lock(_do)  # type: ignore[no-any-return]
 
     async def fetchone(self) -> Any:
@@ -249,13 +257,15 @@ class AsyncCursor:
             chunk = self._result_buffer[self._result_index : self._result_index + n]
             self._result_index += len(chunk)
             return chunk
+
         async def _do() -> list[Any]:
             return await self._raw.fetchmany(size)  # type: ignore[no-any-return]
+
         return await self._with_lock(_do)  # type: ignore[no-any-return]
 
     async def fetchall(self) -> list[Any]:
         if self._result_buffer is not None:
-            rest = self._result_buffer[self._result_index:]
+            rest = self._result_buffer[self._result_index :]
             self._result_index = len(self._result_buffer)
             return rest
         return await self._with_lock(self._raw.fetchall)  # type: ignore[no-any-return]
@@ -264,8 +274,10 @@ class AsyncCursor:
         # Keep _result_buffer so fetchone/fetchall can still be called after close()
         # (e.g. SQLAlchemy may close the cursor before consuming the result).
         self._result_index = 0
+
         async def _do() -> None:
             await self._raw.close()
+
         await self._with_lock(_do)
 
     def __aiter__(self) -> AsyncCursor:

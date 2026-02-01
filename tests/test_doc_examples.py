@@ -6,7 +6,6 @@ docs/api-reference/row.rst, and docs/guides/migration-guide.rst. Run with:
 Or run the script: python scripts/run_doc_examples.py
 """
 
-import asyncio
 import os
 import tempfile
 

@@ -100,6 +100,7 @@ async def row_api_example():
 async def migration_basic_connection():
     """Docs migration-guide: Basic Connection (output: [[1, 'hello']])."""
     import rapsqlite as aiosqlite
+
     path = _temp_db()
     try:
         async with aiosqlite.connect(path) as db:

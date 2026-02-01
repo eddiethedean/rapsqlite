@@ -145,15 +145,9 @@ class SQLiteDialect_rapsqlite(SQLiteDialect_pysqlite):
 
         def connect(dbapi_connection: Any) -> None:
             # Pool passes AsyncAdapt_dbapi_connection; raw is in ._connection
-            raw = getattr(
-                dbapi_connection, "_connection", dbapi_connection
-            )
-            _await(raw.create_function(
-                "regexp", 2, _regexp, **create_func_kw
-            ))
-            _await(raw.create_function(
-                "floor", 1, math.floor, **create_func_kw
-            ))
+            raw = getattr(dbapi_connection, "_connection", dbapi_connection)
+            _await(raw.create_function("regexp", 2, _regexp, **create_func_kw))
+            _await(raw.create_function("floor", 1, math.floor, **create_func_kw))
 
         return connect
 
