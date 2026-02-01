@@ -13,6 +13,8 @@ import pytest
 
 from rapsqlite import Row, connect
 
+from conftest import cleanup_db
+
 pytestmark = [pytest.mark.integration]
 
 
@@ -33,7 +35,7 @@ async def test_quickstart_basic_connection():
             rows = await conn.fetch_all("SELECT * FROM users")
             assert rows == [[1, "Alice"]]
     finally:
-        os.unlink(path)
+        cleanup_db(path)
 
 
 @pytest.mark.asyncio
@@ -47,7 +49,7 @@ async def test_installation_verify():
             rows = await conn.fetch_all("SELECT * FROM test")
             assert rows == [[1]]
     finally:
-        os.unlink(path)
+        cleanup_db(path)
 
 
 @pytest.mark.asyncio
@@ -61,7 +63,7 @@ async def test_index_quick_example():
             rows = await conn.fetch_all("SELECT * FROM test")
             assert rows == [[1, "hello"]]
     finally:
-        os.unlink(path)
+        cleanup_db(path)
 
 
 @pytest.mark.asyncio
@@ -80,7 +82,7 @@ async def test_quickstart_cursor_iteration():
                 collected.append(row)
             assert collected == [[1, "Alice"], [2, "Bob"]]
     finally:
-        os.unlink(path)
+        cleanup_db(path)
 
 
 @pytest.mark.asyncio
@@ -97,7 +99,7 @@ async def test_row_api_example():
             assert rows[0][0] == 1
             assert list(rows[0].keys()) == ["id", "name"]
     finally:
-        os.unlink(path)
+        cleanup_db(path)
 
 
 @pytest.mark.asyncio
@@ -113,4 +115,4 @@ async def test_migration_basic_connection():
             rows = await db.fetch_all("SELECT * FROM test")
             assert rows == [[1, "hello"]]
     finally:
-        os.unlink(path)
+        cleanup_db(path)
