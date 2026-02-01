@@ -1,9 +1,15 @@
 """Smoke test for FastAPI + rapsqlite integration pattern."""
 
+import sys
 from typing import Any, AsyncIterator
 
 import pytest
 
+if sys.version_info >= (3, 14):
+    pytest.skip(
+        "FastAPI/Pydantic not yet compatible with Python 3.14",
+        allow_module_level=True,
+    )
 pytest.importorskip("fastapi")
 
 from fastapi import Depends, FastAPI

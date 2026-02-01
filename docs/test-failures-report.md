@@ -163,7 +163,7 @@ pytest tests/test_sqlalchemy_rapsqlite.py::test_connection_explicit_transaction 
        -v -k rapsqlite --tb=short
 
 # Rebuild after Rust changes
-unset CONDA_PREFIX && maturin develop --release
+maturin develop --release
 ```
 
 ### Key File Locations

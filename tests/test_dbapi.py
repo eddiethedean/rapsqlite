@@ -259,14 +259,15 @@ async def test_concurrent_connection_usage_raises(unique_table_prefix):
     conn = await dbapi.connect(":memory:")
     await conn.execute(f"CREATE TABLE {tbl} (a INT)")
 
+    # Run many concurrent execute() so at least two overlap; one will raise
+    # ProgrammingError (single pair can finish too fast and never overlap).
     async def run_select():
         cur = await conn.execute("SELECT 1")
         await cur.fetchone()
         await cur.close()
 
-    # Run two selects concurrently; one should raise ProgrammingError
     with pytest.raises(dbapi.ProgrammingError, match="Concurrent operation"):
-        await asyncio.gather(run_select(), run_select())
+        await asyncio.gather(*[run_select() for _ in range(30)])
 
     await conn.close()
 

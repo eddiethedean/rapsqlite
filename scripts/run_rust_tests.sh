@@ -27,7 +27,7 @@ if [[ -n "$BIN" ]]; then
             # Detect libpython required by the test binary (e.g. libpython3.12.dylib)
             LIBNAME=$(otool -L "$BIN" 2>/dev/null | awk '/libpython[0-9]+\.[0-9]+\.(dylib|so)/ { gsub(/.*\//, ""); print $1; exit }')
             if [[ -n "$LIBNAME" ]]; then
-                for base in "$HOME/.pyenv/versions"/*/lib /opt/homebrew/opt/python*/lib /usr/local/lib "$HOME/anaconda3/lib" "$HOME/miniconda3/lib" /opt/anaconda3/lib; do
+                for base in "$HOME/.pyenv/versions"/*/lib /opt/homebrew/opt/python*/lib /usr/local/lib; do
                     if [[ -f "${base}/${LIBNAME}" ]]; then
                         LIBDIR="$base"
                         break

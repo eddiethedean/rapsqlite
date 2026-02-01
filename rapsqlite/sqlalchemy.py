@@ -63,8 +63,9 @@ class _RapsqliteCursor(AsyncAdapt_dbapi_cursor):
 
     @property
     def description(self) -> Any:
-        if "description" in self._soft_closed_memoized:
-            return self._soft_closed_memoized["description"]
+        soft_memo = getattr(self, "_soft_closed_memoized", None)
+        if soft_memo is not None and "description" in soft_memo:
+            return soft_memo["description"]
         desc = self._cursor.description if self._cursor is not None else None
         if desc is not None:
             self._last_description = desc
