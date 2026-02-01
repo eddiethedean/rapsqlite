@@ -11,10 +11,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Allow importing rapsqlite from project root when run as script
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from rapsqlite import connect, Row
+# Use installed rapsqlite if available (e.g. CI); otherwise project root for local dev
+try:
+    from rapsqlite import connect, Row
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from rapsqlite import connect, Row
 
 
 def _temp_db():
