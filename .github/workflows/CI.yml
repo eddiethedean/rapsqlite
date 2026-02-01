@@ -91,9 +91,14 @@ jobs:
     - name: Run doc examples (verify code in docs runs)
       shell: bash
       run: |
+        # Run from temp dir so "import rapsqlite" uses the installed wheel, not the source tree
         if [ "${{ runner.os }}" == "Windows" ]; then
+          export TEMP="D:/a/_temp"
+          export TMP="D:/a/_temp"
+          cd "$TEMP" || cd "$TMP"
           python "${{ github.workspace }}/scripts/run_doc_examples.py"
         else
+          cd /tmp
           python ${{ github.workspace }}/scripts/run_doc_examples.py
         fi
 
