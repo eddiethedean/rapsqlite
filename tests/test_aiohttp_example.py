@@ -15,7 +15,7 @@ async def _fetch_items(db_path: str) -> dict[str, Any]:
     In a real aiohttp app, this would be called from a request handler
     and the result would be passed to web.json_response().
     """
-    async with connect(db_path) as conn:
+    async with connect(db_path) as conn:  # type: ignore[attr-defined]
         rows = await conn.fetch_all("SELECT id, name FROM items")
         return {"items": [list(r) for r in rows]}
 
@@ -30,7 +30,7 @@ async def test_aiohttp_rapsqlite_smoke(test_db: str) -> None:
     requires network sockets.
     """
     # Set up the database
-    async with connect(test_db) as conn:
+    async with connect(test_db) as conn:  # type: ignore[attr-defined]
         await conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("INSERT INTO items (id, name) VALUES (1, 'foo')")
 

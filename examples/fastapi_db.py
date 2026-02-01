@@ -22,7 +22,7 @@ DB_PATH = str(Path(__file__).resolve().parent / "fastapi_example.db")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    async with connect(DB_PATH) as conn:
+    async with connect(DB_PATH) as conn:  # type: ignore[attr-defined]
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)"
         )
@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 async def get_db() -> AsyncIterator[Any]:
-    async with connect(DB_PATH) as conn:
+    async with connect(DB_PATH) as conn:  # type: ignore[attr-defined]
         yield conn  # FastAPI injects the yielded connection into route params
 
 

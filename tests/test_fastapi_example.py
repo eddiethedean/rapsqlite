@@ -16,7 +16,7 @@ def _make_app(db_path: str) -> FastAPI:
     app = FastAPI()
 
     async def get_db() -> AsyncIterator[Any]:
-        async with connect(db_path) as conn:
+        async with connect(db_path) as conn:  # type: ignore[attr-defined]
             yield conn
 
     @app.get("/")
@@ -29,7 +29,7 @@ def _make_app(db_path: str) -> FastAPI:
 
 @pytest.mark.asyncio
 async def test_fastapi_rapsqlite_smoke(test_db: str) -> None:
-    async with connect(test_db) as conn:
+    async with connect(test_db) as conn:  # type: ignore[attr-defined]
         await conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("INSERT INTO items (id, name) VALUES (1, 'foo')")
     app = _make_app(test_db)

@@ -43,7 +43,14 @@ fn sanitize_query(query: &str) -> String {
                     .unwrap_or(start);
 
                 let end = if start < query.len() {
-                    let first = query[start..].chars().next().unwrap();
+                    // Use unwrap_or to handle empty slice edge case
+                    let first = match query[start..].chars().next() {
+                        Some(c) => c,
+                        None => {
+                            // Empty slice, nothing to sanitize
+                            continue;
+                        }
+                    };
                     if first == '\'' || first == '"' {
                         // Quoted value: find matching closing quote
                         let rest = &query[start + first.len_utf8()..];
@@ -170,5 +177,21 @@ mod tests {
         let out = sanitize_query(q);
         assert!(out.contains("***"));
         assert!(!out.contains("abc123"));
+    }
+
+    #[test]
+    fn test_sanitize_query_keyword_equals_at_end_no_panic() {
+        // Edge case: keyword followed by = at end of string (no value).
+        // Ensures we don't panic on empty slice in chars().next().
+        let q = "password=";
+        let out = sanitize_query(q);
+        assert_eq!(out, "password=");
+    }
+
+    #[test]
+    fn test_sanitize_query_token_equals_at_end_no_panic() {
+        let q = "token=";
+        let out = sanitize_query(q);
+        assert_eq!(out, "token=");
     }
 }

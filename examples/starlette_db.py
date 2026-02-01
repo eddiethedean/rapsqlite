@@ -25,7 +25,7 @@ DB_PATH = str(Path(__file__).resolve().parent / "starlette_example.db")
 
 @asynccontextmanager
 async def lifespan(app: Starlette):
-    async with connect(DB_PATH) as conn:
+    async with connect(DB_PATH) as conn:  # type: ignore[attr-defined]
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)"
         )
@@ -34,7 +34,7 @@ async def lifespan(app: Starlette):
 
 
 async def homepage(request: Request) -> JSONResponse:
-    async with connect(DB_PATH) as conn:
+    async with connect(DB_PATH) as conn:  # type: ignore[attr-defined]
         rows = await conn.fetch_all("SELECT id, name FROM items")
         return JSONResponse({"items": [list(r) for r in rows]})
 

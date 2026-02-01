@@ -6822,37 +6822,97 @@ impl Connection {
                     let mut target_pool_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
                     let target_handle: SendPtr<sqlite3>;
                     if target_is_rapsqlite {
-                        let target_path: String = target_path_opt.clone().unwrap();
-                        let target_pool: Arc<Mutex<Option<SqlitePool>>> = target_pool_opt.clone().unwrap();
+                        // These are guaranteed to be Some when target_is_rapsqlite is true,
+                        // but use ok_or_else for defensive programming and clear error messages.
+                        let target_path: String = target_path_opt.clone().ok_or_else(|| {
+                            OperationalError::new_err("Internal error: target path not available")
+                        })?;
+                        let target_pool: Arc<Mutex<Option<SqlitePool>>> =
+                            target_pool_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err("Internal error: target pool not available")
+                            })?;
                         let target_pragmas: Arc<StdMutex<Vec<(String, String)>>> =
-                            target_pragmas_opt.clone().unwrap();
+                            target_pragmas_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err("Internal error: target pragmas not available")
+                            })?;
                         let target_pool_size: Arc<StdMutex<Option<usize>>> =
-                            target_pool_size_opt.clone().unwrap();
+                            target_pool_size_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err("Internal error: target pool_size not available")
+                            })?;
                         let target_connection_timeout_secs: Arc<StdMutex<Option<u64>>> =
-                            target_connection_timeout_secs_opt.clone().unwrap();
+                            target_connection_timeout_secs_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target connection_timeout_secs not available",
+                                )
+                            })?;
                         let target_idle_timeout_secs: Arc<StdMutex<Option<u64>>> =
-                            target_idle_timeout_secs_opt.clone().unwrap();
+                            target_idle_timeout_secs_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target idle_timeout_secs not available",
+                                )
+                            })?;
                         let target_transaction_state: Arc<Mutex<TransactionState>> =
-                            target_transaction_state_opt.clone().unwrap();
+                            target_transaction_state_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target transaction_state not available",
+                                )
+                            })?;
                         let target_transaction_connection: Arc<
                             Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
-                        > = target_transaction_connection_opt.clone().unwrap();
+                        > = target_transaction_connection_opt.clone().ok_or_else(|| {
+                            OperationalError::new_err(
+                                "Internal error: target transaction_connection not available",
+                            )
+                        })?;
                         let target_callback_connection: Arc<
                             Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
-                        > = target_callback_connection_opt.clone().unwrap();
+                        > = target_callback_connection_opt.clone().ok_or_else(|| {
+                            OperationalError::new_err(
+                                "Internal error: target callback_connection not available",
+                            )
+                        })?;
                         let target_load_extension_enabled: Arc<StdMutex<bool>> =
-                            target_load_extension_enabled_opt.clone().unwrap();
-                        let target_user_functions: UserFunctions = target_user_functions_opt.clone().unwrap();
+                            target_load_extension_enabled_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target load_extension_enabled not available",
+                                )
+                            })?;
+                        let target_user_functions: UserFunctions =
+                            target_user_functions_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target user_functions not available",
+                                )
+                            })?;
                         let target_user_aggregates: UserAggregates =
-                            target_user_aggregates_opt.clone().unwrap();
+                            target_user_aggregates_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target user_aggregates not available",
+                                )
+                            })?;
                         let target_user_collations: UserCollations =
-                            target_user_collations_opt.clone().unwrap();
+                            target_user_collations_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target user_collations not available",
+                                )
+                            })?;
                         let target_trace_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
-                            target_trace_callback_opt.clone().unwrap();
+                            target_trace_callback_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target trace_callback not available",
+                                )
+                            })?;
                         let target_authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
-                            target_authorizer_callback_opt.clone().unwrap();
+                            target_authorizer_callback_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target authorizer_callback not available",
+                                )
+                            })?;
                         let target_progress_handler: ProgressHandler =
-                            target_progress_handler_opt.clone().unwrap();
+                            target_progress_handler_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target progress_handler not available",
+                                )
+                            })?;
 
                         let target_in_transaction = {
                             let g = target_transaction_state.lock().await;

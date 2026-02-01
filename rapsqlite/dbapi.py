@@ -145,7 +145,10 @@ class AsyncCursor:
 
         async def _run() -> Any:
             try:
-                await asyncio.wait_for(self._conn._op_lock.acquire(), timeout=1e-6)
+                # Timeout of 1e-4s (100 microseconds) allows lock acquisition under normal
+                # conditions while still failing quickly if another operation is in progress.
+                # This is more robust than 1e-6 which could fail even for unlocked locks under load.
+                await asyncio.wait_for(self._conn._op_lock.acquire(), timeout=1e-4)
             except asyncio.TimeoutError:
                 raise ProgrammingError(
                     "Concurrent operation on same connection not allowed; "
@@ -313,7 +316,10 @@ class AsyncConnection:
     async def _with_op_lock(self, coro_factory) -> Any:
         """Run coro_factory() while holding op lock; raise ProgrammingError if busy."""
         try:
-            await asyncio.wait_for(self._op_lock.acquire(), timeout=1e-6)
+            # Timeout of 1e-4s (100 microseconds) allows lock acquisition under normal
+            # conditions while still failing quickly if another operation is in progress.
+            # This is more robust than 1e-6 which could fail even for unlocked locks under load.
+            await asyncio.wait_for(self._op_lock.acquire(), timeout=1e-4)
         except asyncio.TimeoutError:
             raise ProgrammingError(
                 "Concurrent operation on same connection not allowed; "

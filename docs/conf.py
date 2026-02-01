@@ -50,7 +50,7 @@ autodoc_member_order = "bysource"
 autoclass_content = "both"  # Include both class and __init__ docstrings
 
 # Don't mock rapsqlite - Read the Docs installs this repo (builds extension)
-autodoc_mock_imports = []
+autodoc_mock_imports: list[str] = []
 
 # Templates
 templates_path = ["_templates"]

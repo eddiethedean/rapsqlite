@@ -96,14 +96,65 @@ Use ``rapsqlite.dbapi`` when integrating with async frameworks that require a DB
 SQLAlchemy
 ~~~~~~~~~~
 
-A ``sqlite+rapsqlite`` dialect is provided. Install with ``pip install 'rapsqlite[sqlalchemy]'``, then:
+rapsqlite provides a ``sqlite+rapsqlite`` dialect for SQLAlchemy 2.0+. Full ORM support is
+implemented: ``AsyncSession``, ``session.add``/``add_all``, ``session.commit``, ``session.get``,
+transaction rollback, and ``INSERT...RETURNING`` identity fetch all work correctly.
+
+**Requirements**: SQLAlchemy 2.0 or newer (``pip install 'rapsqlite[sqlalchemy]'`` installs
+``sqlalchemy>=2.0``).
+
+**Core usage:**
 
 .. code-block:: python
 
    import rapsqlite.sqlalchemy  # register dialect
+   from sqlalchemy import text
    from sqlalchemy.ext.asyncio import create_async_engine
+
    engine = create_async_engine("sqlite+rapsqlite:///path.db")
    # or sqlite+rapsqlite:///:memory:
+
+   async with engine.connect() as conn:
+       result = await conn.execute(text("SELECT 1"))
+       print(result.fetchone())
+
+**ORM usage (AsyncSession):**
+
+.. code-block:: python
+
+   import rapsqlite.sqlalchemy
+   from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+   from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+   from sqlalchemy import String, select
+
+   class Base(DeclarativeBase):
+       pass
+
+   class User(Base):
+       __tablename__ = "users"
+       id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+       name: Mapped[str] = mapped_column(String(50))
+
+   engine = create_async_engine("sqlite+rapsqlite:///app.db")
+   async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+   async with engine.begin() as conn:
+       await conn.run_sync(Base.metadata.create_all)
+
+   async with async_session() as session:
+       async with session.begin():
+           session.add_all([User(name="alice"), User(name="bob")])
+
+   async with async_session() as session:
+       result = await session.execute(select(User).order_by(User.id))
+       users = result.scalars().all()
+       # users has 2 User instances
+
+**Transaction rollback** with ``on_connect`` UDFs (e.g. ``regexp``, ``floor``) works correctly:
+``conn.begin()``, inserts, and ``conn.rollback()`` behave as expected.
+
+**Tests**: The suite ``tests/test_sqlalchemy_rapsqlite.py`` validates Core and ORM patterns
+against both ``sqlite+rapsqlite`` and ``sqlite+aiosqlite``.
 
 See ``docs/true_async_dbapi_spec.md`` for the full async DBAPI contract.
 

@@ -49,6 +49,22 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 
 ## [0.3.0-dev] - Unreleased
 
+### Fixed - Bug fixes (2026-02-01)
+
+- **Connection `__del__`** — Replaced invalid `asyncio.create_task()` (fails from sync context) with `asyncio.ensure_future()` for proper event-loop scheduling. Added `_cleanup_conn_state(self)` at start of `__del__` to prevent memory leak when connections are GC'd without `close()`.
+- **Connection state memory leak** — `_cleanup_conn_state` is now called from `__del__` before scheduling close, so `_connection_state` entries are removed when connections are abandoned.
+- **Connection state race condition** — Added `threading.Lock()` to protect `_connection_state` access in `_get_conn_state()` and `_cleanup_conn_state()`.
+- **transaction_retry** — Fixed unreachable code after loop; now handles `max_retries=0` by raising `RuntimeError("max_retries must be at least 1")`.
+- **backup() panic risk** — Replaced 15 `.unwrap()` calls in `src/connection.rs` with `.ok_or_else()` for proper error handling.
+- **Error sanitization panic risk** — `sanitize_query` in `src/errors.rs` now handles empty slice edge case in `chars().next()` without panicking.
+- **DBAPI lock timeout** — Increased from `1e-6` to `1e-4` seconds (100 microseconds) in `rapsqlite/dbapi.py` for more robust lock acquisition under load while still failing quickly for concurrent operations.
+- **docs/AIOSQLITE_TEST_RESULTS.md** — Restored by running `scripts/run_aiosqlite_tests.py` (file had been deleted but was referenced in 8+ locations).
+
+### Added - Tests for bug fixes (2026-02-01)
+
+- **`tests/test_bug_fixes.py`** — New test module: `test_transaction_retry_max_retries_zero_raises`, `test_transaction_retry_max_retries_one_succeeds`, `test_connection_state_cleanup_on_close`, `test_concurrent_total_changes_in_transaction_access`, `test_connection_gc_cleanup_does_not_leak`.
+- **`src/errors.rs`** — New Rust tests: `test_sanitize_query_keyword_equals_at_end_no_panic`, `test_sanitize_query_token_equals_at_end_no_panic`.
+
 ### Fixed - SQLAlchemy and create_function (2026-01-31)
 
 - **SQLAlchemy ORM INSERT...RETURNING doubled rows** — ExecuteContextManager now fetches and caches RETURNING rows for INSERT/UPDATE/DELETE via `returns_result_rows` and `_set_select_results`, so `cursor.fetchall()` does not re-execute. Fixes `test_async_session_add_commit_get` and `test_async_session_add_all_many_rows`.

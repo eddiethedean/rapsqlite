@@ -497,7 +497,7 @@ async def test_concurrent_batch_inserts():
                 )
 
             async def batch_writer(worker_id: int):
-                async with rapsqlite.connect(test_db) as conn:
+                async with rapsqlite.connect(test_db) as conn:  # type: ignore[attr-defined]
                     params = [
                         [worker_id * 10000 + i]
                         for i in range(CONCURRENT_BATCH_ROWS_PER_WRITER)

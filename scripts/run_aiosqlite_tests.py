@@ -170,7 +170,7 @@ def parse_pytest_output(output: str, rel_path: str) -> list[dict]:
             error_snippet = ""
             if status == "FAILED":
                 # Collect next few lines for error context (up to 5 non-empty)
-                snippet_lines = []
+                snippet_lines: list[str] = []
                 for j in range(i + 1, min(i + 30, len(lines))):
                     nl = lines[j].strip()
                     if not nl or nl.startswith("=") or nl.startswith("-"):

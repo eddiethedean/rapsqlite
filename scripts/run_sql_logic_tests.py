@@ -55,7 +55,7 @@ async def run_test(path: Path) -> bool:
     if not statements:
         print(f"  {path.name}: no statements (skip)")
         return True
-    async with connect(":memory:") as db:
+    async with connect(":memory:") as db:  # type: ignore[attr-defined]
         for stmt in statements[:-1]:
             await db.execute(stmt)
         last = statements[-1]

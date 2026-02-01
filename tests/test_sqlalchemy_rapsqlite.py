@@ -17,6 +17,7 @@ pytest.importorskip("sqlalchemy")
 import rapsqlite.sqlalchemy  # noqa: F401 -- register dialect before create_async_engine
 from sqlalchemy import MetaData, Table, Column, Integer, String, text
 from sqlalchemy import insert, select
+from sqlalchemy.sql.expression import false
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy.pool import StaticPool
 
@@ -24,7 +25,7 @@ from sqlalchemy.pool import StaticPool
 @pytest.fixture(params=["rapsqlite", "aiosqlite"])
 def sqlite_dialect(request: pytest.FixtureRequest) -> str:
     """Parametrize dialect so tests run with both rapsqlite and aiosqlite."""
-    dialect = request.param
+    dialect: str = request.param
     if dialect == "aiosqlite":
         pytest.importorskip("aiosqlite")
     return dialect
@@ -250,19 +251,19 @@ async def test_core_zero_row_select_result(
     async with engine.begin() as conn:
         await conn.run_sync(meta.create_all)
     async with engine.connect() as conn:
-        res = await conn.execute(select(t).where(1 == 0))
+        res = await conn.execute(select(t).where(false()))
         rows = res.fetchall()
         assert rows == []
         # Valid description so SQLAlchemy does not see closed/empty result
         assert res.keys() is not None and len(res.keys()) >= 1
     async with engine.connect() as conn:
-        scalars_empty = (await conn.execute(select(t).where(1 == 0))).scalars().all()
+        scalars_empty = (await conn.execute(select(t).where(false()))).scalars().all()
         assert scalars_empty == []
     # Two 0-row selects in a row on same connection (7c)
     async with engine.connect() as conn:
-        r1 = await conn.execute(select(t).where(1 == 0))
+        r1 = await conn.execute(select(t).where(false()))
         assert r1.fetchall() == []
-        r2 = await conn.execute(select(t).where(1 == 0))
+        r2 = await conn.execute(select(t).where(false()))
         assert r2.fetchall() == []
 
 
@@ -282,10 +283,10 @@ async def test_core_scalars_first_and_one_or_none_zero_rows(
     async with engine.begin() as conn:
         await conn.run_sync(meta.create_all)
     async with engine.connect() as conn:
-        res = await conn.execute(select(t).where(1 == 0))
+        res = await conn.execute(select(t).where(false()))
         assert res.scalars().first() is None
     async with engine.connect() as conn:
-        res = await conn.execute(select(t).where(1 == 0))
+        res = await conn.execute(select(t).where(false()))
         assert res.scalars().one_or_none() is None
 
 

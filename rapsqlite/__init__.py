@@ -52,6 +52,7 @@ Example:
 import asyncio
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -81,19 +82,17 @@ def _connection_del(self: "Connection") -> None:  # type: ignore[valid-type]
     is current. Scheduling close() here (when a loop exists) runs cleanup under Tokio.
     This is best-effort only; always use async with or await conn.close().
     """
+    # Clean up connection state first to prevent memory leak
+    _cleanup_conn_state(self)
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
     try:
-
-        def _schedule_close() -> None:
-            try:
-                asyncio.create_task(self.close())  # type: ignore[attr-defined]
-            except Exception:
-                pass
-
-        loop.call_soon_threadsafe(_schedule_close)
+        # Schedule close on the event loop; use ensure_future which works from sync context
+        # when there's a running loop (unlike create_task which requires async context)
+        loop.call_soon(lambda: asyncio.ensure_future(self.close()))  # type: ignore[attr-defined]
     except Exception:
         pass
 
@@ -496,9 +495,10 @@ async def transaction_retry(
         except Exception as e:
             last_err = e
             raise
+    # If max_retries is 0, we never enter the loop, so raise the last error or return None
     if last_err is not None:
         raise last_err
-    return None
+    raise RuntimeError("transaction_retry: max_retries must be at least 1")
 
 
 async def transaction_with_timeout(
@@ -970,19 +970,22 @@ Connection.__await__ = _connection_await  # type: ignore[attr-defined]
 # The cache is updated after operations that may change these values.
 
 _connection_state: dict[int, dict[str, Any]] = {}
+_connection_state_lock = threading.Lock()
 
 
 def _get_conn_state(conn: "Connection") -> dict[str, Any]:  # type: ignore[valid-type]
-    """Get or create state dict for a connection."""
+    """Get or create state dict for a connection (thread-safe)."""
     cid = id(conn)
-    if cid not in _connection_state:
-        _connection_state[cid] = {"total_changes": 0, "in_transaction": False}
-    return _connection_state[cid]
+    with _connection_state_lock:
+        if cid not in _connection_state:
+            _connection_state[cid] = {"total_changes": 0, "in_transaction": False}
+        return _connection_state[cid]
 
 
 def _cleanup_conn_state(conn: "Connection") -> None:  # type: ignore[valid-type]
-    """Remove state for a connection (call on close)."""
-    _connection_state.pop(id(conn), None)
+    """Remove state for a connection (thread-safe, call on close)."""
+    with _connection_state_lock:
+        _connection_state.pop(id(conn), None)
 
 
 @property  # type: ignore[misc]

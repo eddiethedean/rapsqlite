@@ -25,7 +25,7 @@ def _make_app(db_path: str) -> Starlette:
 
 @pytest.mark.asyncio
 async def test_starlette_rapsqlite_smoke(test_db: str) -> None:
-    async with connect(test_db) as conn:
+    async with connect(test_db) as conn:  # type: ignore[attr-defined]
         await conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("INSERT INTO items (id, name) VALUES (1, 'foo')")
     app = _make_app(test_db)

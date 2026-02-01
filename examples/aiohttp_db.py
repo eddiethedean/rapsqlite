@@ -18,7 +18,7 @@ DB_PATH = str(Path(__file__).resolve().parent / "aiohttp_example.db")
 
 async def init_db(app: web.Application):
     """Initialize database schema on startup."""
-    async with connect(DB_PATH) as conn:
+    async with connect(DB_PATH) as conn:  # type: ignore[attr-defined]
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)"
         )
@@ -26,7 +26,7 @@ async def init_db(app: web.Application):
 
 
 async def homepage(request: web.Request) -> web.Response:
-    async with connect(DB_PATH) as conn:
+    async with connect(DB_PATH) as conn:  # type: ignore[attr-defined]
         rows = await conn.fetch_all("SELECT id, name FROM items")
         return web.json_response({"items": [list(r) for r in rows]})
 
