@@ -141,6 +141,7 @@ pub(crate) struct ConnectionExecutionState {
     pub(crate) user_functions: UserFunctions,
     pub(crate) user_aggregates: UserAggregates,
     pub(crate) user_collations: UserCollations,
+    #[allow(dead_code)] // used when binding parameters; ExecuteContextManager may not read
     pub(crate) adapters: Adapters,
     pub(crate) converters: Converters,
     pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
@@ -7118,16 +7119,16 @@ impl Connection {
                         .unwrap_or(5)
                         .clamp(5, 120);
 
-                    backup::run_backup_loop(
+                    backup::run_backup_loop(backup::BackupParams {
                         source_handle,
                         target_handle,
-                        &name,
+                        name: &name,
                         pages,
                         sleep,
                         progress_callback,
                         backup_busy_timeout_secs,
                         source_libversion,
-                    )
+                    })
                     .await?;
 
                     Ok(())

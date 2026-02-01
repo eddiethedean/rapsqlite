@@ -8,10 +8,8 @@ Source: https://github.com/omnilib/aiosqlite/tree/main/aiosqlite/tests
 """
 
 import asyncio
-import inspect
 import os
 import pytest
-import sys
 from pathlib import Path
 
 from conftest import (

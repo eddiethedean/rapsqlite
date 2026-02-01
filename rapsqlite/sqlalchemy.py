@@ -90,12 +90,12 @@ class _RapsqliteDialectModule:
     Error = _dbapi.Error
     InterfaceError = _dbapi.InterfaceError
     DatabaseError = _dbapi.DatabaseError
-    DataError = _dbapi.DataError
+    DataError = _dbapi.DataError  # type: ignore[attr-defined]
     OperationalError = _dbapi.OperationalError
-    IntegrityError = _dbapi.IntegrityError
-    InternalError = _dbapi.InternalError
+    IntegrityError = _dbapi.IntegrityError  # type: ignore[attr-defined]
+    InternalError = _dbapi.InternalError  # type: ignore[attr-defined]
     ProgrammingError = _dbapi.ProgrammingError
-    NotSupportedError = _dbapi.NotSupportedError
+    NotSupportedError = _dbapi.NotSupportedError  # type: ignore[attr-defined]
 
     def connect(self, *arg: Any, **kw: Any) -> _RapsqliteConnection:
         from sqlalchemy.util.concurrency import await_fallback

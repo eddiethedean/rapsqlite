@@ -5,8 +5,6 @@ timeout scenarios, and error conditions.
 """
 
 import asyncio
-import os
-import sys
 import tempfile
 
 import pytest

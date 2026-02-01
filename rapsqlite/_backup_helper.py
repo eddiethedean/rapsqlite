@@ -47,14 +47,14 @@ def get_sqlite3_handle(conn: sqlite3.Connection) -> int | None:
 
         # Determine pointer size based on platform
         if sys.maxsize > 2**32:  # 64-bit
-            Py_ssize_t = ctypes.c_int64
+            Py_ssize_t: type[ctypes.c_int64] | type[ctypes.c_int32] = ctypes.c_int64
         else:  # 32-bit
-            Py_ssize_t = ctypes.c_int32  # type: ignore[assignment]
+            Py_ssize_t = ctypes.c_int32
 
         # Define PyObject_HEAD structure
         class PyObject_HEAD(ctypes.Structure):
             _fields_ = [
-                ("ob_refcnt", Py_ssize_t),  # type: ignore[misc]
+                ("ob_refcnt", Py_ssize_t),
                 ("ob_type", ctypes.c_void_p),  # PyTypeObject*
             ]
 

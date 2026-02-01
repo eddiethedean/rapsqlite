@@ -54,7 +54,7 @@ import os
 import re
 import time
 from collections.abc import Callable
-from typing import Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, TypeAlias, cast
 
 import builtins as _builtins
 
@@ -69,12 +69,13 @@ class PoolMetricsGauges(TypedDict):
     rapsqlite_pool_num_idle: int
     rapsqlite_pool_in_use: int
 
+
 try:
     # Preferred: import extension from the local module name used when installed.
-    import _rapsqlite as _ext  # type: ignore[import-not-found]
+    import _rapsqlite as _ext
 except ImportError:  # pragma: no cover - fallback for editable installs/alt layouts
     try:
-        from rapsqlite import _rapsqlite as _ext  # type: ignore[import-not-found]
+        from rapsqlite import _rapsqlite as _ext
     except ImportError as exc:  # pragma: no cover
         raise ImportError(
             "Could not import _rapsqlite. Make sure rapsqlite is built with maturin."
@@ -83,6 +84,10 @@ except ImportError:  # pragma: no cover - fallback for editable installs/alt lay
 # Re-export symbols from the extension module.
 Connection = _ext.Connection
 Cursor = _ext.Cursor
+if TYPE_CHECKING:
+    ConnectionT: TypeAlias = _ext.Connection
+else:
+    ConnectionT = Connection
 
 Error = _ext.Error
 Warning = _ext.Warning
@@ -144,9 +149,10 @@ except AttributeError:
 apply_compat(Connection, Cursor, operational_error=OperationalError)
 apply_state(Connection)
 
+
 # Connection.execute_iter (streaming helper) - uses Connection.fetch_all
 def _connection_execute_iter(
-    self: Connection,
+    self: ConnectionT,
     sql: str,
     parameters: Any | None = None,
     chunk_size: int | None = None,
@@ -155,7 +161,7 @@ def _connection_execute_iter(
     return _StreamChunksIterator(self, sql, parameters, chunk_size)
 
 
-Connection.execute_iter = _connection_execute_iter  # type: ignore[attr-defined,assignment]
+Connection.execute_iter = _connection_execute_iter
 
 __version__: str = "0.3.0-dev"
 __all__: list[str] = [
@@ -197,7 +203,7 @@ def connect(
     loop: Any = None,
     aiosqlite_compat: bool = False,
     **kwargs: Any,
-) -> Connection:
+) -> ConnectionT:
     """Connect to a SQLite database.
 
     This function matches the aiosqlite.connect() API for compatibility,
@@ -309,10 +315,10 @@ def connect(
         conn.idle_timeout = idle_timeout
     if aiosqlite_compat:
         conn.row_factory = "tuple"
-    return cast(Connection, conn)
+    return cast(ConnectionT, conn)
 
 
-async def pool_metrics_gauges(conn: Connection) -> PoolMetricsGauges:
+async def pool_metrics_gauges(conn: ConnectionT) -> PoolMetricsGauges:
     """Return pool metrics as a dict of gauge names to values for Prometheus or custom metrics.
 
     Calls ``conn.pool_metrics()`` and maps the result to gauge-style keys:
@@ -336,7 +342,7 @@ async def pool_metrics_gauges(conn: Connection) -> PoolMetricsGauges:
 
 
 async def timed_fetch_all(
-    conn: Connection,
+    conn: ConnectionT,
     sql: str,
     parameters: Any | None = None,
     on_timing: Callable[[float, str], None] | None = None,
@@ -351,12 +357,12 @@ async def timed_fetch_all(
     duration = time.perf_counter() - t0
     if on_timing is not None:
         on_timing(duration, sql)
-        return rows
-    return (rows, duration)
+        return cast(list[list[Any]], rows)
+    return cast(tuple[list[list[Any]], float], (rows, duration))
 
 
 async def transaction_retry(
-    conn: Connection,
+    conn: ConnectionT,
     work: Any,
     max_retries: int = 5,
     initial_delay: float = 0.01,
@@ -402,7 +408,7 @@ async def transaction_retry(
 
 
 async def transaction_with_timeout(
-    conn: Connection,
+    conn: ConnectionT,
     work: Any,
     timeout_secs: float = 30.0,
 ) -> Any:
@@ -432,7 +438,7 @@ async def transaction_with_timeout(
 
 
 def execute_iter(
-    conn: Connection,
+    conn: ConnectionT,
     sql: str,
     parameters: Any | None = None,
     chunk_size: int | None = None,
@@ -453,7 +459,7 @@ def execute_iter(
 
 
 async def paginate(
-    conn: Connection,
+    conn: ConnectionT,
     sql: str,
     parameters: Any | None = None,
     page_size: int = 64,
@@ -479,11 +485,11 @@ async def paginate(
     wrapped = f"SELECT * FROM ({sql_clean}) LIMIT ? OFFSET ?"
     params = list(parameters) if parameters is not None else []
     rows = await conn.fetch_all(wrapped, params + [page_size, offset])
-    return rows
+    return cast(list[list[Any]], rows)
 
 
 async def analyze_query_plan(
-    conn: Connection,
+    conn: ConnectionT,
     sql: str,
     parameters: Any | None = None,
 ) -> dict[str, Any]:
@@ -519,7 +525,7 @@ async def analyze_query_plan(
 
 
 async def suggest_indexes(
-    conn: Connection,
+    conn: ConnectionT,
     sql: str,
     parameters: Any | None = None,
 ) -> list[dict[str, Any]]:
@@ -646,7 +652,7 @@ class _StreamChunksIterator:
 
     def __init__(
         self,
-        conn: Connection,
+        conn: ConnectionT,
         sql: str,
         parameters: Any | None = None,
         chunk_size: int | None = None,
@@ -673,14 +679,4 @@ class _StreamChunksIterator:
         if not rows:
             raise StopAsyncIteration
         self._offset += len(rows)
-        return rows
-
-
-def _connection_execute_iter(
-    self: Connection,
-    sql: str,
-    parameters: Any | None = None,
-    chunk_size: int | None = None,
-) -> _StreamChunksIterator:
-    """Return an async iterator that yields rows in chunks (streaming / memory-efficient)."""
-    return _StreamChunksIterator(self, sql, parameters, chunk_size)
+        return cast(list[list[Any]], rows)

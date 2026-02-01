@@ -8,7 +8,7 @@ after _compat patches are applied.
 from __future__ import annotations
 
 import threading
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from typing import Protocol
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         def __aenter__(self): ...
         def __aexit__(self, *args): ...
         async def close(self): ...
+
         # total_changes, in_transaction, begin, commit, rollback, transaction
         # are patched by this module
 else:
@@ -53,12 +54,12 @@ def _cleanup_conn_state(conn: Connection) -> None:
 
 def _total_changes_prop(self: Connection) -> int:
     """Get total database changes since connection was opened (sync property for aiosqlite compat)."""
-    return _get_conn_state(self).get("total_changes", 0)
+    return cast(int, _get_conn_state(self).get("total_changes", 0))
 
 
 def _in_transaction_prop(self: Connection) -> bool:
     """Check if connection is in a transaction (sync property for aiosqlite compat)."""
-    return _get_conn_state(self).get("in_transaction", False)
+    return cast(bool, _get_conn_state(self).get("in_transaction", False))
 
 
 async def _update_connection_state(conn: Connection) -> None:
@@ -102,7 +103,7 @@ async def _close_with_state_cleanup(self: Connection) -> None:
 async def _aenter_with_state_init(self: Connection) -> Connection:
     result = await _orig_aenter(self)
     _get_conn_state(self)
-    return result
+    return cast(Connection, result)
 
 
 class _TransactionContextManagerWithState:
@@ -115,7 +116,7 @@ class _TransactionContextManagerWithState:
     async def __aenter__(self) -> Connection:
         result = await self._orig_cm.__aenter__()
         _get_conn_state(self._conn)["in_transaction"] = True
-        return result
+        return cast(Connection, result)
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self._orig_cm.__aexit__(exc_type, exc_val, exc_tb)
@@ -133,24 +134,30 @@ def apply_state(Connection: type) -> None:
     Call after _compat.apply_compat() so commit/rollback are already no-op wrappers.
     """
     global _orig_total_changes, _orig_in_transaction
-    global _orig_begin, _orig_commit, _orig_rollback, _orig_close, _orig_aenter, _orig_transaction
+    global \
+        _orig_begin, \
+        _orig_commit, \
+        _orig_rollback, \
+        _orig_close, \
+        _orig_aenter, \
+        _orig_transaction
 
-    _orig_total_changes = Connection.total_changes
-    _orig_in_transaction = Connection.in_transaction
-    _orig_begin = Connection.begin
-    _orig_commit = Connection.commit
-    _orig_rollback = Connection.rollback
-    _orig_close = Connection.close
-    _orig_aenter = Connection.__aenter__
-    _orig_transaction = Connection.transaction
+    _orig_total_changes = Connection.total_changes  # type: ignore[attr-defined]
+    _orig_in_transaction = Connection.in_transaction  # type: ignore[attr-defined]
+    _orig_begin = Connection.begin  # type: ignore[attr-defined]
+    _orig_commit = Connection.commit  # type: ignore[attr-defined]
+    _orig_rollback = Connection.rollback  # type: ignore[attr-defined]
+    _orig_close = Connection.close  # type: ignore[attr-defined]
+    _orig_aenter = Connection.__aenter__  # type: ignore[attr-defined]
+    _orig_transaction = Connection.transaction  # type: ignore[attr-defined]
 
-    Connection.total_changes = property(_total_changes_prop)  # type: ignore[assignment,method-assign]
-    Connection.in_transaction = property(_in_transaction_prop)  # type: ignore[assignment,method-assign]
+    Connection.total_changes = property(_total_changes_prop)  # type: ignore[attr-defined]
+    Connection.in_transaction = property(_in_transaction_prop)  # type: ignore[attr-defined]
     Connection.total_changes_async = _orig_total_changes  # type: ignore[attr-defined]
     Connection.in_transaction_async = _orig_in_transaction  # type: ignore[attr-defined]
-    Connection.begin = _begin_with_state_update  # type: ignore[assignment,method-assign]
-    Connection.commit = _commit_with_state_update  # type: ignore[assignment,method-assign]
-    Connection.rollback = _rollback_with_state_update  # type: ignore[assignment,method-assign]
-    Connection.close = _close_with_state_cleanup  # type: ignore[assignment,method-assign]
-    Connection.__aenter__ = _aenter_with_state_init  # type: ignore[assignment,method-assign]
-    Connection.transaction = _transaction_with_state  # type: ignore[assignment,method-assign]
+    Connection.begin = _begin_with_state_update  # type: ignore[attr-defined]
+    Connection.commit = _commit_with_state_update  # type: ignore[attr-defined]
+    Connection.rollback = _rollback_with_state_update  # type: ignore[attr-defined]
+    Connection.close = _close_with_state_cleanup  # type: ignore[attr-defined]
+    Connection.__aenter__ = _aenter_with_state_init  # type: ignore[attr-defined]
+    Connection.transaction = _transaction_with_state  # type: ignore[attr-defined]

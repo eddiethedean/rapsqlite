@@ -4,7 +4,6 @@ import pytest
 
 from conftest import skip_if_no_phase3
 from rapsqlite import (
-    Connection,
     connect,
     execute_iter,
     paginate,

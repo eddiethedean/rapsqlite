@@ -6,7 +6,11 @@ import rapsqlite
 
 # Run init_hook tests on one worker when using pytest-xdist --dist loadgroup,
 # so they don't compete for pool/DB under parallel load.
-pytestmark = [pytest.mark.asyncio, pytest.mark.xdist_group("init_hook"), pytest.mark.integration]
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.xdist_group("init_hook"),
+    pytest.mark.integration,
+]
 
 
 def _isolated_connection(path, *, init_hook=None, pragmas=None, **kwargs):

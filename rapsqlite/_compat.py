@@ -12,7 +12,7 @@ import asyncio
 import os
 import time
 from collections.abc import Callable
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Type, cast
 
 from rapsqlite._connection_state import _cleanup_conn_state
 
@@ -45,9 +45,7 @@ def _connection_del(self: Any) -> None:
         pass
 
 
-async def _set_progress_handler_wrapper(
-    self: Any, a: Any, b: Any = None
-) -> Any:
+async def _set_progress_handler_wrapper(self: Any, a: Any, b: Any = None) -> Any:
     if b is not None and callable(a) and isinstance(b, int):
         n, callback = b, a
     else:
@@ -74,10 +72,12 @@ async def _cursor_executescript_return_self(self: Any, script: str) -> Any:
     return self
 
 
-async def _commit_noop_on_no_tx(self: Any, OperationalError: type) -> None:
+async def _commit_noop_on_no_tx(
+    self: Any, operational_error_type: Type[BaseException]
+) -> None:
     try:
         await _orig_commit(self)
-    except OperationalError as e:
+    except operational_error_type as e:
         msg = str(e).lower()
         if "transaction" in msg and (
             "not available" in msg or "in progress" in msg or "no transaction" in msg
@@ -86,10 +86,12 @@ async def _commit_noop_on_no_tx(self: Any, OperationalError: type) -> None:
         raise
 
 
-async def _rollback_noop_on_no_tx(self: Any, OperationalError: type) -> None:
+async def _rollback_noop_on_no_tx(
+    self: Any, operational_error_type: Type[BaseException]
+) -> None:
     try:
         await _orig_rollback(self)
-    except OperationalError as e:
+    except operational_error_type as e:
         msg = str(e).lower()
         if "transaction" in msg and (
             "not available" in msg or "in progress" in msg or "no transaction" in msg
@@ -121,7 +123,8 @@ class _IterdumpWrapper:
 
     def __await__(self) -> Any:
         async def _inner() -> list[str]:
-            return await _raw_iterdump(self._conn)
+            return cast(list[str], await _raw_iterdump(self._conn))
+
         return _inner().__await__()
 
 
@@ -133,13 +136,16 @@ def _iterdump(self: Any) -> _IterdumpWrapper:
 async def _execute_fetchall(
     self: Any, sql: str, parameters: Any | None = None
 ) -> list[list[Any]]:
-    return await self.fetch_all(sql, parameters)
+    return cast(list[list[Any]], await self.fetch_all(sql, parameters))
 
 
 async def _explain_query_plan(
     self: Any, sql: str, parameters: Any | None = None
 ) -> list[list[Any]]:
-    return await self.fetch_all(f"EXPLAIN QUERY PLAN {sql}", parameters)
+    return cast(
+        list[list[Any]],
+        await self.fetch_all(f"EXPLAIN QUERY PLAN {sql}", parameters),
+    )
 
 
 async def _pool_health(self: Any) -> bool:
@@ -166,10 +172,15 @@ async def _fetch_all_with_slow_check(
     state = _slow_query_state.get(id(self), (0, None))
     threshold, cb = state[0], state[1]
     if threshold <= 0:
-        return await _orig_connection_fetch_all(self, query, parameters)
+        return cast(
+            list[list[Any]], await _orig_connection_fetch_all(self, query, parameters)
+        )
     t0 = time.perf_counter()
     try:
-        return await _orig_connection_fetch_all(self, query, parameters)
+        return cast(
+            list[list[Any]],
+            await _orig_connection_fetch_all(self, query, parameters),
+        )
     finally:
         duration = time.perf_counter() - t0
         if duration >= threshold and cb:
@@ -182,6 +193,7 @@ def _connection_await(self: Any) -> Any:
     async def _inner() -> Any:
         await self.__aenter__()
         return self
+
     return _inner().__await__()
 
 
@@ -193,10 +205,15 @@ async def _backup_impl(
     progress: Any = None,
     name: str = "main",
     sleep: float = 0.25,
-    operational_error: type = None,
+    operational_error: Type[BaseException] | None = None,
 ) -> None:
     """Backup supporting both rapsqlite.Connection and sqlite3.Connection targets."""
     import sqlite3
+
+    if operational_error is None:
+        raise RuntimeError("operational_error is required for backup_impl")
+    op_err = operational_error
+
     if isinstance(target, sqlite3.Connection):
         conn_path = getattr(self, "path", None)
         if conn_path and conn_path != ":memory:" and (conn_path.strip() or "") != "":
@@ -205,7 +222,7 @@ async def _backup_impl(
             rows = await self.fetch_all("PRAGMA database_list")
             main_row = next((row for row in rows if row[1] == "main"), None)
             if not main_row or not main_row[2]:
-                raise operational_error(
+                raise op_err(
                     "backup to sqlite3.Connection is only supported for file-backed "
                     "databases (got in-memory or unsupported URI)."
                 )
@@ -215,7 +232,7 @@ async def _backup_impl(
         except Exception:
             pass
         if getattr(target, "in_transaction", False):
-            raise operational_error(
+            raise op_err(
                 "Cannot backup to sqlite3.Connection while it has an active transaction."
             )
         source_sqlite3 = sqlite3.connect(db_filename)
@@ -226,7 +243,9 @@ async def _backup_impl(
         finally:
             source_sqlite3.close()
         return None
-    await _raw_backup(self, target, pages=pages, progress=progress, name=name, sleep=sleep)
+    await _raw_backup(
+        self, target, pages=pages, progress=progress, name=name, sleep=sleep
+    )
     return None
 
 
@@ -234,7 +253,7 @@ def apply_compat(
     Connection: type,
     Cursor: type,
     *,
-    operational_error: type,
+    operational_error: Type[BaseException],
 ) -> None:
     """Attach all aiosqlite compatibility patches to Connection and Cursor.
 
@@ -245,50 +264,68 @@ def apply_compat(
     global _orig_cursor_executescript, _orig_commit, _orig_rollback
     global _raw_iterdump, _raw_backup, _orig_connection_fetch_all
 
-    Connection.__del__ = _connection_del  # type: ignore[assignment]
+    Connection.__del__ = _connection_del  # type: ignore[attr-defined]
     if not hasattr(Connection, "stop"):
+
         def _stop_noop(self: Any) -> None:
             pass
-        Connection.stop = _stop_noop  # type: ignore[assignment]
 
-    _orig_set_progress_handler = Connection.set_progress_handler
-    Connection.set_progress_handler = _set_progress_handler_wrapper  # type: ignore[assignment]
+        Connection.stop = _stop_noop  # type: ignore[attr-defined]
 
-    _orig_cursor_execute = Cursor.execute
-    _orig_cursor_executemany = Cursor.executemany
-    _orig_cursor_executescript = Cursor.executescript
-    Cursor.execute = _cursor_execute_return_self  # type: ignore[assignment]
-    Cursor.executemany = _cursor_executemany_return_self  # type: ignore[assignment]
-    Cursor.executescript = _cursor_executescript_return_self  # type: ignore[assignment]
+    _orig_set_progress_handler = Connection.set_progress_handler  # type: ignore[attr-defined]
+    Connection.set_progress_handler = _set_progress_handler_wrapper  # type: ignore[attr-defined]
 
-    _orig_commit = Connection.commit
-    _orig_rollback = Connection.rollback
-    _commit_noop = lambda self: _commit_noop_on_no_tx(self, operational_error)
-    _rollback_noop = lambda self: _rollback_noop_on_no_tx(self, operational_error)
-    Connection.commit = _commit_noop  # type: ignore[assignment]
-    Connection.rollback = _rollback_noop  # type: ignore[assignment]
+    _orig_cursor_execute = Cursor.execute  # type: ignore[attr-defined]
+    _orig_cursor_executemany = Cursor.executemany  # type: ignore[attr-defined]
+    _orig_cursor_executescript = Cursor.executescript  # type: ignore[attr-defined]
+    Cursor.execute = _cursor_execute_return_self  # type: ignore[attr-defined]
+    Cursor.executemany = _cursor_executemany_return_self  # type: ignore[attr-defined]
+    Cursor.executescript = _cursor_executescript_return_self  # type: ignore[attr-defined]
 
-    _raw_iterdump = Connection.iterdump
-    _raw_backup = Connection.backup
+    _orig_commit = Connection.commit  # type: ignore[attr-defined]
+    _orig_rollback = Connection.rollback  # type: ignore[attr-defined]
+
+    async def _commit_noop(self: Any) -> None:
+        await _commit_noop_on_no_tx(self, operational_error)
+
+    async def _rollback_noop(self: Any) -> None:
+        await _rollback_noop_on_no_tx(self, operational_error)
+
+    Connection.commit = _commit_noop  # type: ignore[attr-defined]
+    Connection.rollback = _rollback_noop  # type: ignore[attr-defined]
+
+    _raw_iterdump = Connection.iterdump  # type: ignore[attr-defined]
+    _raw_backup = Connection.backup  # type: ignore[attr-defined]
     Connection._iterdump_raw = _raw_iterdump  # type: ignore[attr-defined]
-    Connection.iterdump = _iterdump  # type: ignore[assignment]
+    Connection.iterdump = _iterdump  # type: ignore[attr-defined]
     Connection.execute_fetchall = _execute_fetchall  # type: ignore[attr-defined]
     Connection.explain_query_plan = _explain_query_plan  # type: ignore[attr-defined]
     Connection.pool_health = _pool_health  # type: ignore[attr-defined]
-    Connection.executemany = Connection.execute_many  # type: ignore[attr-defined,assignment]
+    Connection.executemany = Connection.execute_many  # type: ignore[attr-defined]
 
-    _orig_connection_fetch_all = Connection.fetch_all
-    Connection.set_slow_query_threshold = set_slow_query_threshold  # type: ignore[attr-defined,assignment]
-    Connection.fetch_all = _fetch_all_with_slow_check  # type: ignore[assignment]
+    _orig_connection_fetch_all = Connection.fetch_all  # type: ignore[attr-defined]
+    Connection.set_slow_query_threshold = set_slow_query_threshold  # type: ignore[attr-defined]
+    Connection.fetch_all = _fetch_all_with_slow_check  # type: ignore[attr-defined]
     Connection.__await__ = _connection_await  # type: ignore[attr-defined]
+    Connection._backup_raw = _raw_backup  # type: ignore[attr-defined]
 
     async def _backup_wrapper(
-        self: Any, target: Any, *, pages: int = 0, progress: Any = None,
-        name: str = "main", sleep: float = 0.25
+        self: Any,
+        target: Any,
+        *,
+        pages: int = 0,
+        progress: Any = None,
+        name: str = "main",
+        sleep: float = 0.25,
     ) -> None:
         await _backup_impl(
-            self, target, pages=pages, progress=progress, name=name, sleep=sleep,
+            self,
+            target,
+            pages=pages,
+            progress=progress,
+            name=name,
+            sleep=sleep,
             operational_error=operational_error,
         )
-    Connection._backup_raw = _raw_backup  # type: ignore[attr-defined]
-    Connection.backup = _backup_wrapper  # type: ignore[assignment]
+
+    Connection.backup = _backup_wrapper  # type: ignore[attr-defined]

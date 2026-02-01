@@ -5,7 +5,6 @@ that might differ between rapsqlite and aiosqlite implementations.
 """
 
 import os
-import sys
 
 import pytest
 
@@ -916,7 +915,6 @@ async def test_callbacks_with_cursor(test_db):
 async def test_backup_basic(test_db_file):
     """Test basic backup functionality."""
     import rapsqlite
-    import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
         await source_conn.execute(
@@ -950,7 +948,6 @@ async def test_backup_basic(test_db_file):
 async def test_backup_target_in_transaction_raises(test_db_file):
     """Backup should fail cleanly if target connection has an active transaction."""
     import rapsqlite
-    import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
         await source_conn.execute(
@@ -985,7 +982,6 @@ async def test_backup_target_in_transaction_raises(test_db_file):
 async def test_backup_empty_database(test_db_file):
     """Test backing up an empty database."""
     import rapsqlite
-    import os
 
     # No tables created; source is empty
     target_path = test_db_file + ".backup"
@@ -1013,7 +1009,6 @@ async def test_backup_empty_database(test_db_file):
 async def test_backup_progress_callback(test_db_file):
     """Test backup with progress callback."""
     import rapsqlite
-    import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
         await source_conn.execute(
@@ -1054,7 +1049,6 @@ async def test_backup_progress_callback(test_db_file):
 async def test_backup_with_pages_parameter(test_db_file):
     """Test backup with pages parameter to copy incrementally."""
     import rapsqlite
-    import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
         await source_conn.execute(
@@ -1088,7 +1082,6 @@ async def test_backup_with_pages_parameter(test_db_file):
 async def test_backup_with_custom_name(test_db_file):
     """Test backup with custom database name."""
     import rapsqlite
-    import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
         await source_conn.execute(
@@ -1119,7 +1112,6 @@ async def test_backup_with_custom_name(test_db_file):
 async def test_backup_multiple_tables(test_db_file):
     """Test backing up database with multiple tables."""
     import rapsqlite
-    import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
         await source_conn.execute(
@@ -1158,7 +1150,6 @@ async def test_backup_multiple_tables(test_db_file):
 async def test_backup_with_indexes(test_db_file):
     """Test backing up database with indexes."""
     import rapsqlite
-    import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
         await source_conn.execute(
@@ -1192,7 +1183,6 @@ async def test_backup_with_indexes(test_db_file):
 async def test_backup_progress_callback_exception(test_db_file):
     """Test that exceptions in progress callback don't abort backup."""
     import rapsqlite
-    import os
 
     async with rapsqlite.Connection(test_db_file) as source_conn:
         await source_conn.execute(

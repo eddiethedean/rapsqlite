@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import builtins
-from typing import Any, Callable, Coroutine, Dict, Iterator, List, Optional, Protocol, Type, TypeVar
+from typing import Any, Callable, Coroutine, Dict, Iterator, List, Optional, Protocol, Type, TypeVar, TypeAlias
 
 # Type alias for init_hook callback
 InitHook = Callable[["Connection"], Coroutine[Any, Any, None]]
-
-# Type alias for a single row (list or tuple depending on row_factory)
-Row = list[Any]
 
 class Error(Exception):
     """Base exception class for rapsqlite errors."""
@@ -525,4 +522,4 @@ class RapRow:
     def __repr__(self) -> str: ...
 
 # Export RapRow as Row for aiosqlite compatibility
-Row = RapRow
+Row: TypeAlias = RapRow

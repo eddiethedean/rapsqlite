@@ -240,7 +240,7 @@ async def dbapi_conn() -> AsyncGenerator[Any, None]:
     try:
         yield conn
     finally:
-        await conn.close()
+        await conn.close()  # type: ignore[misc]
 
 
 @pytest.fixture
@@ -253,7 +253,7 @@ async def connected_db(test_db: str) -> AsyncGenerator[Any, None]:
     pytest.importorskip("rapsqlite")
     from rapsqlite import connect
 
-    async with connect(test_db) as conn:
+    async with connect(test_db) as conn:  # type: ignore[attr-defined]
         yield conn
 
 

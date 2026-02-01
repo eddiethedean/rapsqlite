@@ -6,11 +6,8 @@ See docs/true_async_dbapi_spec.md for the interface contract.
 from __future__ import annotations  # PEP 563: forward references without quotes
 
 import asyncio
-from typing import Any, Callable, Coroutine, Iterable, Sequence, TypeVar
-
 import re
-
-T = TypeVar("T")
+from typing import Any, Callable, Coroutine, Iterable, Sequence, TypeVar, cast
 
 from . import (
     Connection as _Connection,
@@ -19,6 +16,8 @@ from . import (
     InterfaceError,
 )
 from . import connect as _connect
+
+T = TypeVar("T")
 
 
 def _parse_select_column_names(sql: str) -> list[str] | None:
@@ -67,6 +66,10 @@ _DBAPI_EXCEPTIONS = [
 for _name, _base in _DBAPI_EXCEPTIONS:
     _ext_cls = getattr(_ext, _name, type(_name, (DatabaseError,), {}))
     globals()[_name] = _dbapi_exc(_name, _ext_cls, _base)
+
+# For mypy: names are set by loop above
+ProgrammingError = globals()["ProgrammingError"]
+OperationalError = globals()["OperationalError"]
 
 apilevel = "2.0"
 threadsafety = 0
@@ -160,15 +163,15 @@ class AsyncCursor:
 
     @property
     def rowcount(self) -> int:
-        return self._raw.rowcount  # type: ignore[no-any-return]
+        return cast(int, self._raw.rowcount)
 
     @property
     def lastrowid(self) -> int:
-        return self._raw.lastrowid  # type: ignore[no-any-return]
+        return cast(int, self._raw.lastrowid)
 
     @property
     def arraysize(self) -> int:
-        return self._raw.arraysize  # type: ignore[no-any-return]
+        return cast(int, self._raw.arraysize)
 
     @arraysize.setter
     def arraysize(self, value: int) -> None:
@@ -179,7 +182,7 @@ class AsyncCursor:
             self._result_buffer = None
             self._result_index = 0
             self._cached_description = None
-            await self._raw.execute(sql, params)  # type: ignore[no-any-return]
+            await self._raw.execute(sql, params)
             # Capture description immediately after execute (Rust sets pending_description
             # in __aenter__; fetchall() later moves it to description, so read before fetchall
             # so 0-row SELECT has description for SQLAlchemy).
@@ -239,7 +242,7 @@ class AsyncCursor:
                 self._result_index += 1
                 return row
             return None
-        return await self._with_lock(self._raw.fetchone)  # type: ignore[no-any-return]
+        return await self._with_lock(self._raw.fetchone)
 
     async def fetchmany(self, size: int | None = None) -> list[Any]:
         if self._result_buffer is not None:
@@ -252,14 +255,14 @@ class AsyncCursor:
         async def _do() -> list[Any]:
             return await self._raw.fetchmany(size)  # type: ignore[no-any-return]
 
-        return await self._with_lock(_do)  # type: ignore[no-any-return]
+        return await self._with_lock(_do)
 
     async def fetchall(self) -> list[Any]:
         if self._result_buffer is not None:
             rest = self._result_buffer[self._result_index :]
             self._result_index = len(self._result_buffer)
             return rest
-        return await self._with_lock(self._raw.fetchall)  # type: ignore[no-any-return]
+        return await self._with_lock(self._raw.fetchall)
 
     async def close(self) -> None:
         # Keep _result_buffer so fetchone/fetchall can still be called after close()
@@ -350,14 +353,14 @@ class AsyncConnection:
 
         async def _do() -> AsyncCursor:
             raw = self._conn.cursor()
-            return AsyncCursor(self, raw)  # type: ignore[no-any-return]
+            return AsyncCursor(self, raw)
 
         return await self._with_op_lock(_do)
 
     async def execute(self, sql: str, params: Any = None) -> AsyncCursor:
         async def _do() -> AsyncCursor:
             raw = await self._conn.execute(sql, params)
-            return AsyncCursor(self, raw)  # type: ignore[no-any-return]
+            return AsyncCursor(self, raw)
 
         return await self._with_op_lock(_do)
 
@@ -374,7 +377,7 @@ class AsyncConnection:
     async def commit(self) -> None:
         try:
             await self._conn.commit()
-        except OperationalError as e:  # type: ignore[misc]
+        except OperationalError as e:
             # DBAPI compat: commit() is a no-op when not in a transaction
             msg = str(e).lower()
             if "transaction" in msg and (
@@ -388,7 +391,7 @@ class AsyncConnection:
     async def rollback(self) -> None:
         try:
             await self._conn.rollback()
-        except OperationalError as e:  # type: ignore[misc]
+        except OperationalError as e:
             # DBAPI compat: rollback() is a no-op when not in a transaction
             msg = str(e).lower()
             if "transaction" in msg and (
@@ -412,7 +415,7 @@ class AsyncConnection:
         Delegates to the underlying rapsqlite Connection. Pass func=None to remove.
         """
         await self._with_op_lock(
-            lambda: self._conn.create_function(  # type: ignore[misc]
+            lambda: self._conn.create_function(
                 name, nargs, func, deterministic=deterministic
             )
         )
@@ -428,9 +431,7 @@ class AsyncConnection:
 Cursor = _Cursor
 
 
-async def connect(
-    *args: Any, **kwargs: Any
-) -> Coroutine[Any, Any, AsyncConnection]:
+async def connect(*args: Any, **kwargs: Any) -> AsyncConnection:
     """
     Async connect per True Async DBAPI spec.
 
@@ -459,14 +460,15 @@ async def connect(
     timeout: float = float(kwargs.pop("timeout", 5.0))
     opts = {k: v for k, v in kwargs.items() if k in _ALLOWED_CONNECT_KWARGS}
     conn = _connect(str(database), timeout=timeout, **opts)
-    await conn.__aenter__()  # type: ignore[attr-defined]
+    await conn.__aenter__()
     return AsyncConnection(conn)
 
 
 # Alias for DBAPI consumers that expect Connection
 Connection = AsyncConnection
 
-__all__ = [
+# Exception names are set dynamically in the loop above
+__all__ = [  # noqa: F822
     "apilevel",
     "threadsafety",
     "paramstyle",
