@@ -51,11 +51,11 @@ Core functionality and production readiness:
 
 ### Current Stats
 
-- **Test Coverage**: 614+ Python tests passing (14 skipped); 16 Rust unit tests (parameters, errors, utils)
+- **Test Coverage**: 655+ Python tests passing (39 skipped); 16 Rust unit tests (parameters, errors, utils)
 - **API Compatibility**: ~95% with aiosqlite
 - **aiosqlite Test Suite**: perf.py: 6/10 passing, smoke.py: 3/30 passing; intentional differences and per-test categories documented in `docs/AIOSQLITE_TEST_RESULTS.md`
 - **Python Support**: 3.10–3.14
-- **Code Quality**: Full mypy type checking and Ruff formatting/linting
+- **Code Quality**: cargo fmt, cargo clippy, ruff format, ruff check; mypy (37 known issues in examples/tests)
 
 ### 3.1 API Completeness ✅ Complete
 
@@ -87,7 +87,7 @@ Core functionality and production readiness:
 
 ### 3.4 Framework Integration ✅ Complete
 
-- ✅ **SQLAlchemy** — `sqlite+rapsqlite` dialect
+- ✅ **SQLAlchemy** — `sqlite+rapsqlite` dialect; ORM INSERT...RETURNING (no doubled rows), transaction rollback with UDFs, `create_function` connection routing when DML moves connection to `transaction_connection`
 - ✅ **FastAPI** — Examples and documentation
 - ✅ **Starlette** — Examples and documentation
 - ✅ **aiohttp** — Examples and documentation
@@ -98,6 +98,7 @@ Core functionality and production readiness:
 - ✅ FTS5 full-text search support
 - ✅ JSON1 extension support
 - ✅ `create_function` with `deterministic` parameter
+- ✅ `create_function` — Prefers `transaction_connection` when DML-with-callbacks moved it from `callback_connection`; ensures UDF add/remove operates on the correct connection
 
 ### 3.6 Connection Pooling ✅ Complete
 

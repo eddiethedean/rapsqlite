@@ -1,7 +1,7 @@
 # Test Failures Report
 
 **Date:** January 31, 2026  
-**Status:** 0 failing, 681+ passed, 13 skipped (SQLAlchemy suite)  
+**Status:** 0 failing, 655+ passed (full suite), 39 skipped; 30 passed (SQLAlchemy suite), 30 skipped (aiosqlite)  
 **Scope:** SQLAlchemy dialect (`sqlite+rapsqlite`) integration tests
 
 ---

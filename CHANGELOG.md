@@ -49,6 +49,19 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 
 ## [0.3.0-dev] - Unreleased
 
+### Fixed - SQLAlchemy and create_function (2026-01-31)
+
+- **SQLAlchemy ORM INSERT...RETURNING doubled rows** — ExecuteContextManager now fetches and caches RETURNING rows for INSERT/UPDATE/DELETE via `returns_result_rows` and `_set_select_results`, so `cursor.fetchall()` does not re-execute. Fixes `test_async_session_add_commit_get` and `test_async_session_add_all_many_rows`.
+- **SQLAlchemy transaction rollback with UDFs** — When `has_callbacks` and DML runs without an active transaction, new DML-with-callbacks branch runs BEGIN on `callback_connection`, moves it to `transaction_connection`, and sets `transaction_state = Active`, so rollback correctly undoes inserts. Fixes `test_connection_explicit_transaction`.
+- **create_function connection routing** — `create_function` now prefers `transaction_connection` when it holds a connection (moved by DML-with-callbacks). Ensures UDF add/remove operates on the correct connection. Fixes `test_create_function` and `test_create_function_deterministic`.
+
+### Changed - Code quality (2026-01-31)
+
+- **cargo fmt** — Reformatted `src/connection.rs`, `src/context_managers.rs`, `src/utils.rs`.
+- **cargo clippy** — Fixed useless_conversion warnings in `src/context_managers.rs` (removed redundant `.into()` on `build_description_empty_result(...).unbind()`).
+- **ruff format** — Reformatted Python sources (rapsqlite, tests, scripts).
+- **ruff check** — Removed unused `asyncio` import in `tests/test_doc_examples.py`.
+
 ### Added - Phase 3.8: v0.3.0 release readiness (2026-01-31)
 
 - **`connect(..., aiosqlite_compat=True)`** — When True, sets default row_factory to tuple so fetch_all/cursor fetchall return tuples (aiosqlite/sqlite3 default). Use for drop-in ``import rapsqlite as aiosqlite`` without code changes for row type.
