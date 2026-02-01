@@ -9,6 +9,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # Use installed rapsqlite if available (e.g. CI); otherwise project root for local dev
@@ -26,6 +27,20 @@ def _temp_db():
     return path
 
 
+def _unlink_db(path: str) -> None:
+    """Unlink a temp DB file; on Windows the handle may be released after a short delay."""
+    for _ in range(5):
+        try:
+            os.unlink(path)
+            return
+        except PermissionError:
+            time.sleep(0.1)
+    try:
+        os.unlink(path)
+    except OSError:
+        pass  # best-effort cleanup
+
+
 async def quickstart_basic():
     """Docs quickstart: Basic Connection (output: [[1, 'Alice']])."""
     path = _temp_db()
@@ -36,7 +51,7 @@ async def quickstart_basic():
             rows = await conn.fetch_all("SELECT * FROM users")
             assert rows == [[1, "Alice"]], f"Expected [[1, 'Alice']], got {rows}"
     finally:
-        os.unlink(path)
+        _unlink_db(path)
 
 
 async def installation_verify():
@@ -49,7 +64,7 @@ async def installation_verify():
             rows = await conn.fetch_all("SELECT * FROM test")
             assert rows == [[1]], f"Expected [[1]], got {rows}"
     finally:
-        os.unlink(path)
+        _unlink_db(path)
 
 
 async def index_quick_example():
@@ -62,7 +77,7 @@ async def index_quick_example():
             rows = await conn.fetch_all("SELECT * FROM test")
             assert rows == [[1, "hello"]], f"Expected [[1, 'hello']], got {rows}"
     finally:
-        os.unlink(path)
+        _unlink_db(path)
 
 
 async def quickstart_cursor_iteration():
@@ -80,7 +95,7 @@ async def quickstart_cursor_iteration():
                 collected.append(row)
             assert collected == [[1, "Alice"], [2, "Bob"]], f"Got {collected}"
     finally:
-        os.unlink(path)
+        _unlink_db(path)
 
 
 async def row_api_example():
@@ -96,7 +111,7 @@ async def row_api_example():
             assert rows[0][0] == 1
             assert list(rows[0].keys()) == ["id", "name"]
     finally:
-        os.unlink(path)
+        _unlink_db(path)
 
 
 async def migration_basic_connection():
@@ -111,7 +126,7 @@ async def migration_basic_connection():
             rows = await db.fetch_all("SELECT * FROM test")
             assert rows == [[1, "hello"]], f"Expected [[1, 'hello']], got {rows}"
     finally:
-        os.unlink(path)
+        _unlink_db(path)
 
 
 async def run_all():
