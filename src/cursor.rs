@@ -21,7 +21,7 @@ use crate::types::{
     Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
     UserCollations, UserFunctions,
 };
-use crate::utils::is_select_query;
+use crate::utils::returns_result_rows;
 use crate::{Connection, OperationalError, ProgrammingError};
 
 /// Cursor for executing queries.
@@ -117,7 +117,9 @@ impl Cursor {
     }
 
     /// Internal: store fetched SELECT results and description (eager execution from ExecuteContextManager).
-    /// Description is stored in pending_description so cursor.description is None until first fetch (lazy).
+    /// For 0-row SELECT we set description immediately so cursor.description is available before any
+    /// fetch (SQLAlchemy/DBAPI need it). For non-empty results we keep description None until first
+    /// fetch (lazy) and store in pending_description.
     fn _set_select_results(
         &self,
         rows: &Bound<'_, PyList>,
@@ -128,12 +130,16 @@ impl Cursor {
             vec.push(item.clone().unbind());
         }
         *self.results.lock().unwrap() = Some(vec);
-        *self.description.lock().unwrap() = None; // Lazy: set on first fetch
-        *self.pending_description.lock().unwrap() = if description.is_none() {
+        let py = description.py();
+        let desc_value = if description.is_none() {
             None
         } else {
             Some(description.clone().unbind())
         };
+        let for_pending = desc_value.as_ref().map(|d| d.clone_ref(py));
+        *self.pending_description.lock().unwrap() = for_pending;
+        // 0-row SELECT: set description now so SQLAlchemy/DBAPI see it. Non-empty: leave None until first fetch.
+        *self.description.lock().unwrap() = if rows.is_empty() { desc_value } else { None };
         Ok(())
     }
 
@@ -509,10 +515,9 @@ impl Cursor {
         let pending_description = Arc::clone(&self.pending_description);
         let row_factory_override = Arc::clone(&self.row_factory_override);
 
-        // Check if this is a non-SELECT query - if so and results are None,
-        // it means the query was already executed in __aenter__ and we should
-        // just return empty results without executing again
-        let is_select = is_select_query(&query);
+        // Check if this statement returns result rows - if not and results are None,
+        // it was already executed in __aenter__ and we should return empty results
+        let is_select = returns_result_rows(&query);
         if !is_select {
             let results_guard = results.lock().unwrap();
             if results_guard.is_none() {
@@ -547,9 +552,8 @@ impl Cursor {
                 };
 
                 if needs_fetch {
-                    // Check if this is a non-SELECT query - if so, it was already executed in __aenter__
-                    // and we should just mark results as empty
-                    let is_select = is_select_query(&query);
+                    // If statement does not return rows, it was already executed in __aenter__
+                    let is_select = returns_result_rows(&query);
                     if !is_select {
                         // Non-SELECT query already executed in __aenter__, mark as empty
                         let mut results_guard = results.lock().unwrap();

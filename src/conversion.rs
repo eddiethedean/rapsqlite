@@ -392,6 +392,73 @@ pub(crate) fn row_to_py_with_factory<'py>(
     Ok(result)
 }
 
+/// Parse column names from a SELECT query (between SELECT and FROM) for 0-row description.
+/// Returns None for SELECT * or unparseable queries. Used so SQLAlchemy ORM can build keymap
+/// from cursor description when the first (or only) result has 0 rows.
+fn parse_select_column_names(query: &str) -> Option<Vec<String>> {
+    let q = query.trim();
+    // Normalize whitespace: replace all whitespace sequences with single space
+    // This handles newlines and tabs that SQLAlchemy may include in formatted SQL
+    let normalized: String = q
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let upper = normalized.to_uppercase();
+    if !upper.starts_with("SELECT") {
+        return None;
+    }
+    // Find " FROM " (with spaces) to avoid matching inside string literals or subqueries
+    let from_pos = upper.find(" FROM ")?;
+    let select_list = normalized[6..from_pos].trim(); // after "SELECT"
+    if select_list.is_empty() || select_list == "*" {
+        return None;
+    }
+    let mut names = Vec::new();
+    for part in select_list.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        // "table.col" or "t_xxx.id" -> use full identifier so SQLAlchemy keymap matches Column.
+        names.push(part.to_string());
+    }
+    if names.is_empty() {
+        return None;
+    }
+    Some(names)
+}
+
+/// Build a minimal cursor description when there are no rows (so SQLAlchemy still sees returns_rows=True).
+/// If query is a SELECT and column names can be parsed, use them so ORM keymap matches (e.g. session.get missing).
+/// Otherwise uses a single placeholder column.
+pub(crate) fn build_description_empty_result<'py>(
+    py: Python<'py>,
+    query: Option<&str>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let col_names: Vec<String> = if let Some(q) = query {
+        parse_select_column_names(q).unwrap_or_else(|| vec!["column_0".to_string()])
+    } else {
+        vec!["column_0".to_string()]
+    };
+    let mut col_tuples = Vec::with_capacity(col_names.len());
+    for name in &col_names {
+        let seven = PyTuple::new(
+            py,
+            [
+                PyString::new(py, name.as_str()).into(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+            ],
+        )?;
+        col_tuples.push(seven.into_any());
+    }
+    Ok(PyTuple::new(py, col_tuples)?.into_any())
+}
+
 /// Build a cursor description tuple from a SQLite row (aiosqlite/sqlite3 compatible).
 /// Returns a Python tuple of 7-tuples: (name, type_code, display_size, internal_size, precision, scale, null_ok).
 pub(crate) fn build_description_tuple<'py>(

@@ -62,6 +62,20 @@ async def test_async_connect_returns_connection():
 
 
 @pytest.mark.asyncio
+async def test_async_connection_create_function():
+    """DBAPI AsyncConnection has create_function; register and use in SELECT."""
+    conn = await dbapi.connect(":memory:")
+    assert hasattr(conn, "create_function")
+    await conn.create_function("double", 1, lambda x: x * 2 if x is not None else None)
+    cur = await conn.execute("SELECT double(21)")
+    row = await cur.fetchone()
+    await cur.close()
+    assert row is not None and row[0] == 42
+    await conn.create_function("double", 1, None)  # remove
+    await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_async_cursor():
     conn = await dbapi.connect(":memory:")
     cur = await conn.cursor()

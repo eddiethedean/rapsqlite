@@ -22,9 +22,16 @@ echo ""
 
 cd "$PROJECT_ROOT"
 
-echo "Building (maturin develop)..."
-# PYO3_PYTHON forces the build target; maturin installs into that interpreter's env.
-"$PYTHON" -m maturin develop
+echo "Building for current Python..."
+# Build wheel for this interpreter (maturin develop can pick up a different Python on PATH).
+# Then install it so the extension matches the interpreter that runs pytest.
+maturin build --interpreter "$PYO3_PYTHON"
+WHEEL=$(ls -t "$PROJECT_ROOT/target/wheels"/rapsqlite-*.whl 2>/dev/null | head -1)
+if [[ -z "$WHEEL" || ! -f "$WHEEL" ]]; then
+    echo "No wheel found after build." >&2
+    exit 1
+fi
+"$PYTHON" -m pip install --force-reinstall --no-deps "$WHEEL"
 
 echo ""
 echo "Running Rust unit tests..."

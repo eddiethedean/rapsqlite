@@ -11,6 +11,8 @@ Use with create_async_engine:
 Requires ``pip install rapsqlite[sqlalchemy]`` (adds sqlalchemy dependency).
 """
 
+import math
+import re
 import sqlite3
 from typing import Any
 
@@ -19,6 +21,7 @@ try:
     from sqlalchemy.dialects.sqlite.pysqlite import SQLiteDialect_pysqlite
     from sqlalchemy import pool
     from sqlalchemy.engine import URL
+    from sqlalchemy.util.concurrency import await_fallback as _await
     from sqlalchemy.connectors.asyncio import (
         AsyncAdapt_dbapi_connection,
         AsyncAdapt_dbapi_cursor,
@@ -33,10 +36,41 @@ from . import dbapi as _dbapi
 
 
 class _RapsqliteCursor(AsyncAdapt_dbapi_cursor):
-    __slots__ = ()
+    """Cache description so SQLAlchemy can build result metadata after cursor close."""
+
+    __slots__ = ("_last_description",)
+
+    def __init__(self, adapt_connection: Any) -> None:
+        super().__init__(adapt_connection)
+        self._last_description: Any = None
 
     def _make_new_cursor(self, connection: Any) -> Any:
         return self._adapt_connection.await_(connection.cursor())
+
+    def execute(
+        self,
+        operation: Any,
+        parameters: Any = None,
+    ) -> Any:
+        result = super().execute(operation, parameters)
+        # Cache description right after execute so 0-row SELECT (e.g. session.get missing key)
+        # is visible to SQLAlchemy when _setup_result_proxy reads context.cursor.description.
+        if self._cursor is not None:
+            desc = self._cursor.description
+            if desc is not None:
+                self._last_description = desc
+        return result
+
+    @property
+    def description(self) -> Any:
+        if "description" in self._soft_closed_memoized:
+            return self._soft_closed_memoized["description"]
+        desc = self._cursor.description if self._cursor is not None else None
+        if desc is not None:
+            self._last_description = desc
+        if self._last_description is not None:
+            return self._last_description
+        return desc
 
 
 class _RapsqliteConnection(AsyncAdapt_dbapi_connection):
@@ -93,8 +127,35 @@ class SQLiteDialect_rapsqlite(SQLiteDialect_pysqlite):
         return pool.StaticPool
 
     def on_connect(self) -> Any:
-        """No regexp/floor on_connect; rapsqlite does not expose create_function via DBAPI."""
-        return None
+        """Register regexp and floor on each new connection (DBAPI create_function)."""
+
+        def _regexp(pattern: str, value: Any) -> Any:
+            if value is None:
+                return None
+            return re.search(pattern, value) is not None
+
+        # deterministic=True for SQLite 3.9+ (match pysqlite)
+        try:
+            version = self._get_server_version_info(None)
+            create_func_kw = (
+                {"deterministic": True} if version and version >= (3, 9) else {}
+            )
+        except Exception:
+            create_func_kw = {}
+
+        def connect(dbapi_connection: Any) -> None:
+            # Pool passes AsyncAdapt_dbapi_connection; raw is in ._connection
+            raw = getattr(
+                dbapi_connection, "_connection", dbapi_connection
+            )
+            _await(raw.create_function(
+                "regexp", 2, _regexp, **create_func_kw
+            ))
+            _await(raw.create_function(
+                "floor", 1, math.floor, **create_func_kw
+            ))
+
+        return connect
 
 
 dialect = SQLiteDialect_rapsqlite

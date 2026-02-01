@@ -30,6 +30,8 @@ posts/
 # Uncomment the next line if you want to ignore Cargo.lock
 # Cargo.lock
 target/
+.cargo/
+.cargo_cache/
 **/*.rs.bk
 *.pdb
 

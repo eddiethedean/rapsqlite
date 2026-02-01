@@ -1,7 +1,7 @@
 //! SQL parameter parsing and binding helpers.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::types::{Adapters, SqliteParam};
 
@@ -78,15 +78,32 @@ pub(crate) fn process_named_parameters(
     Ok((processed_query, param_values))
 }
 
-/// Process positional parameters from a list/tuple.
+/// Process positional parameters from a list.
 /// If adapters is Some, apply registered adapters before converting each value to SqliteParam.
 pub(crate) fn process_positional_parameters(
     py: Python<'_>,
     list: &Bound<'_, PyList>,
     adapters: Option<&Adapters>,
 ) -> PyResult<Vec<SqliteParam>> {
+    process_positional_parameters_iter(py, list.iter(), adapters)
+}
+
+/// Process positional parameters from a tuple (e.g. SQLAlchemy passes tuples for qmark).
+pub(crate) fn process_positional_parameters_tuple(
+    py: Python<'_>,
+    tup: &Bound<'_, PyTuple>,
+    adapters: Option<&Adapters>,
+) -> PyResult<Vec<SqliteParam>> {
+    process_positional_parameters_iter(py, tup.iter(), adapters)
+}
+
+fn process_positional_parameters_iter<'a>(
+    py: Python<'_>,
+    iter: impl Iterator<Item = Bound<'a, PyAny>>,
+    adapters: Option<&Adapters>,
+) -> PyResult<Vec<SqliteParam>> {
     let mut param_values = Vec::new();
-    for item in list.iter() {
+    for item in iter {
         let param = SqliteParam::apply_adapters_then_from_py(py, &item, adapters)?;
         param_values.push(param);
     }

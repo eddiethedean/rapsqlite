@@ -18,7 +18,7 @@ pub(crate) fn next_savepoint_name() -> String {
 }
 
 use crate::connection::ensure_not_closed;
-use crate::conversion::{build_description_tuple, row_to_py_with_factory};
+use crate::conversion::{build_description_empty_result, build_description_tuple, row_to_py_with_factory};
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
     execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
@@ -28,7 +28,7 @@ use crate::types::{
     Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
     UserCollations, UserFunctions,
 };
-use crate::utils::is_dml_query;
+use crate::utils::{is_begin_query, is_commit_or_rollback_query, is_dml_query};
 use crate::{map_sqlx_error, Connection, Cursor, OperationalError};
 
 /// Execute context manager returned by `Connection::execute()`.
@@ -181,6 +181,36 @@ impl ExecuteContextManager {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         bind_and_execute_on_connection(&query, &param_values, conn, &path).await?
+                    } else if has_callbacks_flag && is_begin_query(&query) {
+                        // Raw "BEGIN" from SQLAlchemy: execute on callback_connection, then move to
+                        // transaction_connection so subsequent DML and rollback() work correctly.
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+
+                        let mut conn_guard = callback_connection.lock().await;
+                        let mut conn = conn_guard.take().ok_or_else(|| {
+                            OperationalError::new_err("Callback connection not available")
+                        })?;
+                        let result =
+                            bind_and_execute_on_connection(&query, &param_values, &mut conn, &path)
+                                .await?;
+                        {
+                            let mut g = transaction_state.lock().await;
+                            *g = TransactionState::Active;
+                        }
+                        {
+                            let mut g = transaction_connection.lock().await;
+                            *g = Some(conn);
+                        }
+                        result
                     } else if has_callbacks_flag {
                         ensure_callback_connection(
                             &path,
@@ -265,6 +295,21 @@ impl ExecuteContextManager {
                         }
                         result
                     };
+
+                    // Raw COMMIT/ROLLBACK from SQLAlchemy: reset state and return connection to
+                    // callback_connection so UDFs remain available.
+                    if is_commit_or_rollback_query(&query) {
+                        let mut trans_guard = transaction_state.lock().await;
+                        *trans_guard = TransactionState::None;
+                        drop(trans_guard);
+                        if has_callbacks_flag {
+                            let mut conn_guard = transaction_connection.lock().await;
+                            if let Some(conn) = conn_guard.take() {
+                                let mut cb_guard = callback_connection.lock().await;
+                                *cb_guard = Some(conn);
+                            }
+                        }
+                    }
 
                     let rowid = result.last_insert_rowid();
                     let changes = result.rows_affected();
@@ -418,7 +463,9 @@ impl ExecuteContextManager {
                         let desc: Py<PyAny> = if let Some(first) = rows.first() {
                             build_description_tuple(py, first)?.unbind().into()
                         } else {
-                            py.None()
+                            // Empty result: set description from parsed SELECT columns so SQLAlchemy ORM
+                            // keymap matches (e.g. session.get(Model, missing_id), two get(missing) in a row).
+                            build_description_empty_result(py, Some(&query))?.unbind().into()
                         };
                         cur.call_method1("_set_select_results", (list, desc))?;
                         Ok(())

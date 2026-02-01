@@ -11,10 +11,36 @@ pub(crate) fn is_select_query(query: &str) -> bool {
     trimmed.starts_with("SELECT") || trimmed.starts_with("WITH")
 }
 
+/// True if the statement returns result rows (SELECT, WITH, or INSERT/UPDATE/DELETE ... RETURNING).
+/// Used so that INSERT/UPDATE/DELETE with RETURNING are executed and fetched like SELECT,
+/// e.g. for SQLAlchemy's insertmanyvalues / ORM identity fetch.
+pub(crate) fn returns_result_rows(query: &str) -> bool {
+    let trimmed = query.trim().to_uppercase();
+    if trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") {
+        return true;
+    }
+    if trimmed.starts_with("INSERT") || trimmed.starts_with("UPDATE") || trimmed.starts_with("DELETE") {
+        return trimmed.contains("RETURNING");
+    }
+    false
+}
+
 /// True for INSERT/UPDATE/DELETE only. Used to avoid implicit transaction for DDL (CREATE, etc.).
 pub(crate) fn is_dml_query(query: &str) -> bool {
     let trimmed = query.trim().to_uppercase();
     trimmed.starts_with("INSERT") || trimmed.starts_with("UPDATE") || trimmed.starts_with("DELETE")
+}
+
+/// True if the query is a transaction control statement (BEGIN, COMMIT, ROLLBACK).
+/// Used to sync rapsqlite's transaction_state when SQLAlchemy sends these as raw SQL.
+pub(crate) fn is_begin_query(query: &str) -> bool {
+    query.trim().to_uppercase().starts_with("BEGIN")
+}
+
+/// True if the query is COMMIT or ROLLBACK.
+pub(crate) fn is_commit_or_rollback_query(query: &str) -> bool {
+    let trimmed = query.trim().to_uppercase();
+    trimmed.starts_with("COMMIT") || trimmed.starts_with("ROLLBACK")
 }
 
 /// Normalize a SQL query by removing extra whitespace and standardizing formatting.
@@ -233,6 +259,18 @@ mod tests {
         assert!(!is_select_query("UPDATE t SET x = 1"));
         assert!(!is_select_query("DELETE FROM t"));
         assert!(!is_select_query("PRAGMA foreign_keys = ON"));
+    }
+
+    #[test]
+    fn test_returns_result_rows() {
+        assert!(returns_result_rows("SELECT 1"));
+        assert!(returns_result_rows("WITH x AS (SELECT 1) SELECT * FROM x"));
+        assert!(returns_result_rows("INSERT INTO t (a) VALUES (1) RETURNING id"));
+        assert!(returns_result_rows("UPDATE t SET x = 1 RETURNING id"));
+        assert!(returns_result_rows("DELETE FROM t RETURNING id"));
+        assert!(!returns_result_rows("INSERT INTO t VALUES (1)"));
+        assert!(!returns_result_rows("UPDATE t SET x = 1"));
+        assert!(!returns_result_rows("DELETE FROM t"));
     }
 
     #[test]

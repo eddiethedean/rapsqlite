@@ -208,6 +208,8 @@ def pytest_configure(config):
     )
     config.addinivalue_line("markers", "property: Property-based tests")
     config.addinivalue_line("markers", "slow: Slow-running tests")
+    config.addinivalue_line("markers", "sqlalchemy_core: SQLAlchemy Core (engine/connection) tests")
+    config.addinivalue_line("markers", "sqlalchemy_orm: SQLAlchemy ORM (AsyncSession) tests")
 
 
 def pytest_collection_modifyitems(config, items):

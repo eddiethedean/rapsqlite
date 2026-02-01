@@ -30,7 +30,10 @@ use libsqlite3_sys::{
 use crate::context_managers::next_savepoint_name;
 use crate::conversion::{py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py};
 use crate::errors::map_sqlx_error;
-use crate::parameters::{process_named_parameters, process_positional_parameters};
+use crate::parameters::{
+    process_named_parameters, process_positional_parameters,
+    process_positional_parameters_tuple,
+};
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
     execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
@@ -1383,6 +1386,13 @@ impl Connection {
                 return Ok((query, params_vec));
             }
 
+            // Check if it's a tuple (SQLAlchemy qmark style)
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec =
+                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+
             // Single value (treat as single positional parameter)
             let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
@@ -1805,6 +1815,13 @@ impl Connection {
                 return Ok((query, params_vec));
             }
 
+            // Check if it's a tuple (SQLAlchemy qmark style)
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec =
+                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+
             // Single value (treat as single positional parameter)
             let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
@@ -1996,6 +2013,11 @@ impl Connection {
             }
             if let Ok(list) = params.cast::<PyList>() {
                 let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec =
+                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
             let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
@@ -2202,6 +2224,11 @@ impl Connection {
                 let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec =
+                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
             let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
@@ -2372,6 +2399,11 @@ impl Connection {
             }
             if let Ok(list) = params.cast::<PyList>() {
                 let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec =
+                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
             let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
