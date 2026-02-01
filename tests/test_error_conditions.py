@@ -6,10 +6,11 @@ import pytest
 from rapsqlite import (
     Connection,
     connect,
-    OperationalError,
     DatabaseError,
-    ProgrammingError,
     IntegrityError,
+    InterfaceError,
+    OperationalError,
+    ProgrammingError,
 )
 
 
@@ -162,19 +163,17 @@ async def test_invalid_parameter_type(test_db):
 @pytest.mark.edge_case
 @pytest.mark.asyncio
 async def test_rollback_without_transaction(test_db):
-    """Test error when rolling back without active transaction."""
+    """Rollback without active transaction is a no-op (DBAPI compat)."""
     async with connect(test_db) as db:
-        with pytest.raises(OperationalError):
-            await db.rollback()
+        await db.rollback()  # does not raise
 
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
 async def test_commit_without_transaction(test_db):
-    """Test error when committing without active transaction."""
+    """Commit without active transaction is a no-op (DBAPI compat)."""
     async with connect(test_db) as db:
-        with pytest.raises(OperationalError):
-            await db.commit()
+        await db.commit()  # does not raise
 
 
 @pytest.mark.edge_case
@@ -207,12 +206,10 @@ async def test_cursor_on_closed_connection(test_db):
     await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     await db.close()
 
-    # Cursor creation might succeed, but execution should fail
-    # Or cursor might recreate connection (both are acceptable)
+    # Cursor creation might succeed, but execution raises InterfaceError after close()
     cursor = db.cursor()
     try:
         await cursor.execute("SELECT 1")
-        # If it works, connection was recreated (acceptable)
-    except (OperationalError, DatabaseError):
+    except (InterfaceError, OperationalError, DatabaseError):
         # Expected - connection is closed
         pass

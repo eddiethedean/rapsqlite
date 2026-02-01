@@ -2,8 +2,13 @@
 
 import asyncio
 import tempfile
-import os
+
+from conftest import cleanup_db
 from rapsqlite import connect
+
+import pytest
+
+pytestmark = [pytest.mark.unit]
 
 
 async def test_connection_identity():
@@ -28,8 +33,7 @@ async def test_connection_identity():
                 "✓ Connection identity test completed - check logs for connection pointers"
             )
     finally:
-        if os.path.exists(test_db):
-            os.unlink(test_db)
+        cleanup_db(test_db)
 
 
 async def test_single_param_set():
@@ -54,8 +58,7 @@ async def test_single_param_set():
         print(f"✗ Single param set failed: {e}")
         raise
     finally:
-        if os.path.exists(test_db):
-            os.unlink(test_db)
+        cleanup_db(test_db)
 
 
 async def test_two_param_sets():
@@ -80,8 +83,7 @@ async def test_two_param_sets():
         print(f"✗ Two param sets failed: {e}")
         raise
     finally:
-        if os.path.exists(test_db):
-            os.unlink(test_db)
+        cleanup_db(test_db)
 
 
 async def test_execute_then_execute_many():
@@ -108,8 +110,7 @@ async def test_execute_then_execute_many():
         print(f"✗ Execute then execute_many failed: {e}")
         raise
     finally:
-        if os.path.exists(test_db):
-            os.unlink(test_db)
+        cleanup_db(test_db)
 
 
 async def test_execute_many_then_execute():
@@ -136,8 +137,7 @@ async def test_execute_many_then_execute():
         print(f"✗ Execute_many then execute failed: {e}")
         raise
     finally:
-        if os.path.exists(test_db):
-            os.unlink(test_db)
+        cleanup_db(test_db)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@ import pytest
 
 import rapsqlite
 
+pytestmark = [pytest.mark.unit]
+
 
 @pytest.mark.asyncio
 async def test_text_factory_callable_applies_to_text_columns(test_db):

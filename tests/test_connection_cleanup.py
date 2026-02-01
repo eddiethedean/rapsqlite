@@ -3,6 +3,8 @@
 import pytest
 import rapsqlite
 
+pytestmark = [pytest.mark.unit]
+
 
 @pytest.mark.asyncio
 async def test_connection_close_cleans_up_callbacks(test_db):

@@ -2,6 +2,8 @@
 
 #![allow(non_local_definitions)] // False positive from pyo3 macros
 
+mod backup;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
@@ -11,41 +13,45 @@ use sqlx::{Column, Row, SqlitePool};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
 use tokio::sync::Mutex;
 
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{
-    sqlite3, sqlite3_backup_finish, sqlite3_backup_init, sqlite3_backup_pagecount,
-    sqlite3_backup_remaining, sqlite3_backup_step, sqlite3_context, sqlite3_create_function_v2,
-    sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg, sqlite3_free,
-    sqlite3_get_autocommit, sqlite3_libversion, sqlite3_load_extension, sqlite3_progress_handler,
-    sqlite3_result_null, sqlite3_set_authorizer, sqlite3_total_changes, sqlite3_trace_v2,
-    sqlite3_user_data, sqlite3_value, SQLITE_BUSY, SQLITE_DENY, SQLITE_DONE, SQLITE_LOCKED,
-    SQLITE_OK, SQLITE_TRACE_STMT, SQLITE_UTF8,
+    sqlite3, sqlite3_aggregate_context, sqlite3_context, sqlite3_create_collation_v2,
+    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free,
+    sqlite3_get_autocommit, sqlite3_interrupt, sqlite3_libversion, sqlite3_libversion_number,
+    sqlite3_load_extension, sqlite3_progress_handler, sqlite3_result_null, sqlite3_set_authorizer,
+    sqlite3_total_changes, sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_DENY,
+    SQLITE_DETERMINISTIC, SQLITE_OK, SQLITE_TRACE_STMT, SQLITE_UTF8,
 };
 
+use crate::context_managers::next_savepoint_name;
 use crate::conversion::{py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py};
 use crate::errors::map_sqlx_error;
-use crate::parameters::{process_named_parameters, process_positional_parameters};
+use crate::parameters::{
+    process_named_parameters, process_positional_parameters, process_positional_parameters_tuple,
+};
 use crate::pool::{
-    ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
-    pool_acquisition_error,
+    acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
+    execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
 };
 use crate::query::{
-    bind_and_execute, bind_and_execute_on_connection, bind_and_fetch_all,
-    bind_and_fetch_all_on_connection, bind_and_fetch_one, bind_and_fetch_one_on_connection,
-    bind_and_fetch_optional, bind_and_fetch_optional_on_connection,
+    bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
+    bind_and_fetch_one_on_connection, bind_and_fetch_optional_on_connection,
 };
-use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
+use crate::types::{
+    Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
+    UserCollations, UserFunctions,
+};
 use crate::utils::{
-    cstr_from_c_char_ptr, is_select_query, parse_connection_string, track_query_usage,
-    validate_path,
+    cstr_from_c_char_ptr, is_select_query, parse_connection_string, returns_result_rows,
+    track_query_usage, validate_path,
 };
-use crate::OperationalError;
 use crate::{
-    Cursor, ExecuteContextManager, ProgrammingError, TransactionContextManager, ValueError,
+    Cursor, ExecuteContextManager, NotSupportedError, ProgrammingError, SavepointContextManager,
+    TransactionContextManager, ValueError,
 };
+use crate::{InterfaceError, OperationalError};
 
 /// Async SQLite connection.
 #[pyclass]
@@ -63,6 +69,7 @@ pub(crate) struct Connection {
     init_hook_called: Arc<StdMutex<bool>>,         // Track if init_hook has been executed
     pool_size: Arc<StdMutex<Option<usize>>>,       // Configurable pool size
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>, // Connection timeout in seconds
+    idle_timeout_secs: Arc<StdMutex<Option<u64>>>, // Idle connection timeout (pool closes idle conns after this)
     row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // None | "dict" | "tuple" | callable
     text_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Callable(bytes) -> str, or None for default UTF-8
     // Prepared statement cache tracking (Phase 2.13)
@@ -76,13 +83,29 @@ pub(crate) struct Connection {
     callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>, // Dedicated connection for callbacks
     load_extension_enabled: Arc<StdMutex<bool>>, // Track load_extension state
     user_functions: UserFunctions,               // name -> (nargs, callback)
+    user_aggregates: UserAggregates,             // name -> (num_params, user_data ptr for cleanup)
+    user_collations: UserCollations,             // name -> user_data ptr for cleanup on remove
+    adapters: Adapters,                          // (type, callable) for register_adapter
+    converters: Converters, // typename -> callable(bytes)->Any for register_converter
     trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Trace callback
     authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Authorizer callback
-    progress_handler: ProgressHandler,           // (n, callback)
+    progress_handler: ProgressHandler, // (n, callback)
     // Error message security: control whether query strings are included in errors
     include_query_in_errors: Arc<StdMutex<bool>>, // If false, exclude query strings from error messages
     // SQLite busy_timeout (aiosqlite compatibility) - timeout in seconds for database locks
     timeout: Arc<StdMutex<f64>>, // Default: 5.0 seconds (matches sqlite3 default)
+    // Phase 3.9: transaction isolation level (None | "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE")
+    isolation_level: Arc<StdMutex<Option<String>>>,
+    // Phase 3.10: iter_chunk_size (aiosqlite compat); used for chunked iteration when applicable
+    iter_chunk_size: Arc<StdMutex<usize>>,
+    /// True only when in an explicit transaction (begin() or transaction()); false for implicit.
+    /// in_transaction() reports True only when this is true (aiosqlite semantics).
+    explicit_transaction: Arc<Mutex<bool>>,
+    /// True after close() has completed; used to reject post-close operations without touching pool/Tokio.
+    closed: Arc<StdMutex<bool>>,
+    /// Reused connection for non-transaction, non-callback operations (session-scoped).
+    /// Released on close() and when starting a transaction to match aiosqlite and improve concurrent reads.
+    session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
 }
 
 // Note: We do not implement Drop for Connection because:
@@ -99,6 +122,48 @@ pub(crate) struct Connection {
 // For proper cleanup including transaction rollback, always:
 // - Use async context managers: `async with rapsqlite.connect(...) as db:`
 // - Or call close() explicitly: `await db.close()`
+
+/// Shared state needed to run a single execute. Used by Connection and ExecuteContextManager
+/// so we clone one struct instead of 25+ individual fields when creating ExecuteContextManager.
+#[derive(Clone)]
+pub(crate) struct ConnectionExecutionState {
+    pub(crate) path: String,
+    pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
+    pub(crate) session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
+    pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
+    pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
+    pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
+    pub(crate) user_functions: UserFunctions,
+    pub(crate) user_aggregates: UserAggregates,
+    pub(crate) user_collations: UserCollations,
+    #[allow(dead_code)] // used when binding parameters; ExecuteContextManager may not read
+    pub(crate) adapters: Adapters,
+    pub(crate) converters: Converters,
+    pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) progress_handler: ProgressHandler,
+    pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) init_hook_called: Arc<StdMutex<bool>>,
+    pub(crate) last_rowid: Arc<Mutex<i64>>,
+    pub(crate) last_changes: Arc<Mutex<u64>>,
+    pub(crate) timeout: Arc<StdMutex<f64>>,
+    pub(crate) isolation_level: Arc<StdMutex<Option<String>>>,
+    pub(crate) closed: Arc<StdMutex<bool>>,
+    pub(crate) explicit_transaction: Arc<Mutex<bool>>,
+}
+
+/// Returns Ok(()) if the connection is not closed; otherwise returns InterfaceError.
+pub(crate) fn ensure_not_closed(closed: &Arc<StdMutex<bool>>) -> Result<(), PyErr> {
+    if *closed.lock().unwrap() {
+        return Err(InterfaceError::new_err("connection is closed"));
+    }
+    Ok(())
+}
 
 #[pymethods]
 impl Connection {
@@ -158,17 +223,24 @@ impl Connection {
     ///         # Database is already initialized
     ///         pass
     #[new]
-    #[pyo3(signature = (path, *, pragmas = None, init_hook = None, timeout = 5.0))]
+    #[pyo3(signature = (path, *, pragmas = None, init_hook = None, timeout = 5.0, iter_chunk_size = 64, loop_param = None))]
     fn new(
         path: String,
         pragmas: Option<&Bound<'_, pyo3::types::PyDict>>,
         init_hook: Option<Py<PyAny>>,
         timeout: f64,
+        iter_chunk_size: i64,
+        loop_param: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        // Validate timeout (must be non-negative)
+        let _ = loop_param; // Accepted for aiosqlite compat (connect(loop=...)); ignored (deprecated).
+                            // Validate timeout (must be non-negative)
         if timeout < 0.0 {
             return Err(ValueError::new_err("timeout must be >= 0.0"));
         }
+        if iter_chunk_size < 1 {
+            return Err(ValueError::new_err("iter_chunk_size must be >= 1"));
+        }
+        let iter_chunk_size = iter_chunk_size as usize;
         // Parse connection string if it's a URI
         let (db_path, uri_params) = parse_connection_string(&path)?;
         validate_path(&db_path)?;
@@ -203,6 +275,7 @@ impl Connection {
             init_hook_called: Arc::new(StdMutex::new(false)),
             pool_size: Arc::new(StdMutex::new(None)),
             connection_timeout_secs: Arc::new(StdMutex::new(None)),
+            idle_timeout_secs: Arc::new(StdMutex::new(None)),
             row_factory: Arc::new(StdMutex::new(None)),
             text_factory: Arc::new(StdMutex::new(None)),
             // Prepared statement cache tracking (Phase 2.13)
@@ -211,12 +284,26 @@ impl Connection {
             callback_connection: Arc::new(Mutex::new(None)),
             load_extension_enabled: Arc::new(StdMutex::new(false)),
             user_functions: Arc::new(StdMutex::new(HashMap::new())),
+            user_aggregates: Arc::new(StdMutex::new(HashMap::new())),
+            user_collations: Arc::new(StdMutex::new(HashMap::new())),
+            adapters: Arc::new(StdMutex::new(Vec::new())),
+            converters: Arc::new(StdMutex::new(HashMap::new())),
             trace_callback: Arc::new(StdMutex::new(None)),
             authorizer_callback: Arc::new(StdMutex::new(None)),
             progress_handler: Arc::new(StdMutex::new(None)),
             include_query_in_errors: Arc::new(StdMutex::new(true)), // Default: include queries for debugging
             timeout: Arc::new(StdMutex::new(timeout)), // SQLite busy_timeout in seconds (aiosqlite compatibility)
+            isolation_level: Arc::new(StdMutex::new(None)), // Phase 3.9: None | DEFERRED | IMMEDIATE | EXCLUSIVE
+            iter_chunk_size: Arc::new(StdMutex::new(iter_chunk_size)), // Phase 3.10: aiosqlite compat
+            explicit_transaction: Arc::new(Mutex::new(false)),
+            closed: Arc::new(StdMutex::new(false)),
+            session_connection: Arc::new(Mutex::new(None)),
         })
+    }
+
+    #[getter(path)]
+    fn path(&self) -> &str {
+        &self.path
     }
 
     #[getter(row_factory)]
@@ -266,20 +353,26 @@ impl Connection {
     fn total_changes(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
+        let session_connection = Arc::clone(&self.session_connection);
         let callback_connection = Arc::clone(&self.callback_connection);
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Check if we're in a transaction - if so, use transaction connection
                 let in_transaction = {
                     let trans_guard = transaction_state.lock().await;
@@ -298,10 +391,12 @@ impl Connection {
                     })?;
                     handle.as_raw_handle().as_ptr()
                 } else {
-                    // Check if callbacks are set - if not, use pool directly (temporary connection)
+                    // Check if callbacks are set - if not, use session connection
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -316,6 +411,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
 
@@ -329,43 +425,27 @@ impl Connection {
                         })?;
                         handle.as_raw_handle().as_ptr()
                     } else {
-                        // No callbacks - use pool directly with temporary connection
-                        let pool_clone = get_or_create_pool(
+                        // No callbacks - use session connection (compute total while handle is valid)
+                        ensure_session_connection(
                             &path,
                             &pool,
+                            &session_connection,
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut temp_conn = pool_clone.acquire().await.map_err(|e| {
-                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
+                        let mut conn_guard = session_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
                         })?;
-                        let sqlite_conn: &mut SqliteConnection = &mut temp_conn;
+                        let sqlite_conn: &mut SqliteConnection = &mut *conn;
                         let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
                             OperationalError::new_err(format!("Failed to lock handle: {e}"))
                         })?;
                         let handle_ptr = handle.as_raw_handle().as_ptr();
-
-                        // Call sqlite3_total_changes while connection is alive
-                        // Safety: handle_ptr is a valid sqlite3* pointer obtained from
-                        // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be
-                        // valid for the lifetime of the handle lock. sqlite3_total_changes
-                        // is a read-only operation that doesn't modify the database handle.
                         let total = unsafe { sqlite3_total_changes(handle_ptr) };
-
-                        // Connection will be released when temp_conn is dropped
-                        drop(handle);
-                        drop(temp_conn);
-
                         return Ok(total as u64);
                     }
                 };
@@ -410,11 +490,13 @@ impl Connection {
     ///     in_tx = await conn.in_transaction()  # False
     fn in_transaction(&self) -> PyResult<Py<PyAny>> {
         let transaction_state = Arc::clone(&self.transaction_state);
+        let explicit_transaction = Arc::clone(&self.explicit_transaction);
 
         Python::attach(|py| {
             let future = async move {
                 let trans_guard = transaction_state.lock().await;
-                Ok(*trans_guard == TransactionState::Active)
+                let ex_guard = explicit_transaction.lock().await;
+                Ok(*trans_guard == TransactionState::Active && *ex_guard)
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })
@@ -464,6 +546,47 @@ impl Connection {
             Some(n as usize)
         };
         Ok(())
+    }
+
+    /// Return pool metrics (size, num_idle, in_use). Pool must exist (use connection first).
+    fn pool_metrics(&self) -> PyResult<Py<PyAny>> {
+        let path = self.path.clone();
+        let pool = Arc::clone(&self.pool);
+        let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
+        let closed = Arc::clone(&self.closed);
+        Python::attach(|py| {
+            let future = async move {
+                ensure_not_closed(&closed)?;
+                get_or_create_pool(
+                    &path,
+                    &pool,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                    &idle_timeout_secs,
+                )
+                .await?;
+                let guard = pool.lock().await;
+                let p = guard
+                    .as_ref()
+                    .ok_or_else(|| OperationalError::new_err("Pool not available"))?;
+                let size = p.size();
+                let num_idle = p.num_idle();
+                let in_use = size as usize - num_idle;
+                #[allow(deprecated)]
+                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                    let dict = PyDict::new(py);
+                    dict.set_item("size", size)?;
+                    dict.set_item("num_idle", num_idle)?;
+                    dict.set_item("in_use", in_use)?;
+                    Ok(dict.into_any().unbind())
+                })
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
     }
 
     #[getter(connection_timeout)]
@@ -536,6 +659,44 @@ impl Connection {
         Ok(())
     }
 
+    /// Get iter_chunk_size (Phase 3.10). Used for chunked iteration; aiosqlite-compatible.
+    #[getter(iter_chunk_size)]
+    fn iter_chunk_size(&self) -> PyResult<usize> {
+        let guard = self.iter_chunk_size.lock().unwrap();
+        Ok(*guard)
+    }
+
+    /// Get the transaction isolation level (Phase 3.9). None | "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE".
+    #[getter(isolation_level)]
+    fn isolation_level(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let guard = self.isolation_level.lock().unwrap();
+        match guard.as_deref() {
+            Some(s) => Ok(PyString::new(py, s).into()),
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Set the transaction isolation level. Use None for default (DEFERRED when beginning transactions).
+    #[setter(isolation_level)]
+    fn set_isolation_level(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut guard = self.isolation_level.lock().unwrap();
+        *guard = if value.is_none() {
+            None
+        } else {
+            let s = value.extract::<String>()?;
+            let u = s.to_uppercase();
+            match u.as_str() {
+                "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE" => Some(u),
+                _ => {
+                    return Err(ValueError::new_err(
+                        "isolation_level must be None, 'DEFERRED', 'IMMEDIATE', or 'EXCLUSIVE'",
+                    ));
+                }
+            }
+        };
+        Ok(())
+    }
+
     #[setter(connection_timeout)]
     fn set_connection_timeout(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let mut guard = self.connection_timeout_secs.lock().unwrap();
@@ -563,6 +724,37 @@ impl Connection {
         Ok(())
     }
 
+    /// Idle connection timeout in seconds. When set, connections idle in the pool
+    /// longer than this are closed. None (default) means no idle timeout.
+    #[getter(idle_timeout)]
+    fn idle_timeout(&self) -> PyResult<Py<PyAny>> {
+        #[allow(deprecated)]
+        Python::with_gil(|py| {
+            let guard = self.idle_timeout_secs.lock().unwrap();
+            Ok(match guard.as_ref() {
+                Some(&n) => PyInt::new(py, n as i64).into_any().unbind(),
+                None => py.None(),
+            })
+        })
+    }
+
+    #[setter(idle_timeout)]
+    fn set_idle_timeout(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut guard = self.idle_timeout_secs.lock().unwrap();
+        *guard = if value.is_none() {
+            None
+        } else {
+            let n: i64 = value
+                .extract::<i64>()
+                .or_else(|_| value.extract::<u64>().map(|u| u as i64))?;
+            if n < 0 {
+                return Err(ValueError::new_err("idle_timeout must be >= 0"));
+            }
+            Some(n as u64)
+        };
+        Ok(())
+    }
+
     /// Async context manager entry.
     fn __aenter__(slf: PyRef<Self>) -> PyResult<Py<PyAny>> {
         let slf: Py<Self> = slf.into();
@@ -573,17 +765,22 @@ impl Connection {
     }
 
     /// Async context manager exit.
+    /// Commit on clean exit, rollback on exception (aiosqlite/sqlite3-style).
     fn __aexit__(
         &self,
-        _exc_type: &Bound<'_, PyAny>,
+        exc_type: &Bound<'_, PyAny>,
         _exc_val: &Bound<'_, PyAny>,
         _exc_tb: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
+        let commit_on_exit = exc_type.is_none();
         let pool = Arc::clone(&self.pool);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        let explicit_transaction = Arc::clone(&self.explicit_transaction);
         let callback_connection = Arc::clone(&self.callback_connection);
         let user_functions = Arc::clone(&self.user_functions);
+        let _user_aggregates = Arc::clone(&self.user_aggregates);
+        let _user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
@@ -620,25 +817,37 @@ impl Connection {
                     callback_guard.take();
                 }
 
-                // Rollback any open transaction using the stored connection
+                // Commit or rollback any open transaction.
+                // If user explicitly called begin(), rollback on exit (user controls commit/rollback).
+                // Otherwise: commit on clean exit, rollback on exception (aiosqlite/sqlite3-style).
                 let trans_guard = transaction_state.lock().await;
                 if *trans_guard == TransactionState::Active {
+                    let is_explicit = {
+                        let ex_guard = explicit_transaction.lock().await;
+                        *ex_guard
+                    };
                     drop(trans_guard);
                     let mut conn_guard = transaction_connection.lock().await;
                     if let Some(mut conn) = conn_guard.take() {
-                        // Rollback the transaction on the same connection
-                        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                        // Connection is automatically returned to pool when dropped
+                        let sql = if is_explicit {
+                            "ROLLBACK"
+                        } else if commit_on_exit {
+                            "COMMIT"
+                        } else {
+                            "ROLLBACK"
+                        };
+                        let _ = sqlx::query(sql).execute(&mut *conn).await;
                     }
                     let mut trans_guard = transaction_state.lock().await;
                     *trans_guard = TransactionState::None;
+                    drop(trans_guard);
+                    let mut ex_guard = explicit_transaction.lock().await;
+                    *ex_guard = false;
                 }
 
-                // Close pool
+                // Release our reference to the pool (do not close: pool is shared via global registry).
                 let mut pool_guard = pool.lock().await;
-                if let Some(p) = pool_guard.take() {
-                    p.close().await;
-                }
+                let _ = pool_guard.take();
 
                 Ok(())
             };
@@ -649,15 +858,22 @@ impl Connection {
     /// Close the connection.
     fn close(&self) -> PyResult<Py<PyAny>> {
         let pool = Arc::clone(&self.pool);
+        let session_connection = Arc::clone(&self.session_connection);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        let explicit_transaction = Arc::clone(&self.explicit_transaction);
         let callback_connection = Arc::clone(&self.callback_connection);
         let user_functions = Arc::clone(&self.user_functions);
+        let _user_aggregates = Arc::clone(&self.user_aggregates);
+        let _user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
         Python::attach(|py| {
             let future = async move {
+                // Release session connection back to pool
+                release_session_connection(&session_connection).await;
                 // Clear all callbacks before closing
                 {
                     let mut funcs_guard = user_functions.lock().unwrap();
@@ -692,33 +908,45 @@ impl Connection {
                     }
                     let mut trans_guard = transaction_state.lock().await;
                     *trans_guard = TransactionState::None;
+                    drop(trans_guard);
+                    let mut ex_guard = explicit_transaction.lock().await;
+                    *ex_guard = false;
                 }
 
-                // Close pool
+                // Release our reference to the pool (do not close: pool is shared via global registry).
                 let mut pool_guard = pool.lock().await;
-                if let Some(p) = pool_guard.take() {
-                    p.close().await;
-                }
+                let _ = pool_guard.take();
 
+                *closed.lock().unwrap() = true;
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })
     }
 
+    /// No-op for aiosqlite API compatibility. Does nothing; use close() to close the connection.
+    fn stop(&self) -> PyResult<()> {
+        Ok(())
+    }
+
     /// Begin a transaction.
     fn begin(self_: PyRef<Self>) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let session_connection = Arc::clone(&self_.session_connection);
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let explicit_transaction = Arc::clone(&self_.explicit_transaction);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -726,37 +954,72 @@ impl Connection {
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let timeout = Arc::clone(&self_.timeout);
+        let isolation_level = Arc::clone(&self_.isolation_level);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
         Python::attach(|py| {
             let future = async move {
-                // Check if transaction is already active (before doing any work)
+                ensure_not_closed(&closed)?;
+                // Implicit → explicit: if we have implicit transaction only, commit it and reuse conn for explicit.
                 {
                     let trans_guard = transaction_state.lock().await;
-                    if trans_guard.is_active() {
+                    let ex_guard = explicit_transaction.lock().await;
+                    let implicit_only = *trans_guard == TransactionState::Active && !*ex_guard;
+                    drop(ex_guard);
+                    if implicit_only {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        if let Some(mut conn) = conn_guard.take() {
+                            drop(trans_guard);
+                            let _ = sqlx::query("COMMIT").execute(&mut *conn).await;
+                            let timeout_ms = {
+                                let g = timeout.lock().unwrap();
+                                (*g * 1000.0) as i64
+                            };
+                            let _ = sqlx::query(&format!("PRAGMA busy_timeout = {timeout_ms}"))
+                                .execute(&mut *conn)
+                                .await;
+                            let level = isolation_level
+                                .lock()
+                                .unwrap()
+                                .clone()
+                                .unwrap_or_else(|| "IMMEDIATE".to_string());
+                            let begin_sql = format!("BEGIN {level}");
+                            sqlx::query(&begin_sql)
+                                .execute(&mut *conn)
+                                .await
+                                .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
+                            *conn_guard = Some(conn);
+                            let mut tguard = transaction_state.lock().await;
+                            *tguard = TransactionState::Active;
+                            drop(tguard);
+                            let mut eguard = explicit_transaction.lock().await;
+                            *eguard = true;
+                            return Ok(());
+                        }
+                    } else if trans_guard.is_active() {
                         return Err(OperationalError::new_err("Transaction already in progress"));
                     }
-                } // Lock released immediately
+                } // Lock released
 
                 let mut from_callback = false;
                 let mut pending_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
 
+                // Release session connection so we don't hold session + transaction
+                release_session_connection(&session_connection).await;
+
                 let result: Result<(), PyErr> = async {
-                    // Ensure pool exists before calling init_hook
+                    // Ensure pool exists before acquiring transaction connection
                     let pool_clone = get_or_create_pool(
                         &path,
                         &pool,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
-                    // Execute init_hook if needed (BEFORE setting transaction state)
-                    // This ensures init_hook can use regular pool connections, not transaction connection
-                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self)
-                        .await?;
-
-                    // Now atomically reserve the transaction slot
+                    // Atomically reserve the transaction slot (init_hook runs after transaction is active)
                     {
                         let mut trans_guard = transaction_state.lock().await;
                         if trans_guard.is_active() {
@@ -771,6 +1034,8 @@ impl Connection {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -785,6 +1050,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         let mut conn_guard = callback_connection.lock().await;
@@ -801,9 +1067,14 @@ impl Connection {
                             let g = connection_timeout_secs.lock().unwrap();
                             *g
                         };
-                        let conn = pool_clone.acquire().await.map_err(|e| {
-                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
-                        })?;
+                        let conn = acquire_with_pragmas(
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
+                        )
+                        .await?;
                         pending_conn = Some(conn);
                     }
 
@@ -823,12 +1094,16 @@ impl Connection {
                         .await
                         .map_err(|e| map_sqlx_error(e, &path, &busy_timeout_query))?;
 
-                    // Execute BEGIN IMMEDIATE on this specific connection
-                    // BEGIN IMMEDIATE acquires the write lock upfront, preventing "database is locked" errors
-                    sqlx::query("BEGIN IMMEDIATE")
+                    let level = isolation_level
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| "IMMEDIATE".to_string());
+                    let begin_sql = format!("BEGIN {level}");
+                    sqlx::query(&begin_sql)
                         .execute(&mut **conn)
                         .await
-                        .map_err(|e| map_sqlx_error(e, &path, "BEGIN IMMEDIATE"))?;
+                        .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
 
                     // Store the connection for reuse in all transaction operations
                     {
@@ -836,11 +1111,19 @@ impl Connection {
                         *conn_guard = pending_conn.take();
                     }
 
-                    // Re-acquire lock to set transaction state
+                    // Re-acquire lock to set transaction state and mark explicit
                     {
                         let mut trans_guard = transaction_state.lock().await;
                         *trans_guard = TransactionState::Active;
                     }
+                    {
+                        let mut ex_guard = explicit_transaction.lock().await;
+                        *ex_guard = true;
+                    }
+
+                    // Run init_hook after transaction is active so hook's conn.execute() uses this connection
+                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self)
+                        .await?;
                     Ok(())
                 }
                 .await;
@@ -849,6 +1132,8 @@ impl Connection {
                     // Restore any taken connection and clear transaction state/connection.
                     let mut trans_guard = transaction_state.lock().await;
                     *trans_guard = TransactionState::None;
+                    let mut ex_guard = explicit_transaction.lock().await;
+                    *ex_guard = false;
 
                     // If we had already stored something into transaction_connection, take it back.
                     let mut trans_conn_guard = transaction_connection.lock().await;
@@ -875,34 +1160,47 @@ impl Connection {
         let path = self.path.clone();
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        let explicit_transaction = Arc::clone(&self.explicit_transaction);
         // Callback infrastructure (Phase 2.7) - need to return connection if it came from callbacks
         let callback_connection = Arc::clone(&self.callback_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         Python::attach(|py| {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
+                // DBAPI compat: commit() is a no-op when not in an explicit transaction
                 if *trans_guard != TransactionState::Active {
-                    return Err(OperationalError::new_err("No transaction in progress"));
+                    return Ok(());
                 }
 
                 // Check if callbacks are set - if so, we need to return connection to callback_connection
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
                 );
 
-                // Retrieve the stored transaction connection
+                // Retrieve the stored transaction connection; if missing, treat as no-op (DBAPI compat)
                 let mut conn_guard = transaction_connection.lock().await;
-                let mut conn = conn_guard.take().ok_or_else(|| {
-                    OperationalError::new_err("Transaction connection not available")
-                })?;
+                let mut conn = match conn_guard.take() {
+                    Some(c) => c,
+                    None => {
+                        *trans_guard = TransactionState::None;
+                        drop(trans_guard);
+                        let mut ex_guard = explicit_transaction.lock().await;
+                        *ex_guard = false;
+                        return Ok(());
+                    }
+                };
 
                 // Execute COMMIT on the same connection that started the transaction
                 sqlx::query("COMMIT")
@@ -920,6 +1218,9 @@ impl Connection {
                 }
 
                 *trans_guard = TransactionState::None;
+                drop(trans_guard);
+                let mut ex_guard = explicit_transaction.lock().await;
+                *ex_guard = false;
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -931,34 +1232,47 @@ impl Connection {
         let path = self.path.clone();
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        let explicit_transaction = Arc::clone(&self.explicit_transaction);
         // Callback infrastructure (Phase 2.7) - need to return connection if it came from callbacks
         let callback_connection = Arc::clone(&self.callback_connection);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         Python::attach(|py| {
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
+                // DBAPI compat: rollback() is a no-op when not in an explicit transaction
                 if *trans_guard != TransactionState::Active {
-                    return Err(OperationalError::new_err("No transaction in progress"));
+                    return Ok(());
                 }
 
                 // Check if callbacks are set - if so, we need to return connection to callback_connection
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
                 );
 
-                // Retrieve the stored transaction connection
+                // Retrieve the stored transaction connection; if missing, treat as no-op (DBAPI compat)
                 let mut conn_guard = transaction_connection.lock().await;
-                let mut conn = conn_guard.take().ok_or_else(|| {
-                    OperationalError::new_err("Transaction connection not available")
-                })?;
+                let mut conn = match conn_guard.take() {
+                    Some(c) => c,
+                    None => {
+                        *trans_guard = TransactionState::None;
+                        drop(trans_guard);
+                        let mut ex_guard = explicit_transaction.lock().await;
+                        *ex_guard = false;
+                        return Ok(());
+                    }
+                };
 
                 // Execute ROLLBACK on the same connection that started the transaction
                 sqlx::query("ROLLBACK")
@@ -976,6 +1290,9 @@ impl Connection {
                 }
 
                 *trans_guard = TransactionState::None;
+                drop(trans_guard);
+                let mut ex_guard = explicit_transaction.lock().await;
+                *ex_guard = false;
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -1031,25 +1348,31 @@ impl Connection {
     ///     # Using as context manager (returns cursor)
     ///     async with conn.execute("SELECT * FROM users") as cursor:
     ///         rows = await cursor.fetchall()
-    #[pyo3(signature = (query, parameters = None))]
+    #[pyo3(signature = (query, parameters = None, cursor = None))]
     fn execute(
         self_: PyRef<Self>,
         query: String,
         parameters: Option<&Bound<'_, PyAny>>,
+        cursor: Option<&Bound<'_, Cursor>>,
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let session_connection = Arc::clone(&self_.session_connection);
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let last_rowid = Arc::clone(&self_.last_rowid);
         let last_changes = Arc::clone(&self_.last_changes);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let explicit_transaction = Arc::clone(&self_.explicit_transaction);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -1060,7 +1383,15 @@ impl Connection {
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let row_factory = Arc::clone(&self_.row_factory);
         let text_factory = Arc::clone(&self_.text_factory);
+        let timeout = Arc::clone(&self_.timeout);
+        let isolation_level = Arc::clone(&self_.isolation_level);
+        let closed = Arc::clone(&self_.closed);
+        let adapters = Arc::clone(&self_.adapters);
+        let converters = Arc::clone(&self_.converters);
         let connection_self: Py<Connection> = self_.into();
+
+        // Raise immediately if connection is closed (cursor.execute() on closed connection, etc.)
+        ensure_not_closed(&closed)?;
 
         // Clone query before processing (it may be moved)
         let original_query = query.clone();
@@ -1069,7 +1400,7 @@ impl Connection {
         // Note: Python::with_gil is used here for sync parameter processing before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
@@ -1078,17 +1409,23 @@ impl Connection {
 
             // Check if it's a dict (named parameters)
             if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(&query, &dict);
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
             }
 
             // Check if it's a list or tuple (positional parameters)
             if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(&list)?;
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+
+            // Check if it's a tuple (SQLAlchemy qmark style)
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
 
             // Single value (treat as single positional parameter)
-            let param = SqliteParam::from_py(&params)?;
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
 
@@ -1097,6 +1434,8 @@ impl Connection {
 
         // Check if this is a SELECT query (for lazy execution)
         let is_select = is_select_query(&processed_query);
+        // True for INSERT/UPDATE/DELETE ... RETURNING; needed to fetch and cache rows to prevent re-execution
+        let returns_result_rows = returns_result_rows(&processed_query);
 
         // Store original parameters for cursor (preserve original format)
         let params_for_cursor = parameters.map(|params| params.clone().unbind());
@@ -1109,41 +1448,63 @@ impl Connection {
         let _cursor_pool_size = Arc::clone(&pool_size);
         let _cursor_connection_timeout_secs = Arc::clone(&connection_timeout_secs);
         let _cursor_row_factory = Arc::clone(&row_factory);
-        // Create cursor synchronously (query and params are already processed)
-        // For named parameters, processed_query has :value replaced with ?
-        // The cursor needs the ORIGINAL query (with :value) so fetchall() can process it correctly
-        // But we also need to store the processed param_values for immediate execution
-        // Solution: Store original query in cursor, but ExecuteContextManager has processed_query
-        // for execution. The cursor will re-process parameters when fetchall() is called.
-        // Note: Python::with_gil is used here for sync cursor creation before async execution.
-        // The deprecation warning is acceptable as this is a sync context.
+        // When cursor is provided (from Cursor.execute()), reuse it and set processed state.
+        // Otherwise create a new cursor. This allows await cursor.execute() to return self (aiosqlite compat).
+        let cursor_arg = cursor.map(|c| c.clone().unbind());
         #[allow(deprecated)]
         let cursor = Python::with_gil(|py| -> PyResult<Py<Cursor>> {
-            let cursor = Cursor {
-                connection: connection_self.clone_ref(py),
-                query: original_query.clone(), // Store ORIGINAL query (with :value) for cursor processing
-                results: Arc::new(StdMutex::new(None)),
-                current_index: Arc::new(StdMutex::new(0)),
-                parameters: Arc::new(StdMutex::new(params_for_cursor)), // Store original params
-                processed_query: Some(processed_query.clone()), // Store processed query to avoid re-processing
-                processed_params: Some(param_values.clone()), // Store processed parameters to avoid re-processing
-                connection_path: path.clone(),
-                connection_pool: Arc::clone(&pool),
-                connection_pragmas: Arc::clone(&pragmas),
-                pool_size: Arc::clone(&pool_size),
-                connection_timeout_secs: Arc::clone(&connection_timeout_secs),
-                row_factory: Arc::clone(&row_factory),
-                text_factory: Arc::clone(&text_factory),
-                transaction_state: Arc::clone(&transaction_state),
-                transaction_connection: Arc::clone(&transaction_connection),
-                callback_connection: Arc::clone(&callback_connection),
-                load_extension_enabled: Arc::clone(&load_extension_enabled),
-                user_functions: Arc::clone(&user_functions),
-                trace_callback: Arc::clone(&trace_callback),
-                authorizer_callback: Arc::clone(&authorizer_callback),
-                progress_handler: Arc::clone(&progress_handler),
-            };
-            Py::new(py, cursor)
+            if let Some(c) = cursor_arg {
+                let mut c_ref = c.borrow_mut(py);
+                c_ref.query = original_query.clone();
+                *c_ref.parameters.lock().unwrap() = params_for_cursor;
+                c_ref.processed_query = Some(processed_query.clone());
+                c_ref.processed_params = Some(param_values.clone());
+                *c_ref.current_index.lock().unwrap() = 0;
+                *c_ref.results.lock().unwrap() = None;
+                *c_ref.description.lock().unwrap() = None;
+                *c_ref.pending_description.lock().unwrap() = None;
+                *c_ref.lastrowid.lock().unwrap() = -1;
+                *c_ref.rowcount.lock().unwrap() = -1;
+                Ok(c.clone_ref(py))
+            } else {
+                let new_cursor = Cursor {
+                    connection: connection_self.clone_ref(py),
+                    query: original_query.clone(),
+                    results: Arc::new(StdMutex::new(None)),
+                    current_index: Arc::new(StdMutex::new(0)),
+                    parameters: Arc::new(StdMutex::new(params_for_cursor)),
+                    processed_query: Some(processed_query.clone()),
+                    processed_params: Some(param_values.clone()),
+                    connection_path: path.clone(),
+                    connection_pool: Arc::clone(&pool),
+                    connection_pragmas: Arc::clone(&pragmas),
+                    pool_size: Arc::clone(&pool_size),
+                    connection_timeout_secs: Arc::clone(&connection_timeout_secs),
+                    idle_timeout_secs: Arc::clone(&idle_timeout_secs),
+                    row_factory: Arc::clone(&row_factory),
+                    text_factory: Arc::clone(&text_factory),
+                    transaction_state: Arc::clone(&transaction_state),
+                    transaction_connection: Arc::clone(&transaction_connection),
+                    callback_connection: Arc::clone(&callback_connection),
+                    load_extension_enabled: Arc::clone(&load_extension_enabled),
+                    user_functions: Arc::clone(&user_functions),
+                    user_aggregates: Arc::clone(&user_aggregates),
+                    user_collations: Arc::clone(&user_collations),
+                    adapters: Arc::clone(&adapters),
+                    converters: Arc::clone(&converters),
+                    trace_callback: Arc::clone(&trace_callback),
+                    authorizer_callback: Arc::clone(&authorizer_callback),
+                    progress_handler: Arc::clone(&progress_handler),
+                    arraysize: Arc::new(StdMutex::new(1)),
+                    description: Arc::new(StdMutex::new(None)),
+                    pending_description: Arc::new(StdMutex::new(None)),
+                    lastrowid: Arc::new(StdMutex::new(-1)),
+                    rowcount: Arc::new(StdMutex::new(-1)),
+                    row_factory_override: Arc::new(StdMutex::new(None)),
+                    closed: Arc::clone(&closed),
+                };
+                Py::new(py, new_cursor)
+            }
         })?;
 
         // Create ExecuteContextManager and return it
@@ -1163,21 +1524,23 @@ impl Connection {
         // The deprecation warning is acceptable as this is a sync operation within async.
         #[allow(deprecated)]
         Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-            let ctx_mgr = ExecuteContextManager {
-                cursor: cursor.clone_ref(py),
-                query: processed_query,
-                param_values,
-                is_select,
+            let state = ConnectionExecutionState {
                 path,
                 pool: Arc::clone(&pool),
+                session_connection: Arc::clone(&session_connection),
                 pragmas: Arc::clone(&pragmas),
                 pool_size: Arc::clone(&pool_size),
                 connection_timeout_secs: Arc::clone(&connection_timeout_secs),
+                idle_timeout_secs: Arc::clone(&idle_timeout_secs),
                 transaction_state: Arc::clone(&transaction_state),
                 transaction_connection: Arc::clone(&transaction_connection),
                 callback_connection: Arc::clone(&callback_connection),
                 load_extension_enabled: Arc::clone(&load_extension_enabled),
                 user_functions: Arc::clone(&user_functions),
+                user_aggregates: Arc::clone(&user_aggregates),
+                user_collations: Arc::clone(&user_collations),
+                adapters: Arc::clone(&adapters),
+                converters: Arc::clone(&converters),
                 trace_callback: Arc::clone(&trace_callback),
                 authorizer_callback: Arc::clone(&authorizer_callback),
                 progress_handler: Arc::clone(&progress_handler),
@@ -1185,6 +1548,18 @@ impl Connection {
                 init_hook_called: Arc::clone(&init_hook_called),
                 last_rowid: Arc::clone(&last_rowid),
                 last_changes: Arc::clone(&last_changes),
+                timeout,
+                isolation_level,
+                closed,
+                explicit_transaction: Arc::clone(&explicit_transaction),
+            };
+            let ctx_mgr = ExecuteContextManager {
+                state,
+                cursor: cursor.clone_ref(py),
+                query: processed_query,
+                param_values,
+                is_select,
+                returns_result_rows,
                 connection: connection_self.clone_ref(py),
             };
             Py::new(py, ctx_mgr).map(|c| c.into())
@@ -1202,6 +1577,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let last_rowid = Arc::clone(&self_.last_rowid);
         let last_changes = Arc::clone(&self_.last_changes);
         let transaction_state = Arc::clone(&self_.transaction_state);
@@ -1210,12 +1586,17 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
+        let _timeout = Arc::clone(&self_.timeout);
+        let adapters = Arc::clone(&self_.adapters);
         let connection_self = self_.into();
 
         // Process all parameter sets
@@ -1230,7 +1611,8 @@ impl Connection {
                 let mut params_vec = Vec::new();
                 for param in param_set {
                     let bound_param = param.bind(py);
-                    let sqlx_param = SqliteParam::from_py(bound_param)?;
+                    let sqlx_param =
+                        SqliteParam::apply_adapters_then_from_py(py, bound_param, Some(&adapters))?;
                     params_vec.push(sqlx_param);
                 }
                 result.push(params_vec);
@@ -1240,6 +1622,7 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Priority: transaction > callbacks > pool
                 // Note: Only check for Active state, not Starting (Starting means transaction is being set up,
                 // and init_hook may need to execute queries using pool connection)
@@ -1257,6 +1640,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -1267,6 +1651,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -1299,6 +1685,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -1316,21 +1703,47 @@ impl Connection {
                         drop(conn_guard);
                     }
                 } else {
-                    // Use pool
+                    // Use pool: one connection, lock handle, run batch in block_in_place (single transaction).
+                    // Reuses connection and params (no clone); BEGIN/COMMIT in execute_many_raw_core.
                     let pool_clone = get_or_create_pool(
                         &path,
                         &pool,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    for param_values in processed_params {
-                        let result =
-                            bind_and_execute(&query, &param_values, &pool_clone, &path).await?;
-                        total_changes += result.rows_affected();
-                        last_row_id = result.last_insert_rowid();
-                    }
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    let sqlite_conn: &mut SqliteConnection = &mut conn;
+                    let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
+                        OperationalError::new_err(format!("Failed to lock handle: {e}"))
+                    })?;
+                    let raw_db = handle.as_raw_handle().as_ptr();
+                    let result = tokio::task::block_in_place(|| {
+                        crate::batch::execute_many_raw_core(raw_db, &query, &processed_params)
+                    });
+                    drop(handle);
+                    let (total_changes_val, last_row_id_val) = result.map_err(|(rc, msg)| {
+                        crate::errors::map_sqlite_error_from_msg(&path, &query, rc, &msg)
+                    })?;
+                    total_changes = total_changes_val;
+                    last_row_id = last_row_id_val;
                 }
 
                 *last_rowid.lock().await = last_row_id;
@@ -1390,9 +1803,11 @@ impl Connection {
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
+        let session_connection = Arc::clone(&self_.session_connection);
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
@@ -1401,6 +1816,8 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
@@ -1409,13 +1826,16 @@ impl Connection {
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
+        let adapters = Arc::clone(&self_.adapters);
+        let converters = Arc::clone(&self_.converters);
         let connection_self = self_.into();
 
         // Process parameters
         // Note: Python::with_gil is used here for sync parameter processing before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
@@ -1424,17 +1844,23 @@ impl Connection {
 
             // Check if it's a dict (named parameters)
             if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(&query, &dict);
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
             }
 
             // Check if it's a list or tuple (positional parameters)
             if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(&list)?;
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+
+            // Check if it's a tuple (SQLAlchemy qmark style)
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
 
             // Single value (treat as single positional parameter)
-            let param = SqliteParam::from_py(&params)?;
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
 
@@ -1443,6 +1869,7 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
@@ -1458,6 +1885,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -1468,6 +1896,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -1489,6 +1919,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -1500,15 +1931,22 @@ impl Connection {
                     bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
                         .await?
                 } else {
-                    let pool_clone = get_or_create_pool(
+                    ensure_session_connection(
                         &path,
                         &pool,
+                        &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&processed_query, &param_values, &pool_clone, &path).await?
+                    let mut conn_guard = session_connection.lock().await;
+                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                        OperationalError::new_err("Session connection not available")
+                    })?;
+                    bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
+                        .await?
                 };
 
                 // Convert rows using row_factory
@@ -1517,9 +1955,10 @@ impl Connection {
                     let factory_opt = guard.as_ref();
                     let tf_guard = text_factory.lock().unwrap();
                     let tf_opt = tf_guard.as_ref();
+                    let conv_opt = Some(&converters);
                     let result_list = PyList::empty(py);
                     for row in rows.iter() {
-                        let out = row_to_py_with_factory(py, row, factory_opt, tf_opt)?;
+                        let out = row_to_py_with_factory(py, row, factory_opt, tf_opt, conv_opt)?;
                         result_list.append(out)?;
                     }
                     Ok(result_list.into())
@@ -1573,6 +2012,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
@@ -1581,19 +2021,24 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
+        let adapters = Arc::clone(&self_.adapters);
+        let converters = Arc::clone(&self_.converters);
         let connection_self = self_.into();
 
         // Process parameters
         // Note: Python::with_gil is used here for sync parameter processing before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
@@ -1601,18 +2046,23 @@ impl Connection {
             let params = params.as_borrowed();
 
             if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(&query, &dict);
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
             }
             if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(&list)?;
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
-            let param = SqliteParam::from_py(&params)?;
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
@@ -1628,6 +2078,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -1638,6 +2089,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -1659,6 +2112,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -1676,9 +2130,32 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_one(&processed_query, &param_values, &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_one_on_connection(
+                        &processed_query,
+                        &param_values,
+                        &mut conn,
+                        &path,
+                    )
+                    .await?
                 };
 
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
@@ -1686,7 +2163,8 @@ impl Connection {
                     let factory_opt = guard.as_ref();
                     let tf_guard = text_factory.lock().unwrap();
                     let tf_opt = tf_guard.as_ref();
-                    let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt)?;
+                    let conv_opt = Some(&converters);
+                    let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt, conv_opt)?;
                     Ok(out.unbind())
                 })
             };
@@ -1742,6 +2220,7 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let row_factory = Arc::clone(&self_.row_factory);
@@ -1750,19 +2229,24 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
+        let adapters = Arc::clone(&self_.adapters);
+        let converters = Arc::clone(&self_.converters);
         let connection_self = self_.into();
 
         // Process parameters
         // Note: Python::with_gil is used here for sync parameter processing before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|_py| -> PyResult<_> {
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
             let Some(params) = parameters else {
                 return Ok((query, Vec::new()));
             };
@@ -1770,18 +2254,23 @@ impl Connection {
             let params = params.as_borrowed();
 
             if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(&query, &dict);
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
             }
             if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(&list)?;
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
-            let param = SqliteParam::from_py(&params)?;
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
             Ok((query, vec![param]))
         })?;
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
@@ -1797,6 +2286,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -1807,6 +2297,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -1833,6 +2325,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
@@ -1855,10 +2348,32 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_optional(&processed_query, &param_values, &pool_clone, &path)
-                        .await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_optional_on_connection(
+                        &processed_query,
+                        &param_values,
+                        &mut conn,
+                        &path,
+                    )
+                    .await?
                 };
 
                 match opt {
@@ -1867,11 +2382,168 @@ impl Connection {
                         let factory_opt = guard.as_ref();
                         let tf_guard = text_factory.lock().unwrap();
                         let tf_opt = tf_guard.as_ref();
-                        let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt)?;
+                        let conv_opt = Some(&converters);
+                        let out = row_to_py_with_factory(py, &row, factory_opt, tf_opt, conv_opt)?;
                         Ok(out.unbind())
                     }),
                     None => Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) }),
                 }
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Execute an INSERT/UPDATE/DELETE and return the last insert row ID (aiosqlite-compatible helper).
+    ///
+    /// Runs the statement, updates `last_rowid`/`changes`, and returns `last_insert_rowid()`.
+    /// Use for INSERTs; for UPDATE/DELETE the returned rowid is typically 0.
+    #[pyo3(signature = (query, parameters = None))]
+    fn execute_insert(
+        self_: PyRef<Self>,
+        query: String,
+        parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let path = self_.path.clone();
+        let pool = Arc::clone(&self_.pool);
+        let pragmas = Arc::clone(&self_.pragmas);
+        let pool_size = Arc::clone(&self_.pool_size);
+        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
+        let transaction_state = Arc::clone(&self_.transaction_state);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let callback_connection = Arc::clone(&self_.callback_connection);
+        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
+        let trace_callback = Arc::clone(&self_.trace_callback);
+        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
+        let progress_handler = Arc::clone(&self_.progress_handler);
+        let last_rowid = Arc::clone(&self_.last_rowid);
+        let last_changes = Arc::clone(&self_.last_changes);
+        let adapters = Arc::clone(&self_.adapters);
+
+        #[allow(deprecated)]
+        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
+            let Some(params) = parameters else {
+                return Ok((query, Vec::new()));
+            };
+            let params = params.as_borrowed();
+            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
+                return process_named_parameters(py, &query, &dict, Some(&adapters));
+            }
+            if let Ok(list) = params.cast::<PyList>() {
+                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+            if let Ok(tup) = params.cast::<PyTuple>() {
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                return Ok((query, params_vec));
+            }
+            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
+            Ok((query, vec![param]))
+        })?;
+
+        if is_select_query(&processed_query) {
+            return Err(ProgrammingError::new_err(
+                "execute_insert expects INSERT/UPDATE/DELETE, not SELECT",
+            ));
+        }
+
+        let closed = Arc::clone(&self_.closed);
+        Python::attach(|py| {
+            let future = async move {
+                ensure_not_closed(&closed)?;
+                let in_transaction = {
+                    let g = transaction_state.lock().await;
+                    *g == TransactionState::Active
+                };
+
+                let result = if !in_transaction {
+                    get_or_create_pool(
+                        &path,
+                        &pool,
+                        &pragmas,
+                        &pool_size,
+                        &connection_timeout_secs,
+                        &idle_timeout_secs,
+                    )
+                    .await?;
+
+                    if has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &user_aggregates,
+                        &user_collations,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    ) {
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Callback connection not available")
+                        })?;
+                        bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
+                            .await?
+                    } else {
+                        let pool_clone = get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
+                        )
+                        .await?;
+                        bind_and_execute_on_connection(
+                            &processed_query,
+                            &param_values,
+                            &mut conn,
+                            &path,
+                        )
+                        .await?
+                    }
+                } else {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                        OperationalError::new_err("Transaction connection not available")
+                    })?;
+                    bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
+                        .await?
+                };
+
+                let rowid = result.last_insert_rowid();
+                let changes = result.rows_affected();
+                *last_rowid.lock().await = rowid;
+                *last_changes.lock().await = changes;
+
+                Ok(rowid)
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })
@@ -1902,6 +2574,7 @@ impl Connection {
         let pragmas = Arc::clone(&slf.pragmas);
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&slf.idle_timeout_secs);
         let row_factory = Arc::clone(&slf.row_factory);
         let text_factory = Arc::clone(&slf.text_factory);
         let transaction_state = Arc::clone(&slf.transaction_state);
@@ -1909,9 +2582,14 @@ impl Connection {
         let callback_connection = Arc::clone(&slf.callback_connection);
         let load_extension_enabled = Arc::clone(&slf.load_extension_enabled);
         let user_functions = Arc::clone(&slf.user_functions);
+        let user_aggregates = Arc::clone(&slf.user_aggregates);
+        let user_collations = Arc::clone(&slf.user_collations);
         let trace_callback = Arc::clone(&slf.trace_callback);
         let authorizer_callback = Arc::clone(&slf.authorizer_callback);
         let progress_handler = Arc::clone(&slf.progress_handler);
+        let closed = Arc::clone(&slf.closed);
+        let adapters = Arc::clone(&slf.adapters);
+        let converters = Arc::clone(&slf.converters);
         Ok(Cursor {
             connection: slf.into(),
             query: String::new(),
@@ -1925,6 +2603,7 @@ impl Connection {
             connection_pragmas: pragmas,
             pool_size,
             connection_timeout_secs,
+            idle_timeout_secs,
             row_factory,
             text_factory,
             transaction_state,
@@ -1932,9 +2611,20 @@ impl Connection {
             callback_connection,
             load_extension_enabled,
             user_functions,
+            user_aggregates,
+            user_collations,
+            adapters,
+            converters,
             trace_callback,
             authorizer_callback,
             progress_handler,
+            arraysize: Arc::new(StdMutex::new(1)),
+            description: Arc::new(StdMutex::new(None)),
+            pending_description: Arc::new(StdMutex::new(None)),
+            lastrowid: Arc::new(StdMutex::new(-1)),
+            rowcount: Arc::new(StdMutex::new(-1)),
+            row_factory_override: Arc::new(StdMutex::new(None)),
+            closed,
         })
     }
 
@@ -1950,6 +2640,7 @@ impl Connection {
         let pragmas = Arc::clone(&slf.pragmas);
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&slf.idle_timeout_secs);
         let row_factory = Arc::clone(&slf.row_factory);
         let text_factory = Arc::clone(&slf.text_factory);
         let transaction_state = Arc::clone(&slf.transaction_state);
@@ -1957,9 +2648,14 @@ impl Connection {
         let callback_connection = Arc::clone(&slf.callback_connection);
         let load_extension_enabled = Arc::clone(&slf.load_extension_enabled);
         let user_functions = Arc::clone(&slf.user_functions);
+        let user_aggregates = Arc::clone(&slf.user_aggregates);
+        let user_collations = Arc::clone(&slf.user_collations);
         let trace_callback = Arc::clone(&slf.trace_callback);
         let authorizer_callback = Arc::clone(&slf.authorizer_callback);
         let progress_handler = Arc::clone(&slf.progress_handler);
+        let closed = Arc::clone(&slf.closed);
+        let adapters = Arc::clone(&slf.adapters);
+        let converters = Arc::clone(&slf.converters);
         Ok(Cursor {
             connection: slf.into(),
             query,
@@ -1973,6 +2669,7 @@ impl Connection {
             connection_pragmas: pragmas,
             pool_size,
             connection_timeout_secs,
+            idle_timeout_secs,
             row_factory,
             text_factory,
             transaction_state,
@@ -1980,9 +2677,20 @@ impl Connection {
             callback_connection,
             load_extension_enabled,
             user_functions,
+            user_aggregates,
+            user_collations,
+            adapters,
+            converters,
             trace_callback,
             authorizer_callback,
             progress_handler,
+            arraysize: Arc::new(StdMutex::new(1)),
+            description: Arc::new(StdMutex::new(None)),
+            pending_description: Arc::new(StdMutex::new(None)),
+            lastrowid: Arc::new(StdMutex::new(-1)),
+            rowcount: Arc::new(StdMutex::new(-1)),
+            row_factory_override: Arc::new(StdMutex::new(None)),
+            closed,
         })
     }
 
@@ -1991,28 +2699,53 @@ impl Connection {
     fn transaction(slf: PyRef<Self>) -> PyResult<TransactionContextManager> {
         let path = slf.path.clone();
         let pool = Arc::clone(&slf.pool);
+        let session_connection = Arc::clone(&slf.session_connection);
         let pragmas = Arc::clone(&slf.pragmas);
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&slf.idle_timeout_secs);
         let transaction_state = Arc::clone(&slf.transaction_state);
         let transaction_connection = Arc::clone(&slf.transaction_connection);
         let init_hook = Arc::clone(&slf.init_hook);
         let init_hook_called = Arc::clone(&slf.init_hook_called);
         let timeout = Arc::clone(&slf.timeout);
+        let isolation_level = Arc::clone(&slf.isolation_level);
+        let explicit_transaction = Arc::clone(&slf.explicit_transaction);
         let connection: Py<Connection> = slf.into();
         Ok(TransactionContextManager {
             path,
             pool,
+            session_connection,
             pragmas,
             pool_size,
             connection_timeout_secs,
+            idle_timeout_secs,
             transaction_state,
             transaction_connection,
             connection,
             init_hook,
             init_hook_called,
             timeout,
+            isolation_level,
+            explicit_transaction,
         })
+    }
+
+    /// Return an async context manager for a savepoint.
+    /// Requires an active transaction. On __aenter__ runs SAVEPOINT &lt;name&gt;;
+    /// on __aexit__ runs RELEASE SAVEPOINT (success) or ROLLBACK TO SAVEPOINT (exception).
+    #[pyo3(signature = (name = None))]
+    fn savepoint(slf: PyRef<Self>, name: Option<String>) -> SavepointContextManager {
+        let path = slf.path.clone();
+        let transaction_connection = Arc::clone(&slf.transaction_connection);
+        let transaction_state = Arc::clone(&slf.transaction_state);
+        let sp_name = name.unwrap_or_else(next_savepoint_name);
+        SavepointContextManager {
+            path,
+            transaction_connection,
+            transaction_state,
+            name: sp_name,
+        }
     }
 
     /// Set a PRAGMA value on the database connection.
@@ -2026,9 +2759,13 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
+        let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let session_connection = Arc::clone(&self_.session_connection);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
         // Convert value to string for PRAGMA
@@ -2075,23 +2812,117 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
+                // Apply PRAGMA to the current connection (transaction or session) if we have one,
+                // so subsequent operations on this Connection see the new value (e.g. fetch_all after set_pragma).
+                {
+                    let mut conn_guard = transaction_connection.lock().await;
+                    if let Some(ref mut conn) = *conn_guard {
+                        sqlx::query(&pragma_query)
+                            .execute(&mut **conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
+                        return Ok(());
+                    }
+                }
+                {
+                    let mut conn_guard = session_connection.lock().await;
+                    if let Some(ref mut conn) = *conn_guard {
+                        sqlx::query(&pragma_query)
+                            .execute(&mut **conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
+                        return Ok(());
+                    }
+                }
+                // No current connection: ensure pool exists, run init_hook if needed, acquire a connection and apply PRAGMA.
                 let pool_clone = get_or_create_pool(
                     &path,
                     &pool,
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
-                // Execute init_hook if needed (before setting PRAGMA)
                 execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
+                let pool_size_val = {
+                    let g = pool_size.lock().unwrap();
+                    *g
+                };
+                let timeout_val = {
+                    let g = connection_timeout_secs.lock().unwrap();
+                    *g
+                };
+                let mut conn =
+                    acquire_with_pragmas(&pool_clone, &pragmas, &path, pool_size_val, timeout_val)
+                        .await?;
                 sqlx::query(&pragma_query)
-                    .execute(&pool_clone)
+                    .execute(&mut *conn)
                     .await
                     .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
 
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Interrupt a long-running query (Phase 3.9, aiosqlite-compatible).
+    /// Interrupts the callback connection when present (UDFs, trace, authorizer, etc.);
+    /// no-op when no callbacks are configured.
+    fn interrupt(&self) -> PyResult<Py<PyAny>> {
+        let path = self.path.clone();
+        let pool = Arc::clone(&self.pool);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
+        Python::attach(|py| {
+            let future = async move {
+                ensure_not_closed(&closed)?;
+                if !has_callbacks(
+                    &load_extension_enabled,
+                    &user_functions,
+                    &user_aggregates,
+                    &user_collations,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                ) {
+                    return Ok(());
+                }
+                ensure_callback_connection(
+                    &path,
+                    &pool,
+                    &callback_connection,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                    &idle_timeout_secs,
+                )
+                .await?;
+                let mut conn_guard = callback_connection.lock().await;
+                let conn = conn_guard.as_mut().ok_or_else(|| {
+                    OperationalError::new_err("Callback connection not available")
+                })?;
+                let sqlite_conn: &mut SqliteConnection = conn;
+                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
+                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
+                })?;
+                let raw_db = handle.as_raw_handle().as_ptr();
+                unsafe { sqlite3_interrupt(raw_db) };
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -2106,10 +2937,13 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Ensure callback connection exists
                 ensure_callback_connection(
                     &path,
@@ -2118,6 +2952,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -2171,10 +3006,13 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Check if extension loading is enabled
                 let enabled = {
                     let guard = load_extension_enabled.lock().unwrap();
@@ -2195,6 +3033,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -2264,11 +3103,14 @@ impl Connection {
 
     /// Create or remove a user-defined SQL function.
     /// If func is None, the function is removed.
+    /// deterministic: if true, mark function as deterministic (SQLite 3.8.3+); enables optimizations.
+    #[pyo3(signature = (name, nargs, func, deterministic = false))]
     fn create_function(
         &self,
         name: String,
         nargs: i32,
         func: Option<Py<PyAny>>,
+        deterministic: bool,
     ) -> PyResult<Py<PyAny>> {
         // SQLite supports nargs in [-1, 127]. (-1 means "any number of args".)
         if !(-1..=127).contains(&nargs) {
@@ -2276,26 +3118,314 @@ impl Connection {
                 "Invalid nargs for create_function: {nargs}. Expected -1..=127."
             )));
         }
+        if deterministic {
+            // SQLITE_DETERMINISTIC supported from SQLite 3.8.3 (3008003)
+            let v = unsafe { sqlite3_libversion_number() };
+            if v < 3008003 {
+                return Err(NotSupportedError::new_err(format!(
+                    "create_function(deterministic=True) requires SQLite 3.8.3 or newer; got {}.{}.{}",
+                    v / 1_000_000,
+                    (v / 1000) % 1000,
+                    v % 1000
+                )));
+            }
+        }
 
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
         let callback_connection = Arc::clone(&self.callback_connection);
+        let transaction_connection = Arc::clone(&self.transaction_connection);
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             // Clone the callback with GIL to avoid Send issues
             let func_clone = func.as_ref().map(|f| f.clone_ref(py));
 
             let future = async move {
-                // Ensure callback connection exists (needed for both adding and removing functions)
+                ensure_not_closed(&closed)?;
+
+                // Trampoline and destructor for UDF registration (shared by both paths)
+                extern "C" fn udf_trampoline(
+                    ctx: *mut sqlite3_context,
+                    argc: std::ffi::c_int,
+                    argv: *mut *mut sqlite3_value,
+                ) {
+                    unsafe {
+                        let user_data = sqlite3_user_data(ctx);
+                        if user_data.is_null() {
+                            sqlite3_result_null(ctx);
+                            return;
+                        }
+                        let callback_ptr = user_data as *mut Py<PyAny>;
+                        #[allow(deprecated)]
+                        Python::with_gil(|py| {
+                            let callback = (*callback_ptr).clone_ref(py);
+                            let mut py_args: Vec<Py<PyAny>> = Vec::new();
+                            for i in 0..argc {
+                                let value_ptr = *argv.add(i as usize);
+                                match sqlite_c_value_to_py(py, value_ptr) {
+                                    Ok(py_val) => py_args.push(py_val),
+                                    Err(e) => {
+                                        let msg = format!("Error converting argument {i}: {e}");
+                                        libsqlite3_sys::sqlite3_result_error(
+                                            ctx,
+                                            msg.as_ptr() as *const std::ffi::c_char,
+                                            msg.len() as i32,
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            let result = match py_args.len() {
+                                0 => callback.bind(py).call0(),
+                                1 => callback.bind(py).call1((py_args[0].clone_ref(py),)),
+                                2 => callback
+                                    .bind(py)
+                                    .call1((py_args[0].clone_ref(py), py_args[1].clone_ref(py))),
+                                3 => callback.bind(py).call1((
+                                    py_args[0].clone_ref(py),
+                                    py_args[1].clone_ref(py),
+                                    py_args[2].clone_ref(py),
+                                )),
+                                4 => callback.bind(py).call1((
+                                    py_args[0].clone_ref(py),
+                                    py_args[1].clone_ref(py),
+                                    py_args[2].clone_ref(py),
+                                    py_args[3].clone_ref(py),
+                                )),
+                                5 => callback.bind(py).call1((
+                                    py_args[0].clone_ref(py),
+                                    py_args[1].clone_ref(py),
+                                    py_args[2].clone_ref(py),
+                                    py_args[3].clone_ref(py),
+                                    py_args[4].clone_ref(py),
+                                )),
+                                _ => {
+                                    let args_tuple = PyTuple::new(
+                                        py,
+                                        py_args.iter().map(|arg: &Py<PyAny>| arg.clone_ref(py)),
+                                    )
+                                    .map_err(|e| format!("Error creating tuple: {e}"));
+                                    match args_tuple {
+                                        Ok(t) => {
+                                            let code = py
+                                                .eval(
+                                                    std::ffi::CString::new(
+                                                        "lambda f, args: f(*args)",
+                                                    )
+                                                    .unwrap()
+                                                    .as_c_str(),
+                                                    None,
+                                                    None,
+                                                )
+                                                .map_err(|e| format!("Error: {e}"));
+                                            match code {
+                                                Ok(unpack_code) => {
+                                                    unpack_code.call1((callback.bind(py), t))
+                                                }
+                                                Err(e) => {
+                                                    let msg = format!("Error: {e}");
+                                                    libsqlite3_sys::sqlite3_result_error(
+                                                        ctx,
+                                                        msg.as_ptr() as *const std::ffi::c_char,
+                                                        msg.len() as i32,
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            libsqlite3_sys::sqlite3_result_error(
+                                                ctx,
+                                                e.as_ptr() as *const std::ffi::c_char,
+                                                e.len() as i32,
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                            };
+                            match result {
+                                Ok(r) => {
+                                    let _ = py_to_sqlite_c_result(py, ctx, &r);
+                                }
+                                Err(e) => {
+                                    let msg = format!("Python function error: {e}");
+                                    libsqlite3_sys::sqlite3_result_error(
+                                        ctx,
+                                        msg.as_ptr() as *const std::ffi::c_char,
+                                        msg.len() as i32,
+                                    );
+                                }
+                            }
+                        });
+                    }
+                }
+                extern "C" fn udf_destructor(user_data: *mut std::ffi::c_void) {
+                    unsafe {
+                        if !user_data.is_null() {
+                            let _ = Box::from_raw(user_data as *mut Py<PyAny>);
+                        }
+                    }
+                }
+
+                // Prefer transaction_connection when it has a connection (DML-with-callbacks
+                // may have moved it from callback_connection). Otherwise use callback_connection.
+                let trans_has_conn = {
+                    let g = transaction_connection.lock().await;
+                    g.is_some()
+                };
+
+                if trans_has_conn {
+                    let mut trans_guard = transaction_connection.lock().await;
+                    let conn = trans_guard.as_mut().ok_or_else(|| {
+                        OperationalError::new_err("Transaction connection not available")
+                    })?;
+                    let sqlite_conn: &mut SqliteConnection = conn;
+                    let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
+                        OperationalError::new_err(format!("Failed to lock handle: {e}"))
+                    })?;
+                    let raw_db = handle.as_raw_handle().as_ptr();
+
+                    if func_clone.is_none() {
+                        // Remove the function from user_functions
+                        {
+                            let mut funcs_guard = user_functions.lock().unwrap();
+                            funcs_guard.remove(&name);
+                        }
+
+                        // Remove from SQLite by calling sqlite3_create_function_v2 with NULL callback
+                        let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                            OperationalError::new_err(format!(
+                                "Function name contains null byte: {e}"
+                            ))
+                        })?;
+                        // Safety: raw_db is a valid sqlite3* pointer obtained from
+                        // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                        // for the lifetime of the handle lock. name_cstr is a valid CString.
+                        // We pass NULL for all callbacks to remove the function, which is safe.
+                        let result = unsafe {
+                            sqlite3_create_function_v2(
+                                raw_db,
+                                name_cstr.as_ptr(),
+                                nargs,
+                                SQLITE_UTF8,
+                                std::ptr::null_mut(), // pApp (user data)
+                                None,                 // xFunc (scalar function callback)
+                                None,                 // xStep (aggregate step callback)
+                                None,                 // xFinal (aggregate final callback)
+                                None,                 // xDestroy (destructor)
+                            )
+                        };
+
+                        if result != SQLITE_OK {
+                            return Err(OperationalError::new_err(format!(
+                                "Failed to remove function '{name}': SQLite error code {result}"
+                            )));
+                        }
+
+                        // After removing, check if all callbacks are now cleared
+                        let all_cleared = !has_callbacks(
+                            &load_extension_enabled,
+                            &user_functions,
+                            &user_aggregates,
+                            &user_collations,
+                            &trace_callback,
+                            &authorizer_callback,
+                            &progress_handler,
+                        );
+                        if all_cleared {
+                            // Used transaction_connection: do not release (we're in a transaction)
+                            drop(handle);
+                            return Ok(());
+                        }
+                    } else {
+                        let enc = if deterministic {
+                            SQLITE_UTF8 | SQLITE_DETERMINISTIC
+                        } else {
+                            SQLITE_UTF8
+                        };
+                        // Store the function - need to clone the callback with GIL
+                        // Note: Python::with_gil is used here for sync callback storage in async context.
+                        // The deprecation warning is acceptable as this is a sync operation within async.
+                        #[allow(deprecated)]
+                        let callback_for_storage =
+                            Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
+                        {
+                            let mut funcs_guard = user_functions.lock().unwrap();
+                            funcs_guard.insert(name.clone(), (nargs, callback_for_storage));
+                        }
+
+                        // Create a boxed callback pointer to pass as user data
+                        let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                            OperationalError::new_err(format!(
+                                "Function name contains null byte: {e}"
+                            ))
+                        })?;
+
+                        // Store the Python callback in a Box and pass it as user_data
+                        // Clone it with GIL
+                        // Note: Python::with_gil is used here for sync callback access in async context.
+                        // The deprecation warning is acceptable as this is a sync operation within async.
+                        #[allow(deprecated)]
+                        let callback =
+                            Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
+                        let callback_box: Box<Py<PyAny>> = Box::new(callback);
+                        let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
+
+                        // Safety: raw_db is a valid sqlite3* pointer obtained from
+                        // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                        // for the lifetime of the handle lock. name_cstr is a valid CString.
+                        // callback_ptr is a pointer to Box<Py<PyAny>> created with Box::into_raw.
+                        // The trampoline and destructor functions handle the callback safely.
+                        let result = unsafe {
+                            sqlite3_create_function_v2(
+                                raw_db,
+                                name_cstr.as_ptr(),
+                                nargs,
+                                enc,
+                                callback_ptr, // pApp (user data - the Python callback)
+                                Some(udf_trampoline), // xFunc (scalar function callback)
+                                None,         // xStep (aggregate step callback)
+                                None,         // xFinal (aggregate final callback)
+                                Some(udf_destructor), // xDestroy (destructor)
+                            )
+                        };
+
+                        if result != SQLITE_OK {
+                            // Clean up the callback pointer on error
+                            // Safety: callback_ptr was created with Box::into_raw, so we can
+                            // safely convert it back to Box and drop it. This is safe because
+                            // the function registration failed, so SQLite won't call the destructor.
+                            unsafe {
+                                let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
+                            }
+                            {
+                                let mut funcs_guard = user_functions.lock().unwrap();
+                                funcs_guard.remove(&name);
+                            }
+                            return Err(OperationalError::new_err(format!(
+                                "Failed to create function '{name}': SQLite error code {result}"
+                            )));
+                        }
+                    }
+
+                    return Ok(());
+                }
+
+                // Callback path: ensure and use callback_connection
                 ensure_callback_connection(
                     &path,
                     &pool,
@@ -2303,12 +3433,12 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
-                // Get the callback connection and access raw handle
-                let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let mut cb_guard = callback_connection.lock().await;
+                let conn = cb_guard.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
 
@@ -2319,31 +3449,25 @@ impl Connection {
                 let raw_db = handle.as_raw_handle().as_ptr();
 
                 if func_clone.is_none() {
-                    // Remove the function from user_functions
                     {
                         let mut funcs_guard = user_functions.lock().unwrap();
                         funcs_guard.remove(&name);
                     }
 
-                    // Remove from SQLite by calling sqlite3_create_function_v2 with NULL callback
                     let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
                         OperationalError::new_err(format!("Function name contains null byte: {e}"))
                     })?;
-                    // Safety: raw_db is a valid sqlite3* pointer obtained from
-                    // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                    // for the lifetime of the handle lock. name_cstr is a valid CString.
-                    // We pass NULL for all callbacks to remove the function, which is safe.
                     let result = unsafe {
                         sqlite3_create_function_v2(
                             raw_db,
                             name_cstr.as_ptr(),
                             nargs,
                             SQLITE_UTF8,
-                            std::ptr::null_mut(), // pApp (user data)
-                            None,                 // xFunc (scalar function callback)
-                            None,                 // xStep (aggregate step callback)
-                            None,                 // xFinal (aggregate final callback)
-                            None,                 // xDestroy (destructor)
+                            std::ptr::null_mut(),
+                            None,
+                            None,
+                            None,
+                            None,
                         )
                     };
 
@@ -2353,26 +3477,28 @@ impl Connection {
                         )));
                     }
 
-                    // After removing, check if all callbacks are now cleared
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
                     );
                     if all_cleared {
-                        // Release the callback connection
                         drop(handle);
-                        drop(conn_guard);
+                        drop(cb_guard);
                         let mut callback_guard = callback_connection.lock().await;
                         callback_guard.take();
                         return Ok(());
                     }
                 } else {
-                    // Store the function - need to clone the callback with GIL
-                    // Note: Python::with_gil is used here for sync callback storage in async context.
-                    // The deprecation warning is acceptable as this is a sync operation within async.
+                    let enc = if deterministic {
+                        SQLITE_UTF8 | SQLITE_DETERMINISTIC
+                    } else {
+                        SQLITE_UTF8
+                    };
                     #[allow(deprecated)]
                     let callback_for_storage =
                         Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
@@ -2381,242 +3507,31 @@ impl Connection {
                         funcs_guard.insert(name.clone(), (nargs, callback_for_storage));
                     }
 
-                    // Create a boxed callback pointer to pass as user data
                     let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
                         OperationalError::new_err(format!("Function name contains null byte: {e}"))
                     })?;
 
-                    // Store the Python callback in a Box and pass it as user_data
-                    // Clone it with GIL
-                    // Note: Python::with_gil is used here for sync callback access in async context.
-                    // The deprecation warning is acceptable as this is a sync operation within async.
                     #[allow(deprecated)]
                     let callback =
                         Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
                     let callback_box: Box<Py<PyAny>> = Box::new(callback);
                     let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
 
-                    // Define the trampoline callback
-                    extern "C" fn udf_trampoline(
-                        ctx: *mut sqlite3_context,
-                        argc: std::ffi::c_int,
-                        argv: *mut *mut sqlite3_value,
-                    ) {
-                        // Safety: ctx is a valid sqlite3_context* pointer provided by SQLite
-                        // when calling the user-defined function. user_data was set when
-                        // registering the function and contains a Box<Py<PyAny>> pointer.
-                        // We check for null before dereferencing. The callback is called
-                        // synchronously from SQLite's execution context.
-                        unsafe {
-                            // Extract the Python callback from user_data
-                            let user_data = sqlite3_user_data(ctx);
-                            if user_data.is_null() {
-                                sqlite3_result_null(ctx);
-                                return;
-                            }
-
-                            // Get the callback from user_data
-                            // The callback is stored in a Box, we need to clone it to use it
-                            // We can't take ownership because the destructor will free it
-                            let callback_ptr = user_data as *mut Py<PyAny>;
-
-                            // Convert SQLite values to Python values
-                            // Note: Python::with_gil is used here for sync callback execution in async context.
-                            // The deprecation warning is acceptable as this is a sync operation within async.
-                            #[allow(deprecated)]
-                            // Note: Python::with_gil is used here for sync operation in async context.
-                            // The deprecation warning is acceptable as this is a sync operation within async.
-                            #[allow(deprecated)]
-                            Python::with_gil(|py| {
-                                // Clone the callback to use it (the original stays in the Box)
-                                let callback = (*callback_ptr).clone_ref(py);
-
-                                let mut py_args: Vec<Py<PyAny>> = Vec::new();
-                                for i in 0..argc {
-                                    let value_ptr = *argv.add(i as usize);
-                                    match sqlite_c_value_to_py(py, value_ptr) {
-                                        Ok(py_val) => {
-                                            py_args.push(py_val);
-                                        }
-                                        Err(e) => {
-                                            // On error, set SQLite error and return
-                                            let error_msg =
-                                                format!("Error converting argument {i}: {e}");
-                                            libsqlite3_sys::sqlite3_result_error(
-                                                ctx,
-                                                error_msg.as_ptr() as *const std::ffi::c_char,
-                                                error_msg.len() as i32,
-                                            );
-                                            return;
-                                        }
-                                    }
-                                }
-
-                                // Call the Python callback with proper argument unpacking
-                                // PyO3's call1 with a tuple passes it as a single argument
-                                // We need to unpack based on argument count
-                                let result = match py_args.len() {
-                                    0 => callback.bind(py).call0(),
-                                    1 => {
-                                        // Single argument - pass directly
-                                        callback.bind(py).call1((py_args[0].clone_ref(py),))
-                                    }
-                                    2 => {
-                                        // Two arguments
-                                        callback.bind(py).call1((
-                                            py_args[0].clone_ref(py),
-                                            py_args[1].clone_ref(py),
-                                        ))
-                                    }
-                                    3 => {
-                                        // Three arguments
-                                        callback.bind(py).call1((
-                                            py_args[0].clone_ref(py),
-                                            py_args[1].clone_ref(py),
-                                            py_args[2].clone_ref(py),
-                                        ))
-                                    }
-                                    4 => {
-                                        // Four arguments
-                                        callback.bind(py).call1((
-                                            py_args[0].clone_ref(py),
-                                            py_args[1].clone_ref(py),
-                                            py_args[2].clone_ref(py),
-                                            py_args[3].clone_ref(py),
-                                        ))
-                                    }
-                                    5 => {
-                                        // Five arguments
-                                        callback.bind(py).call1((
-                                            py_args[0].clone_ref(py),
-                                            py_args[1].clone_ref(py),
-                                            py_args[2].clone_ref(py),
-                                            py_args[3].clone_ref(py),
-                                            py_args[4].clone_ref(py),
-                                        ))
-                                    }
-                                    _ => {
-                                        // For more than 5 arguments, use Python's unpacking
-                                        // Create a helper function that unpacks the tuple
-                                        let args_tuple = match PyTuple::new(
-                                            py,
-                                            py_args.iter().map(|arg: &Py<PyAny>| arg.clone_ref(py)),
-                                        ) {
-                                            Ok(t) => t,
-                                            Err(e) => {
-                                                let error_msg =
-                                                    format!("Error creating argument tuple: {e}");
-                                                libsqlite3_sys::sqlite3_result_error(
-                                                    ctx,
-                                                    error_msg.as_ptr() as *const std::ffi::c_char,
-                                                    error_msg.len() as i32,
-                                                );
-                                                return;
-                                            }
-                                        };
-                                        // Use Python code to unpack: lambda f, args: f(*args)
-                                        let code_str = match std::ffi::CString::new(
-                                            "lambda f, args: f(*args)",
-                                        ) {
-                                            Ok(s) => s,
-                                            Err(_) => {
-                                                const MSG: &[u8] = b"Error creating CString";
-                                                libsqlite3_sys::sqlite3_result_error(
-                                                    ctx,
-                                                    MSG.as_ptr() as *const std::ffi::c_char,
-                                                    MSG.len() as i32,
-                                                );
-                                                return;
-                                            }
-                                        };
-                                        let unpack_code =
-                                            match py.eval(code_str.as_c_str(), None, None) {
-                                                Ok(code) => code,
-                                                Err(e) => {
-                                                    let error_msg = format!(
-                                                        "Error creating unpack helper: {e}"
-                                                    );
-                                                    libsqlite3_sys::sqlite3_result_error(
-                                                        ctx,
-                                                        error_msg.as_ptr()
-                                                            as *const std::ffi::c_char,
-                                                        error_msg.len() as i32,
-                                                    );
-                                                    return;
-                                                }
-                                            };
-                                        unpack_code.call1((callback.bind(py), args_tuple))
-                                    }
-                                };
-
-                                match result {
-                                    Ok(result) => {
-                                        // Convert result back to SQLite
-                                        match py_to_sqlite_c_result(py, ctx, &result) {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                let error_msg =
-                                                    format!("Error converting result: {e}");
-                                                libsqlite3_sys::sqlite3_result_error(
-                                                    ctx,
-                                                    error_msg.as_ptr() as *const std::ffi::c_char,
-                                                    error_msg.len() as i32,
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // Python exception - convert to SQLite error
-                                        let error_msg = format!("Python function error: {e}");
-                                        libsqlite3_sys::sqlite3_result_error(
-                                            ctx,
-                                            error_msg.as_ptr() as *const std::ffi::c_char,
-                                            error_msg.len() as i32,
-                                        );
-                                    }
-                                }
-                            });
-                        }
-                    }
-
-                    // Destructor to clean up the callback pointer
-                    extern "C" fn udf_destructor(user_data: *mut std::ffi::c_void) {
-                        // Safety: user_data is a pointer to a Box<Py<PyAny>> that was
-                        // created with Box::into_raw when registering the function.
-                        // SQLite calls this destructor when the function is removed or
-                        // the database connection is closed. We check for null before
-                        // converting back to Box and dropping it.
-                        unsafe {
-                            if !user_data.is_null() {
-                                let _ = Box::from_raw(user_data as *mut Py<PyAny>);
-                            }
-                        }
-                    }
-
-                    // Safety: raw_db is a valid sqlite3* pointer obtained from
-                    // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                    // for the lifetime of the handle lock. name_cstr is a valid CString.
-                    // callback_ptr is a pointer to Box<Py<PyAny>> created with Box::into_raw.
-                    // The trampoline and destructor functions handle the callback safely.
                     let result = unsafe {
                         sqlite3_create_function_v2(
                             raw_db,
                             name_cstr.as_ptr(),
                             nargs,
-                            SQLITE_UTF8,
-                            callback_ptr, // pApp (user data - the Python callback)
-                            Some(udf_trampoline), // xFunc (scalar function callback)
-                            None,         // xStep (aggregate step callback)
-                            None,         // xFinal (aggregate final callback)
-                            Some(udf_destructor), // xDestroy (destructor)
+                            enc,
+                            callback_ptr,
+                            Some(udf_trampoline),
+                            None,
+                            None,
+                            Some(udf_destructor),
                         )
                     };
 
                     if result != SQLITE_OK {
-                        // Clean up the callback pointer on error
-                        // Safety: callback_ptr was created with Box::into_raw, so we can
-                        // safely convert it back to Box and drop it. This is safe because
-                        // the function registration failed, so SQLite won't call the destructor.
                         unsafe {
                             let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
                         }
@@ -2636,6 +3551,587 @@ impl Connection {
         })
     }
 
+    /// Create or remove a custom SQL aggregate function.
+    /// The aggregate class must implement `step(self, *args)` and `finalize(self)`.
+    /// If aggregate_class is None, the aggregate is removed.
+    #[pyo3(signature = (name, num_params, aggregate_class))]
+    fn create_aggregate(
+        &self,
+        name: String,
+        num_params: i32,
+        aggregate_class: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if !(-1..=127).contains(&num_params) {
+            return Err(ProgrammingError::new_err(format!(
+                "Invalid num_params for create_aggregate: {num_params}. Expected -1..=127."
+            )));
+        }
+
+        let path = self.path.clone();
+        let pool = Arc::clone(&self.pool);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
+
+        Python::attach(|py| {
+            let class_clone = aggregate_class.as_ref().map(|c| c.clone_ref(py));
+
+            let future = async move {
+                ensure_not_closed(&closed)?;
+                ensure_callback_connection(
+                    &path,
+                    &pool,
+                    &callback_connection,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                    &idle_timeout_secs,
+                )
+                .await?;
+
+                let mut conn_guard = callback_connection.lock().await;
+                let conn = conn_guard.as_mut().ok_or_else(|| {
+                    OperationalError::new_err("Callback connection not available")
+                })?;
+
+                let sqlite_conn: &mut SqliteConnection = conn;
+                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
+                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
+                })?;
+                let raw_db = handle.as_raw_handle().as_ptr();
+
+                if class_clone.is_none() {
+                    // Remove: free stored user_data pointer if any, then unregister from SQLite
+                    let old_ptr = {
+                        let mut guard = user_aggregates.lock().unwrap();
+                        guard.remove(&name).map(|(_, ptr)| ptr)
+                    };
+                    if let Some(ptr) = old_ptr {
+                        if ptr != 0 {
+                            unsafe {
+                                let _ = Box::from_raw(ptr as *mut Py<PyAny>);
+                            }
+                        }
+                    }
+
+                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                        OperationalError::new_err(format!("Aggregate name contains null byte: {e}"))
+                    })?;
+                    let result = unsafe {
+                        sqlite3_create_function_v2(
+                            raw_db,
+                            name_cstr.as_ptr(),
+                            num_params,
+                            SQLITE_UTF8,
+                            std::ptr::null_mut(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    };
+                    if result != SQLITE_OK {
+                        return Err(OperationalError::new_err(format!(
+                            "Failed to remove aggregate '{name}': SQLite error code {result}"
+                        )));
+                    }
+
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &user_aggregates,
+                        &user_collations,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        drop(handle);
+                        drop(conn_guard);
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                    }
+                    return Ok(());
+                }
+
+                #[allow(deprecated)]
+                let class_for_storage =
+                    Python::with_gil(|py| class_clone.as_ref().unwrap().clone_ref(py));
+                let class_box: Box<Py<PyAny>> = Box::new(class_for_storage);
+                let class_ptr = Box::into_raw(class_box) as *mut std::ffi::c_void;
+                let class_ptr_usize = class_ptr as usize;
+
+                {
+                    let mut guard = user_aggregates.lock().unwrap();
+                    guard.insert(name.clone(), (num_params, class_ptr_usize));
+                }
+
+                // Request enough bytes for one pointer; use unaligned read/write so we don't
+                // require sqlite3_aggregate_context to return pointer-aligned memory (avoids Bus error).
+                const AGG_CTX_SIZE: i32 = 16;
+
+                extern "C" fn aggregate_step(
+                    ctx: *mut sqlite3_context,
+                    argc: std::ffi::c_int,
+                    argv: *mut *mut sqlite3_value,
+                ) {
+                    unsafe {
+                        let user_data = sqlite3_user_data(ctx);
+                        if user_data.is_null() {
+                            return;
+                        }
+                        let class_ptr = user_data as *mut Py<PyAny>;
+
+                        let ctx_buf = sqlite3_aggregate_context(ctx, AGG_CTX_SIZE);
+                        if ctx_buf.is_null() {
+                            return;
+                        }
+                        let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
+                        let mut instance_ptr: *mut Py<PyAny> =
+                            std::ptr::read_unaligned(instance_ptr_ptr);
+
+                        #[allow(deprecated)]
+                        Python::with_gil(|py| {
+                            if instance_ptr.is_null() {
+                                let class = (*class_ptr).clone_ref(py);
+                                let instance = match class.call0(py) {
+                                    Ok(inst) => inst,
+                                    Err(e) => {
+                                        let msg = format!("Python aggregate error: {e}");
+                                        libsqlite3_sys::sqlite3_result_error(
+                                            ctx,
+                                            msg.as_ptr() as *const std::ffi::c_char,
+                                            msg.len() as i32,
+                                        );
+                                        return;
+                                    }
+                                };
+                                let instance_box: Box<Py<PyAny>> = Box::new(instance);
+                                instance_ptr = Box::into_raw(instance_box);
+                                std::ptr::write_unaligned(instance_ptr_ptr, instance_ptr);
+                            }
+
+                            let instance = (*instance_ptr).clone_ref(py);
+                            let mut py_args: Vec<Py<PyAny>> = Vec::new();
+                            for i in 0..argc {
+                                let value_ptr = *argv.add(i as usize);
+                                match sqlite_c_value_to_py(py, value_ptr) {
+                                    Ok(py_val) => py_args.push(py_val),
+                                    Err(e) => {
+                                        let msg = format!("Error converting argument {i}: {e}");
+                                        libsqlite3_sys::sqlite3_result_error(
+                                            ctx,
+                                            msg.as_ptr() as *const std::ffi::c_char,
+                                            msg.len() as i32,
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+
+                            let step_result = match py_args.len() {
+                                0 => instance.bind(py).call_method0("step"),
+                                1 => instance
+                                    .bind(py)
+                                    .call_method1("step", (py_args[0].clone_ref(py),)),
+                                2 => instance.bind(py).call_method1(
+                                    "step",
+                                    (py_args[0].clone_ref(py), py_args[1].clone_ref(py)),
+                                ),
+                                3 => instance.bind(py).call_method1(
+                                    "step",
+                                    (
+                                        py_args[0].clone_ref(py),
+                                        py_args[1].clone_ref(py),
+                                        py_args[2].clone_ref(py),
+                                    ),
+                                ),
+                                4 => instance.bind(py).call_method1(
+                                    "step",
+                                    (
+                                        py_args[0].clone_ref(py),
+                                        py_args[1].clone_ref(py),
+                                        py_args[2].clone_ref(py),
+                                        py_args[3].clone_ref(py),
+                                    ),
+                                ),
+                                5 => instance.bind(py).call_method1(
+                                    "step",
+                                    (
+                                        py_args[0].clone_ref(py),
+                                        py_args[1].clone_ref(py),
+                                        py_args[2].clone_ref(py),
+                                        py_args[3].clone_ref(py),
+                                        py_args[4].clone_ref(py),
+                                    ),
+                                ),
+                                _ => {
+                                    let args_tuple =
+                                        PyTuple::new(py, py_args.iter().map(|a| a.clone_ref(py)));
+                                    match args_tuple {
+                                        Ok(t) => instance.bind(py).call_method1("step", (t,)),
+                                        Err(e) => {
+                                            let msg = format!("Error building step args: {e}");
+                                            libsqlite3_sys::sqlite3_result_error(
+                                                ctx,
+                                                msg.as_ptr() as *const std::ffi::c_char,
+                                                msg.len() as i32,
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                            };
+
+                            if let Err(e) = step_result {
+                                let msg = format!("Python aggregate step error: {e}");
+                                libsqlite3_sys::sqlite3_result_error(
+                                    ctx,
+                                    msg.as_ptr() as *const std::ffi::c_char,
+                                    msg.len() as i32,
+                                );
+                            }
+                        });
+                    }
+                }
+
+                extern "C" fn aggregate_final(ctx: *mut sqlite3_context) {
+                    unsafe {
+                        let ctx_buf = sqlite3_aggregate_context(ctx, AGG_CTX_SIZE);
+                        if ctx_buf.is_null() {
+                            sqlite3_result_null(ctx);
+                            return;
+                        }
+                        let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
+                        let instance_ptr: *mut Py<PyAny> =
+                            std::ptr::read_unaligned(instance_ptr_ptr);
+                        if instance_ptr.is_null() {
+                            sqlite3_result_null(ctx);
+                            return;
+                        }
+
+                        #[allow(deprecated)]
+                        Python::with_gil(|py| {
+                            let instance = Box::from_raw(instance_ptr);
+                            std::ptr::write_unaligned(
+                                instance_ptr_ptr,
+                                std::ptr::null_mut::<Py<PyAny>>(),
+                            );
+
+                            let result = instance.bind(py).call_method0("finalize");
+                            match result {
+                                Ok(r) => {
+                                    let _ = py_to_sqlite_c_result(py, ctx, &r);
+                                }
+                                Err(e) => {
+                                    let msg = format!("Python aggregate finalize error: {e}");
+                                    libsqlite3_sys::sqlite3_result_error(
+                                        ctx,
+                                        msg.as_ptr() as *const std::ffi::c_char,
+                                        msg.len() as i32,
+                                    );
+                                }
+                            }
+                        });
+                    }
+                }
+
+                extern "C" fn aggregate_destructor(user_data: *mut std::ffi::c_void) {
+                    unsafe {
+                        if !user_data.is_null() {
+                            let _ = Box::from_raw(user_data as *mut Py<PyAny>);
+                        }
+                    }
+                }
+
+                let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                    OperationalError::new_err(format!("Aggregate name contains null byte: {e}"))
+                })?;
+
+                let result = unsafe {
+                    sqlite3_create_function_v2(
+                        raw_db,
+                        name_cstr.as_ptr(),
+                        num_params,
+                        SQLITE_UTF8,
+                        class_ptr,
+                        None,                  // xFunc
+                        Some(aggregate_step),  // xStep
+                        Some(aggregate_final), // xFinal
+                        Some(aggregate_destructor),
+                    )
+                };
+
+                if result != SQLITE_OK {
+                    unsafe {
+                        let _ = Box::from_raw(class_ptr as *mut Py<PyAny>);
+                    }
+                    {
+                        let mut guard = user_aggregates.lock().unwrap();
+                        guard.remove(&name);
+                    }
+                    return Err(OperationalError::new_err(format!(
+                        "Failed to create aggregate '{name}': SQLite error code {result}"
+                    )));
+                }
+
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Create or remove a custom collation. The callable receives (s1: str, s2: str) and returns -1, 0, or 1.
+    /// If callable is None, the collation is removed.
+    #[pyo3(signature = (name, callable))]
+    fn create_collation(&self, name: String, callable: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let path = self.path.clone();
+        let pool = Arc::clone(&self.pool);
+        let callback_connection = Arc::clone(&self.callback_connection);
+        let pragmas = Arc::clone(&self.pragmas);
+        let pool_size = Arc::clone(&self.pool_size);
+        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
+        let user_collations = Arc::clone(&self.user_collations);
+        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let trace_callback = Arc::clone(&self.trace_callback);
+        let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
+
+        Python::attach(|py| {
+            let callable_clone = callable.as_ref().map(|c| c.clone_ref(py));
+
+            let future = async move {
+                ensure_not_closed(&closed)?;
+                ensure_callback_connection(
+                    &path,
+                    &pool,
+                    &callback_connection,
+                    &pragmas,
+                    &pool_size,
+                    &connection_timeout_secs,
+                    &idle_timeout_secs,
+                )
+                .await?;
+
+                let mut conn_guard = callback_connection.lock().await;
+                let conn = conn_guard.as_mut().ok_or_else(|| {
+                    OperationalError::new_err("Callback connection not available")
+                })?;
+
+                let sqlite_conn: &mut SqliteConnection = conn;
+                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
+                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
+                })?;
+                let raw_db = handle.as_raw_handle().as_ptr();
+
+                if callable_clone.is_none() {
+                    let old_ptr = {
+                        let mut guard = user_collations.lock().unwrap();
+                        guard.remove(&name)
+                    };
+                    if let Some(ptr) = old_ptr {
+                        if ptr != 0 {
+                            unsafe {
+                                let _ = Box::from_raw(ptr as *mut Py<PyAny>);
+                            }
+                        }
+                    }
+
+                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                        OperationalError::new_err(format!("Collation name contains null byte: {e}"))
+                    })?;
+                    let result = unsafe {
+                        sqlite3_create_collation_v2(
+                            raw_db,
+                            name_cstr.as_ptr(),
+                            SQLITE_UTF8,
+                            std::ptr::null_mut(),
+                            None,
+                            None,
+                        )
+                    };
+                    if result != SQLITE_OK {
+                        return Err(OperationalError::new_err(format!(
+                            "Failed to remove collation '{name}': SQLite error code {result}"
+                        )));
+                    }
+
+                    let all_cleared = !has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &user_aggregates,
+                        &user_collations,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    if all_cleared {
+                        drop(handle);
+                        drop(conn_guard);
+                        let mut callback_guard = callback_connection.lock().await;
+                        callback_guard.take();
+                    }
+                    return Ok(());
+                }
+
+                #[allow(deprecated)]
+                let callback_for_storage =
+                    Python::with_gil(|py| callable_clone.as_ref().unwrap().clone_ref(py));
+                let callback_box: Box<Py<PyAny>> = Box::new(callback_for_storage);
+                let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
+                let callback_ptr_usize = callback_ptr as usize;
+
+                {
+                    let mut guard = user_collations.lock().unwrap();
+                    guard.insert(name.clone(), callback_ptr_usize);
+                }
+
+                extern "C" fn collation_trampoline(
+                    p_arg: *mut std::ffi::c_void,
+                    len1: std::ffi::c_int,
+                    ptr1: *const std::ffi::c_void,
+                    len2: std::ffi::c_int,
+                    ptr2: *const std::ffi::c_void,
+                ) -> std::ffi::c_int {
+                    unsafe {
+                        if p_arg.is_null() || ptr1.is_null() || ptr2.is_null() {
+                            return 0;
+                        }
+                        let len1 = len1 as usize;
+                        let len2 = len2 as usize;
+                        let s1 = if len1 == 0 {
+                            ""
+                        } else {
+                            let slice = std::slice::from_raw_parts(ptr1 as *const u8, len1);
+                            std::str::from_utf8(slice).unwrap_or("")
+                        };
+                        let s2 = if len2 == 0 {
+                            ""
+                        } else {
+                            let slice = std::slice::from_raw_parts(ptr2 as *const u8, len2);
+                            std::str::from_utf8(slice).unwrap_or("")
+                        };
+
+                        #[allow(deprecated)]
+                        let result = Python::with_gil(|py| {
+                            let callback_ptr = p_arg as *mut Py<PyAny>;
+                            let callback = (*callback_ptr).clone_ref(py);
+                            let s1_py = PyString::new(py, s1);
+                            let s2_py = PyString::new(py, s2);
+                            match callback.bind(py).call1((s1_py, s2_py)) {
+                                Ok(ret) => {
+                                    let cmp: i32 = ret.extract().unwrap_or(0);
+                                    if cmp < 0 {
+                                        -1
+                                    } else if cmp > 0 {
+                                        1
+                                    } else {
+                                        0
+                                    }
+                                }
+                                Err(_) => 0,
+                            }
+                        });
+                        result
+                    }
+                }
+
+                extern "C" fn collation_destructor(p_arg: *mut std::ffi::c_void) {
+                    unsafe {
+                        if !p_arg.is_null() {
+                            let _ = Box::from_raw(p_arg as *mut Py<PyAny>);
+                        }
+                    }
+                }
+
+                let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                    OperationalError::new_err(format!("Collation name contains null byte: {e}"))
+                })?;
+
+                let result = unsafe {
+                    sqlite3_create_collation_v2(
+                        raw_db,
+                        name_cstr.as_ptr(),
+                        SQLITE_UTF8,
+                        callback_ptr,
+                        Some(collation_trampoline),
+                        Some(collation_destructor),
+                    )
+                };
+
+                if result != SQLITE_OK {
+                    unsafe {
+                        let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
+                    }
+                    {
+                        let mut guard = user_collations.lock().unwrap();
+                        guard.remove(&name);
+                    }
+                    return Err(OperationalError::new_err(format!(
+                        "Failed to create collation '{name}': SQLite error code {result}"
+                    )));
+                }
+
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    /// Register an adapter for a Python type. When binding parameters, if the value's type
+    /// matches, adapter(value) is called and the result is used. Pass adapter=None to remove
+    /// adapters for that type.
+    #[pyo3(signature = (type_, adapter))]
+    fn register_adapter(&self, type_: Py<PyAny>, adapter: Option<Py<PyAny>>) -> PyResult<()> {
+        let adapters = Arc::clone(&self.adapters);
+        if let Some(adapter) = adapter {
+            #[allow(deprecated)]
+            Python::with_gil(|py| {
+                let mut guard = adapters.lock().unwrap();
+                guard.push((type_.clone_ref(py), adapter.clone_ref(py)));
+                Ok(())
+            })
+        } else {
+            #[allow(deprecated)]
+            Python::with_gil(|py| {
+                let type_bound = type_.bind(py);
+                let mut guard = adapters.lock().unwrap();
+                guard.retain(|(t, _)| !t.bind(py).get_type().is(type_bound.get_type()));
+                Ok(())
+            })
+        }
+    }
+
+    /// Register a converter for a declared column type. When reading rows, if the column's
+    /// declared type matches typename, converter(bytes) is called and the result is used.
+    /// Pass converter=None to remove the converter for that type.
+    #[pyo3(signature = (typename, converter))]
+    fn register_converter(&self, typename: &str, converter: Option<Py<PyAny>>) -> PyResult<()> {
+        let key = typename.to_uppercase();
+        let converters = Arc::clone(&self.converters);
+        let mut guard = converters.lock().unwrap();
+        if let Some(c) = converter {
+            guard.insert(key, c);
+        } else {
+            guard.remove(&key);
+        }
+        Ok(())
+    }
+
     /// Set or clear the trace callback.
     /// The callback receives SQL strings as they are executed.
     fn set_trace_callback(&self, callback: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
@@ -2645,12 +4141,16 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let trace_callback = Arc::clone(&self.trace_callback);
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             // Clone the callback with GIL
@@ -2663,6 +4163,7 @@ impl Connection {
             }
 
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Ensure callback connection exists (needed to clear callbacks on SQLite)
                 ensure_callback_connection(
                     &path,
@@ -2671,6 +4172,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -2795,6 +4297,8 @@ impl Connection {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -2824,12 +4328,16 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             // Clone the callback with GIL
@@ -2842,11 +4350,14 @@ impl Connection {
             }
 
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // If clearing the callback, check if all callbacks are now cleared
                 if callback.is_none() {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -2868,6 +4379,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -3013,6 +4525,8 @@ impl Connection {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -3042,12 +4556,16 @@ impl Connection {
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let progress_handler = Arc::clone(&self.progress_handler);
         // Need all callback fields to check if all are cleared
         let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
         let user_functions = Arc::clone(&self.user_functions);
+        let user_aggregates = Arc::clone(&self.user_aggregates);
+        let user_collations = Arc::clone(&self.user_collations);
         let trace_callback = Arc::clone(&self.trace_callback);
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
+        let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             // Clone the callback with GIL
@@ -3060,11 +4578,14 @@ impl Connection {
             }
 
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // If clearing the callback, check if all callbacks are now cleared
                 if callback.is_none() {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -3086,6 +4607,7 @@ impl Connection {
                     &pragmas,
                     &pool_size,
                     &connection_timeout_secs,
+                    &idle_timeout_secs,
                 )
                 .await?;
 
@@ -3187,6 +4709,8 @@ impl Connection {
                     let all_cleared = !has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -3215,18 +4739,23 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        let closed = Arc::clone(&self_.closed);
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
@@ -3236,6 +4765,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -3269,6 +4800,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -3286,6 +4818,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
@@ -3403,6 +4936,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         sqlx::query(&query)
@@ -3469,21 +5003,26 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     g.is_active()
@@ -3498,6 +5037,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -3508,6 +5048,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -3535,6 +5077,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -3549,9 +5092,26 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of table names (strings)
@@ -3582,17 +5142,21 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
         // Escape table name for SQL (string literal escaping)
@@ -3605,6 +5169,7 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     g.is_active()
@@ -3619,6 +5184,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -3629,6 +5195,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -3648,6 +5216,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -3662,9 +5231,26 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -3735,17 +5321,21 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
         // Build query
@@ -3760,6 +5350,7 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     g.is_active()
@@ -3774,6 +5365,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -3784,6 +5376,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -3803,6 +5397,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -3817,9 +5412,26 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -3880,17 +5492,21 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
         // Escape table name for SQL
@@ -3899,6 +5515,7 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     g.is_active()
@@ -3913,6 +5530,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -3923,6 +5541,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -3942,6 +5562,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -3956,9 +5577,26 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -4031,17 +5669,22 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        let closed = Arc::clone(&self_.closed);
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     g.is_active()
@@ -4050,6 +5693,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4076,6 +5721,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4090,9 +5736,26 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&tables_query, &[], &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&tables_query, &[], &mut conn, &path).await?
                 };
 
                 // Extract table names
@@ -4128,9 +5791,26 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_fetch_all(&info_query, &[], &pool_clone, &path).await?
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
+                        )
+                        .await?;
+                        bind_and_fetch_all_on_connection(&info_query, &[], &mut conn, &path).await?
                     };
 
                     // Get indexes
@@ -4154,9 +5834,27 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_fetch_all(&indexes_query, &[], &pool_clone, &path).await?
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
+                        )
+                        .await?;
+                        bind_and_fetch_all_on_connection(&indexes_query, &[], &mut conn, &path)
+                            .await?
                     };
 
                     // Get foreign keys
@@ -4181,9 +5879,26 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_fetch_all(&fk_query, &[], &pool_clone, &path).await?
+                        let pool_size_val = {
+                            let g = pool_size.lock().unwrap();
+                            *g
+                        };
+                        let timeout_val = {
+                            let g = connection_timeout_secs.lock().unwrap();
+                            *g
+                        };
+                        let mut conn = acquire_with_pragmas(
+                            &pool_clone,
+                            &pragmas,
+                            &path,
+                            pool_size_val,
+                            timeout_val,
+                        )
+                        .await?;
+                        bind_and_fetch_all_on_connection(&fk_query, &[], &mut conn, &path).await?
                     };
 
                     tables_info.push((tbl_name.clone(), info_rows, indexes_rows, fk_rows));
@@ -4325,21 +6040,26 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     g.is_active()
@@ -4354,6 +6074,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4364,6 +6085,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4393,6 +6116,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4407,9 +6131,26 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of view names (strings)
@@ -4440,17 +6181,21 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
         // Escape table name for SQL
@@ -4459,6 +6204,7 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     g.is_active()
@@ -4473,6 +6219,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4483,6 +6230,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4502,6 +6251,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4516,9 +6266,26 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -4577,17 +6344,21 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
         // Escape index name for SQL
@@ -4596,6 +6367,7 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     g.is_active()
@@ -4610,6 +6382,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4620,6 +6393,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4639,6 +6414,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4653,9 +6429,26 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -4703,17 +6496,21 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
         // Escape table name for SQL
@@ -4722,6 +6519,7 @@ impl Connection {
 
         Python::attach(|py| {
             let future = async move {
+                ensure_not_closed(&closed)?;
                 let in_transaction = {
                     let g = transaction_state.lock().await;
                     g.is_active()
@@ -4736,6 +6534,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                 }
@@ -4746,6 +6545,8 @@ impl Connection {
                 let has_callbacks_flag = has_callbacks(
                     &load_extension_enabled,
                     &user_functions,
+                    &user_aggregates,
+                    &user_collations,
                     &trace_callback,
                     &authorizer_callback,
                     &progress_handler,
@@ -4765,6 +6566,7 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
@@ -4779,9 +6581,26 @@ impl Connection {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
-                    bind_and_fetch_all(&query, &[], &pool_clone, &path).await?
+                    let pool_size_val = {
+                        let g = pool_size.lock().unwrap();
+                        *g
+                    };
+                    let timeout_val = {
+                        let g = connection_timeout_secs.lock().unwrap();
+                        *g
+                    };
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
+                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
                 };
 
                 // Convert to list of dictionaries
@@ -4864,14 +6683,18 @@ impl Connection {
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
+        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let callback_connection = Arc::clone(&self_.callback_connection);
         let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
         let user_functions = Arc::clone(&self_.user_functions);
+        let user_aggregates = Arc::clone(&self_.user_aggregates);
+        let user_collations = Arc::clone(&self_.user_collations);
         let trace_callback = Arc::clone(&self_.trace_callback);
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
+        let closed = Arc::clone(&self_.closed);
 
         let name = name.to_string();
         Python::attach(|py| {
@@ -4889,11 +6712,14 @@ impl Connection {
                 target_pragmas_opt,
                 target_pool_size_opt,
                 target_connection_timeout_secs_opt,
+                target_idle_timeout_secs_opt,
                 target_transaction_state_opt,
                 target_transaction_connection_opt,
                 target_callback_connection_opt,
                 target_load_extension_enabled_opt,
                 target_user_functions_opt,
+                target_user_aggregates_opt,
+                target_user_collations_opt,
                 target_trace_callback_opt,
                 target_authorizer_callback_opt,
                 target_progress_handler_opt,
@@ -4909,11 +6735,14 @@ impl Connection {
                     Some(target_conn_borrowed.pragmas.clone()),
                     Some(target_conn_borrowed.pool_size.clone()),
                     Some(target_conn_borrowed.connection_timeout_secs.clone()),
+                    Some(target_conn_borrowed.idle_timeout_secs.clone()),
                     Some(target_conn_borrowed.transaction_state.clone()),
                     Some(target_conn_borrowed.transaction_connection.clone()),
                     Some(target_conn_borrowed.callback_connection.clone()),
                     Some(target_conn_borrowed.load_extension_enabled.clone()),
                     Some(target_conn_borrowed.user_functions.clone()),
+                    Some(target_conn_borrowed.user_aggregates.clone()),
+                    Some(target_conn_borrowed.user_collations.clone()),
                     Some(target_conn_borrowed.trace_callback.clone()),
                     Some(target_conn_borrowed.authorizer_callback.clone()),
                     Some(target_conn_borrowed.progress_handler.clone()),
@@ -4921,15 +6750,12 @@ impl Connection {
             } else {
                 (
                     None, None, None, None, None, None, None, None, None, None, None, None, None,
+                    None, None, None,
                 )
             };
 
             let future = async move {
-                // Wrapper to make raw pointers Send-safe
-                struct SendPtr<T>(*mut T);
-                unsafe impl<T> Send for SendPtr<T> {}
-                unsafe impl<T> Sync for SendPtr<T> {}
-
+                ensure_not_closed(&closed)?;
                 // Type alias for connection taken from slot (slot reference + connection)
                 type TakenConnection = (
                     Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
@@ -4954,6 +6780,8 @@ impl Connection {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
@@ -4975,6 +6803,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         let mut guard = callback_connection.lock().await;
@@ -4989,6 +6818,7 @@ impl Connection {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                         let pool_size_val = {
@@ -4999,9 +6829,16 @@ impl Connection {
                             let g = connection_timeout_secs.lock().unwrap();
                             *g
                         };
-                        source_pool_conn = Some(pool_clone.acquire().await.map_err(|e| {
-                            pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
-                        })?);
+                        source_pool_conn = Some(
+                            acquire_with_pragmas(
+                                &pool_clone,
+                                &pragmas,
+                                &path,
+                                pool_size_val,
+                                timeout_val,
+                            )
+                            .await?,
+                        );
                     }
 
                     // Get a mutable reference to the exclusive source connection.
@@ -5013,33 +6850,99 @@ impl Connection {
 
                     // Acquire an exclusive target handle.
                     let mut target_pool_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
-                    let target_handle: SendPtr<sqlite3>;
+                    let target_handle: backup::SendPtr<sqlite3>;
                     if target_is_rapsqlite {
-                        let target_path: String = target_path_opt.clone().unwrap();
-                        let target_pool: Arc<Mutex<Option<SqlitePool>>> = target_pool_opt.clone().unwrap();
+                        // These are guaranteed to be Some when target_is_rapsqlite is true,
+                        // but use ok_or_else for defensive programming and clear error messages.
+                        let target_path: String = target_path_opt.clone().ok_or_else(|| {
+                            OperationalError::new_err("Internal error: target path not available")
+                        })?;
+                        let target_pool: Arc<Mutex<Option<SqlitePool>>> =
+                            target_pool_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err("Internal error: target pool not available")
+                            })?;
                         let target_pragmas: Arc<StdMutex<Vec<(String, String)>>> =
-                            target_pragmas_opt.clone().unwrap();
+                            target_pragmas_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err("Internal error: target pragmas not available")
+                            })?;
                         let target_pool_size: Arc<StdMutex<Option<usize>>> =
-                            target_pool_size_opt.clone().unwrap();
+                            target_pool_size_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err("Internal error: target pool_size not available")
+                            })?;
                         let target_connection_timeout_secs: Arc<StdMutex<Option<u64>>> =
-                            target_connection_timeout_secs_opt.clone().unwrap();
+                            target_connection_timeout_secs_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target connection_timeout_secs not available",
+                                )
+                            })?;
+                        let target_idle_timeout_secs: Arc<StdMutex<Option<u64>>> =
+                            target_idle_timeout_secs_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target idle_timeout_secs not available",
+                                )
+                            })?;
                         let target_transaction_state: Arc<Mutex<TransactionState>> =
-                            target_transaction_state_opt.clone().unwrap();
+                            target_transaction_state_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target transaction_state not available",
+                                )
+                            })?;
                         let target_transaction_connection: Arc<
                             Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
-                        > = target_transaction_connection_opt.clone().unwrap();
+                        > = target_transaction_connection_opt.clone().ok_or_else(|| {
+                            OperationalError::new_err(
+                                "Internal error: target transaction_connection not available",
+                            )
+                        })?;
                         let target_callback_connection: Arc<
                             Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
-                        > = target_callback_connection_opt.clone().unwrap();
+                        > = target_callback_connection_opt.clone().ok_or_else(|| {
+                            OperationalError::new_err(
+                                "Internal error: target callback_connection not available",
+                            )
+                        })?;
                         let target_load_extension_enabled: Arc<StdMutex<bool>> =
-                            target_load_extension_enabled_opt.clone().unwrap();
-                        let target_user_functions: UserFunctions = target_user_functions_opt.clone().unwrap();
+                            target_load_extension_enabled_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target load_extension_enabled not available",
+                                )
+                            })?;
+                        let target_user_functions: UserFunctions =
+                            target_user_functions_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target user_functions not available",
+                                )
+                            })?;
+                        let target_user_aggregates: UserAggregates =
+                            target_user_aggregates_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target user_aggregates not available",
+                                )
+                            })?;
+                        let target_user_collations: UserCollations =
+                            target_user_collations_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target user_collations not available",
+                                )
+                            })?;
                         let target_trace_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
-                            target_trace_callback_opt.clone().unwrap();
+                            target_trace_callback_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target trace_callback not available",
+                                )
+                            })?;
                         let target_authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
-                            target_authorizer_callback_opt.clone().unwrap();
+                            target_authorizer_callback_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target authorizer_callback not available",
+                                )
+                            })?;
                         let target_progress_handler: ProgressHandler =
-                            target_progress_handler_opt.clone().unwrap();
+                            target_progress_handler_opt.clone().ok_or_else(|| {
+                                OperationalError::new_err(
+                                    "Internal error: target progress_handler not available",
+                                )
+                            })?;
 
                         let target_in_transaction = {
                             let g = target_transaction_state.lock().await;
@@ -5049,6 +6952,8 @@ impl Connection {
                         let target_has_callbacks_flag = has_callbacks(
                             &target_load_extension_enabled,
                             &target_user_functions,
+                            &target_user_aggregates,
+                            &target_user_collations,
                             &target_trace_callback,
                             &target_authorizer_callback,
                             &target_progress_handler,
@@ -5068,6 +6973,7 @@ impl Connection {
                                 &target_pragmas,
                                 &target_pool_size,
                                 &target_connection_timeout_secs,
+                                &target_idle_timeout_secs,
                             )
                             .await?;
                             let mut guard = target_callback_connection.lock().await;
@@ -5082,6 +6988,7 @@ impl Connection {
                                 &target_pragmas,
                                 &target_pool_size,
                                 &target_connection_timeout_secs,
+                                &target_idle_timeout_secs,
                             )
                             .await?;
                             let target_pool_size_val = {
@@ -5092,9 +6999,16 @@ impl Connection {
                                 let g = target_connection_timeout_secs.lock().unwrap();
                                 *g
                             };
-                            target_pool_conn = Some(target_pool_clone.acquire().await.map_err(|e| {
-                                pool_acquisition_error(&target_path, &e, target_pool_size_val, target_timeout_val)
-                            })?);
+                            target_pool_conn = Some(
+                                acquire_with_pragmas(
+                                    &target_pool_clone,
+                                    &target_pragmas,
+                                    &target_path,
+                                    target_pool_size_val,
+                                    target_timeout_val,
+                                )
+                                .await?,
+                            );
                         }
 
                         let target_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some((_, ref mut conn)) = target_taken {
@@ -5107,7 +7021,7 @@ impl Connection {
                         let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
                             OperationalError::new_err(format!("Failed to lock target handle: {e}"))
                         })?;
-                        target_handle = SendPtr(handle.as_raw_handle().as_ptr());
+                        target_handle = backup::SendPtr(handle.as_raw_handle().as_ptr());
                     } else {
                         // sqlite3.Connection - use Python helper to extract handle.
                         #[allow(deprecated)]
@@ -5151,7 +7065,7 @@ impl Connection {
                         }
                         // Keep the Python object alive for the whole backup.
                         let _ensure_target_alive = &target_clone;
-                        target_handle = SendPtr(handle_ptr);
+                        target_handle = backup::SendPtr(handle_ptr);
                     }
 
                     // Get source handle pointer (after ensuring exclusive ownership of the connection).
@@ -5161,7 +7075,7 @@ impl Connection {
                         let mut guard = sqlite_conn.lock_handle().await.map_err(|e| {
                             OperationalError::new_err(format!("Failed to lock source handle: {e}"))
                         })?;
-                        SendPtr(guard.as_raw_handle().as_ptr())
+                        backup::SendPtr(guard.as_raw_handle().as_ptr())
                     };
 
                     // Validate handles.
@@ -5186,10 +7100,6 @@ impl Connection {
                             .to_string()
                     };
 
-                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                        OperationalError::new_err(format!("Invalid database name: {e}"))
-                    })?;
-
                     // SQLite backup requires destination to not have active transactions.
                     // Safety: target_handle.0 is a valid sqlite3* pointer obtained from
                     // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
@@ -5203,107 +7113,23 @@ impl Connection {
                         ));
                     }
 
-                    // Initialize backup.
-                    // Safety: target_handle.0 and source_handle.0 are valid sqlite3* pointers
-                    // obtained from lock_handle().as_raw_handle().as_ptr() and are guaranteed
-                    // to be valid for the lifetime of the handle locks. name_cstr is a valid
-                    // CString. sqlite3_backup_init returns a backup handle or null on error.
-                    let backup_handle: SendPtr<libsqlite3_sys::sqlite3_backup> = SendPtr(unsafe {
-                        sqlite3_backup_init(
-                            target_handle.0,
-                            name_cstr.as_ptr(),
-                            source_handle.0,
-                            name_cstr.as_ptr(),
-                        )
-                    });
+                    let backup_busy_timeout_secs: u64 = connection_timeout_secs
+                        .lock()
+                        .unwrap()
+                        .unwrap_or(5)
+                        .clamp(5, 120);
 
-                    if backup_handle.0.is_null() {
-                        // Safety: target_handle.0 is a valid sqlite3* pointer. sqlite3_errcode
-                        // and sqlite3_errmsg are read-only operations that return error information.
-                        let error_code = unsafe { sqlite3_errcode(target_handle.0) };
-                        let error_msg = unsafe {
-                            let msg_ptr = sqlite3_errmsg(target_handle.0);
-                            if msg_ptr.is_null() {
-                                "Unknown error (null error message)".to_string()
-                            } else {
-                                // Safety: msg_ptr is a pointer to a static C string returned
-                                // by sqlite3_errmsg, valid until the next SQLite API call.
-                                cstr_from_c_char_ptr(msg_ptr as *const std::ffi::c_char)
-                                    .to_string_lossy()
-                                    .to_string()
-                            }
-                        };
-
-                        return Err(OperationalError::new_err(format!(
-                            "Failed to initialize backup: SQLite error code {error_code}, message: '{error_msg}'. \
-                            Source libversion: {source_libversion}. \
-                            Ensure both connections are open and target has no active transactions."
-                        )));
-                    }
-
-                    // Backup loop.
-                    loop {
-                        let pages_to_copy = if pages == 0 { -1 } else { pages };
-                        // Safety: backup_handle.0 is a valid sqlite3_backup* pointer returned
-                        // by sqlite3_backup_init. It remains valid until sqlite3_backup_finish
-                        // is called. sqlite3_backup_step is thread-safe for the backup handle.
-                        let step_result = unsafe { sqlite3_backup_step(backup_handle.0, pages_to_copy) };
-
-                        match step_result {
-                            SQLITE_OK | SQLITE_BUSY | SQLITE_LOCKED => {
-                                if let Some(ref progress_cb) = progress_callback {
-                                    // Safety: backup_handle.0 is a valid sqlite3_backup* pointer.
-                                    // sqlite3_backup_remaining and sqlite3_backup_pagecount are
-                                    // read-only operations that return backup progress information.
-                                    let remaining = unsafe { sqlite3_backup_remaining(backup_handle.0) };
-                                    let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
-                                    let pages_copied = page_count - remaining;
-
-                                    #[allow(deprecated)]
-                                    Python::with_gil(|py| {
-                                        let callback = progress_cb.bind(py);
-                                        let remaining_py: Py<PyAny> =
-                                            PyInt::new(py, remaining as i64).into_any().unbind();
-                                        let page_count_py: Py<PyAny> =
-                                            PyInt::new(py, page_count as i64).into_any().unbind();
-                                        let pages_copied_py: Py<PyAny> =
-                                            PyInt::new(py, pages_copied as i64).into_any().unbind();
-                                        if let Ok(args) = PyTuple::new(
-                                            py,
-                                            &[remaining_py, page_count_py, pages_copied_py],
-                                        ) {
-                                            let _ = callback.call1(args);
-                                        }
-                                    });
-                                }
-
-                                tokio::time::sleep(Duration::from_secs_f64(sleep)).await;
-                            }
-                            SQLITE_DONE => break,
-                            _ => {
-                                // Safety: backup_handle.0 is a valid sqlite3_backup* pointer.
-                                // sqlite3_backup_finish must be called to clean up the backup
-                                // handle, even on error. After this call, backup_handle.0 is
-                                // no longer valid.
-                                unsafe {
-                                    sqlite3_backup_finish(backup_handle.0);
-                                }
-                                return Err(OperationalError::new_err(format!(
-                                    "Backup failed with SQLite error code: {step_result}"
-                                )));
-                            }
-                        }
-                    }
-
-                    // Safety: backup_handle.0 is a valid sqlite3_backup* pointer.
-                    // sqlite3_backup_finish must be called to clean up the backup handle.
-                    // After this call, backup_handle.0 is no longer valid.
-                    let final_result = unsafe { sqlite3_backup_finish(backup_handle.0) };
-                    if final_result != SQLITE_OK {
-                        return Err(OperationalError::new_err(format!(
-                            "Backup finish failed with SQLite error code: {final_result}"
-                        )));
-                    }
+                    backup::run_backup_loop(backup::BackupParams {
+                        source_handle,
+                        target_handle,
+                        name: &name,
+                        pages,
+                        sleep,
+                        progress_callback,
+                        backup_busy_timeout_secs,
+                        source_libversion,
+                    })
+                    .await?;
 
                     Ok(())
                 }

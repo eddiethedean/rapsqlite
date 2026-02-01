@@ -6,7 +6,7 @@ This roadmap outlines the development plan for ``rapsqlite``.
 Current Status
 --------------
 
-**Current Version (v0.2.0)** — Phase 1 Complete, Phase 2 Complete:
+**Current Version (v0.3.0-dev)** — Phase 1 Complete, Phase 2 Complete, Phase 3 In Progress:
 
 **Phase 1 Complete:**
 * ✅ Connection lifecycle management (async context managers)
@@ -36,20 +36,29 @@ Current Status
 * ✅ Drop-in replacement validation (aiosqlite compatibility features)
 * ✅ Documentation & benchmarking
 
+**Phase 3 (v0.3.0-dev) In Progress:**
+* ✅ API completeness (execute_fetchall, execute_insert, Cursor properties, savepoints, Connection.stop(), Cursor.execute/executemany/executescript return self)
+* ✅ init_hook fixes (run after transaction active; use transaction connection during init_hook)
+* ✅ True Async DBAPI (rapsqlite.dbapi), SQLAlchemy dialect (sqlite+rapsqlite)
+* ✅ Test isolation (xdist_group, loadgroup, optional test deps)
+* ✅ Query helpers (paginate, analyze_query_plan, transaction_with_timeout, set_slow_query_threshold)
+* ✅ Framework integration (FastAPI, Starlette, aiohttp examples and docs)
+* ✅ FTS5 and JSON1 tests and docs
+* ✅ Type adapters and converters (register_adapter, register_converter; per-connection, sqlite3-style)
+* ✅ Custom aggregates and collations (create_aggregate, create_collation)
+
 Goal
 ----
 
 Achieve drop-in replacement compatibility with ``aiosqlite`` to enable seamless migration with true async performance.
 
-Phase 3 (Future)
-----------------
+Phase 3 (Remaining) / Future Enhancements
+-----------------------------------------
 
 Future enhancements may include:
 
-* Advanced connection lifecycle management
-* Nested transaction handling (savepoints)
-* Enhanced error recovery strategies
-* Query optimization utilities
-* Ecosystem integration improvements
+* Dynamic pool sizing
+* Deadlock detection and automatic retry
+* Pass 100% of aiosqlite test suite
 
-For the complete roadmap, see the `ROADMAP.md <https://github.com/eddiethedean/rapsqlite/blob/main/docs/ROADMAP.md>`_ file in the repository.
+For the complete roadmap, see the `ROADMAP.md <https://github.com/eddiethedean/rapsqlite/blob/main/docs/ROADMAP.md>`_ file in the repository (canonical source).

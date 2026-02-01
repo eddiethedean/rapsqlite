@@ -2,8 +2,11 @@
 
 import pytest
 import tempfile
-import os
+
+from conftest import cleanup_db
 from rapsqlite import Connection
+
+pytestmark = [pytest.mark.unit]
 
 
 @pytest.fixture
@@ -14,8 +17,7 @@ def test_db():
     try:
         yield db_path
     finally:
-        if os.path.exists(db_path):
-            os.unlink(db_path)
+        cleanup_db(db_path)
 
 
 @pytest.mark.asyncio

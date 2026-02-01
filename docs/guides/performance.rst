@@ -36,6 +36,12 @@ Pool Size Guidelines
 
 **Note**: SQLite serializes writes, so increasing pool size mainly helps with concurrent reads.
 
+Single connection vs larger pool
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Single connection (pool_size=1, default)**: Use when you have one logical worker (e.g. one async task doing DB work at a time), or when concurrency is low. Session-connection reuse means one connection handles many sequential queries efficiently.
+* **Larger pool (2–5 or more)**: Use when many concurrent coroutines perform database operations at the same time (e.g. many concurrent HTTP requests each hitting the DB). Increase ``pool_size`` before the first operation; it cannot be changed after the pool is created.
+
 Prepared Statement Caching
 ---------------------------
 
@@ -191,9 +197,16 @@ Database Locked Errors
 3. **Reduce transaction duration**: Keep transactions short
 4. **Implement retry logic**: See error handling section in :doc:`advanced-usage`
 
+Measuring performance and regression testing
+---------------------------------------------
+
+* **Query timing**: Use ``timed_fetch_all(conn, sql, parameters, on_timing=...)`` from ``rapsqlite`` to record query duration, or wrap calls with ``time.perf_counter()``. See :doc:`advanced-usage` for monitoring and trace callbacks.
+* **Regression tests**: The test suite includes performance regression tests in ``tests/test_performance.py``. Run with ``pytest tests/ -m performance`` to validate performance characteristics after changes.
+
 Further Reading
 ---------------
 
 * `SQLite Performance Tuning <https://www.sqlite.org/performance.html>`_
 * `SQLite PRAGMA Documentation <https://www.sqlite.org/pragma.html>`_
 * :doc:`advanced-usage` - Advanced usage patterns and best practices
+* :doc:`migration-guide` - Migrating from aiosqlite (performance impact of row format, pool, and PRAGMAs)

@@ -1,13 +1,24 @@
 //! Shared internal types used across modules.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyFloat, PyInt, PyString};
+use pyo3::types::{PyBytes, PyFloat, PyInt, PyString, PyTuple};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 // Type aliases for complex types to reduce clippy warnings
 pub(crate) type UserFunctions = Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>>;
+/// (num_params, user_data pointer as usize for cleanup on remove; usize is Send)
+pub(crate) type UserAggregates = Arc<StdMutex<HashMap<String, (i32, usize)>>>;
+/// Collation name -> user_data pointer as usize for cleanup on remove
+pub(crate) type UserCollations = Arc<StdMutex<HashMap<String, usize>>>;
+/// (type, adapter callable) for register_adapter; applied before SqliteParam::from_py
+pub(crate) type Adapters = Arc<StdMutex<Vec<(Py<PyAny>, Py<PyAny>)>>>;
+/// Declared type name (uppercase) -> converter callable(bytes) -> Python value for register_converter
+pub(crate) type Converters = Arc<StdMutex<HashMap<String, Py<PyAny>>>>;
 pub(crate) type ProgressHandler = Arc<StdMutex<Option<(i32, Py<PyAny>)>>>;
+
+/// Max adapter chain depth to avoid infinite loops when adapters return adapted types.
+const MAX_ADAPTER_DEPTH: usize = 10;
 
 /// Transaction state tracking.
 #[derive(Clone, PartialEq)]
@@ -95,9 +106,47 @@ impl SqliteParam {
             return Ok(SqliteParam::Text(py_str.to_str()?.to_string()));
         }
 
+        // Tuple: convert to text representation for aiosqlite compatibility (single placeholder binding).
+        if value.cast::<PyTuple>().is_ok() {
+            let s = value.repr()?.to_string();
+            return Ok(SqliteParam::Text(s));
+        }
+
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
             "Unsupported parameter type: {}. Use int, float, str, bytes, or None.",
             value.get_type().name()?
         )))
+    }
+
+    /// Apply registered adapters then convert to SqliteParam. If adapters is None or empty,
+    /// equivalent to from_py(value). Otherwise for each (typ, adapter) in order, if value
+    /// is an instance of typ, call adapter(value) and use the result; repeat until no
+    /// adapter matches or max depth; then from_py.
+    pub(crate) fn apply_adapters_then_from_py(
+        py: Python<'_>,
+        value: &Bound<'_, PyAny>,
+        adapters: Option<&Adapters>,
+    ) -> PyResult<Self> {
+        let Some(adapters) = adapters else {
+            return Self::from_py(value);
+        };
+        let list = adapters.lock().unwrap();
+        let mut current = value.clone().unbind();
+        for _ in 0..MAX_ADAPTER_DEPTH {
+            let mut matched = false;
+            for (typ, adapter) in list.iter() {
+                let typ_bound = typ.bind(py);
+                if current.bind(py).is_instance(typ_bound)? {
+                    let adapter_bound = adapter.bind(py);
+                    current = adapter_bound.call1((current.bind(py),))?.unbind();
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                break;
+            }
+        }
+        Self::from_py(current.bind(py))
     }
 }

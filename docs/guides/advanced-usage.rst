@@ -7,6 +7,9 @@ Table of Contents
 -----------------
 
 * :ref:`connection-pooling`
+* :ref:`monitoring`
+* :ref:`resource-cleanup`
+* :ref:`thread-safety`
 * :ref:`transaction-patterns`
 * :ref:`error-handling-strategies`
 * :ref:`performance-tuning`
@@ -47,6 +50,160 @@ Pool Size Guidelines
 * **Large (10+)**: Only for high-concurrency scenarios, be mindful of SQLite's write serialization
 
 **Note**: SQLite serializes writes, so increasing pool size mainly helps with concurrent reads.
+
+Pool size is fixed at first use
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The connection pool is created lazily when the first database operation runs. Once created,
+the pool size cannot be changed. To use a different pool size, set ``conn.pool_size = N``
+**before** any database operation (e.g. before ``execute``, ``fetch_all``, or entering a
+transaction). If you need to resize after the pool exists, create a new connection with
+the desired ``pool_size`` and close the old one.
+
+Idle connection timeout
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Set ``idle_timeout`` (seconds) so connections idle in the pool longer than that are closed.
+Use ``connect(..., idle_timeout=60)`` or ``conn.idle_timeout = 60`` before the pool is created.
+``None`` (default) means no idle timeout. This helps reduce resource use when load drops.
+
+.. _monitoring:
+
+Monitoring
+---------
+
+Pool metrics
+~~~~~~~~~~~
+
+``Connection.pool_metrics()`` returns a dict with pool usage: ``size`` (total connections), ``num_idle`` (idle), and ``in_use`` (active). Use it to observe pool health in production:
+
+.. code-block:: python
+
+   async with connect("app.db") as conn:
+       metrics = await conn.pool_metrics()
+       # e.g. {"size": 5, "num_idle": 3, "in_use": 2}
+       logger.info("pool %s", metrics)
+       # Or expose via a /metrics endpoint for Prometheus, etc.
+
+Metrics export (Prometheus / custom)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use the optional helper **``pool_metrics_gauges(conn)``** to get pool metrics as a dict of
+gauge names suitable for Prometheus or a custom metrics endpoint. It returns
+``rapsqlite_pool_size``, ``rapsqlite_pool_num_idle``, and ``rapsqlite_pool_in_use``.
+Import it from ``rapsqlite`` and call it with your connection:
+
+.. code-block:: python
+
+   from rapsqlite import connect, pool_metrics_gauges
+
+   async with connect("app.db") as conn:
+       gauges = await pool_metrics_gauges(conn)
+       # e.g. {"rapsqlite_pool_size": 5, "rapsqlite_pool_num_idle": 3, "rapsqlite_pool_in_use": 2}
+       # Expose gauges on your /metrics endpoint or feed into your metrics system.
+
+See :ref:`api-connection` for ``pool_metrics()`` and ``pool_health()``.
+
+Health checks
+~~~~~~~~~~~~~
+
+Use ``pool_health()`` for liveness/readiness probes: it runs ``SELECT 1`` and returns ``True`` on success, or raises on failure.
+
+.. code-block:: python
+
+   try:
+       ok = await conn.pool_health()
+       assert ok
+   except Exception:
+       # Database or pool unavailable
+       pass
+
+Connection health and recovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The underlying pool (sqlx) acquires connections on demand; when a connection is returned to the pool after use, it remains available for reuse. If a connection fails (e.g. database closed or I/O error), the pool can replace it on the next acquire. Use **``pool_health()``** periodically (e.g. in a liveness probe) to detect when the database is unavailable; combine with **``pool_metrics()``** to observe pool usage. For transient errors (e.g. ``SQLITE_BUSY``), retry the operation or use a transaction retry pattern (see :ref:`transaction-patterns`).
+
+Query logging and slow-query detection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``set_trace_callback`` to log every SQL statement executed on the connection. For slow-query detection, record the time before and after the query in your callback (the callback is invoked before the statement runs; you can pair it with a wrapper that measures duration around execute calls, or log and correlate with application metrics).
+
+.. code-block:: python
+
+   import time
+   import logging
+   logger = logging.getLogger("rapsqlite.queries")
+
+   def query_logger(sql: str):
+       logger.info("SQL: %s", sql.strip())
+
+   await conn.set_trace_callback(query_logger)
+   # All subsequent executes on this connection will log SQL
+   # Set to None to disable: await conn.set_trace_callback(None)
+
+For slow-query detection, measure elapsed time around your own execute calls (e.g. with a small helper or middleware) and log when a threshold is exceeded; the trace callback alone does not provide timing. This gives a clear path to observe queries without implementing a full metrics pipeline.
+
+Slow query threshold (Phase 3.5)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use **``Connection.set_slow_query_threshold(threshold_secs, callback=None)``** to automatically detect and report slow queries. When ``fetch_all()`` takes longer than ``threshold_secs``, the optional callback is invoked with ``callback(duration_secs, sql)``. Set ``threshold_secs`` to 0 to disable.
+
+.. code-block:: python
+
+   import logging
+   from rapsqlite import connect
+
+   logger = logging.getLogger("app.queries")
+
+   async with connect("app.db") as conn:
+       conn.set_slow_query_threshold(1.0, lambda d, s: logger.warning("Slow query (%.2fs): %s", d, s[:100]))
+       await conn.execute("CREATE TABLE t (id INT)")
+       rows = await conn.fetch_all("SELECT * FROM t")
+
+Query timing (duration and callbacks)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To record per-query duration (e.g. for metrics or slow-query logging), use **``timed_fetch_all(conn, sql, parameters=None, on_timing=None)``**. It runs ``fetch_all``, measures elapsed time, and optionally calls ``on_timing(duration_secs, sql)``. Import from ``rapsqlite``:
+
+.. code-block:: python
+
+   import logging
+   from rapsqlite import connect, timed_fetch_all
+
+   logger = logging.getLogger("app.queries")
+
+   def on_timing(duration_secs: float, sql: str) -> None:
+       if duration_secs > 1.0:
+           logger.warning("Slow query (%.2fs): %s", duration_secs, sql.strip()[:200])
+
+   async with connect("app.db") as conn:
+       rows = await timed_fetch_all(conn, "SELECT * FROM big_table", on_timing=on_timing)
+
+   # Or omit on_timing to get (rows, duration_secs)
+   rows, duration = await timed_fetch_all(conn, "SELECT 1")
+   logger.info("Query took %.3fs", duration)
+
+.. _resource-cleanup:
+
+Resource Cleanup and Connection Lifetime
+-----------------------------------------
+
+Always close connections under async control (Option A): use ``async with connect(...) as conn:`` or explicitly ``await conn.close()``. Do not rely on garbage collection to close connections.
+
+If a ``Connection`` is dropped without calling ``close()`` (e.g. you keep no reference and never use ``async with``), Python's garbage collector may eventually drop the Rust connection object. The underlying sqlx pool then tries to return connections using Tokio's spawn, but **no Tokio runtime is active during GC**, which can cause a panic: ``this functionality requires a Tokio context``. To avoid this:
+
+* **Use ``async with``**: Preferred. The context manager calls ``close()`` when exiting, so the pool is closed under Tokio.
+* **Call ``close()`` explicitly**: If you cannot use a context manager, call ``await conn.close()`` when done.
+* **Best-effort ``__del__``**: The Python wrapper schedules ``close()`` on the running event loop when the connection is GC'd, if a loop exists. This is best-effort only (no guarantees about finalizer order or loop lifetime) and does not replace ``async with`` or explicit ``close()``.
+
+See ``docs/reference/tokio-panic-investigation.md`` in the source tree for technical details and reproduction steps.
+
+.. _thread-safety:
+
+Thread safety
+~~~~~~~~~~~~~
+
+``rapsqlite`` is designed for async use; connections are not thread-safe. Do not share a single ``Connection`` instance across threads. Use one connection per asyncio task, or rely on the internal pool (one logical connection, multiple pooled connections used by your async code). For concurrent access from multiple threads, use a separate ``Connection`` per thread or a thread-safe wrapper that hands out connections from a pool per request.
 
 .. _transaction-patterns:
 
@@ -103,6 +260,52 @@ SQLite doesn't support true nested transactions, but you can use savepoints:
            await conn.commit()
        except Exception:
            await conn.rollback()
+
+You can also use the ``savepoint()`` context manager for the same pattern:
+
+.. code-block:: python
+
+   async with connect("example.db") as conn:
+       await conn.begin()
+       try:
+           await conn.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
+           async with conn.savepoint("sp1"):
+               await conn.execute("INSERT INTO users (name) VALUES (?)", ["Bob"])
+           await conn.commit()
+       except Exception:
+           await conn.rollback()
+
+Use ``async with conn.savepoint():`` without a name to auto-generate one. Savepoints require an active transaction (``begin()`` or ``transaction()``).
+
+Transaction retry (transient errors)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For workloads that may hit ``SQLITE_BUSY`` or ``SQLITE_LOCKED``, use **``transaction_retry(conn, work, max_retries=5, ...)``**. It runs a transaction with exponential backoff on transient errors. ``work`` must be a callable that returns an awaitable (e.g. an async function); it is invoked once per attempt so each retry runs fresh.
+
+.. code-block:: python
+
+   from rapsqlite import connect, transaction_retry
+
+   async with connect("app.db") as conn:
+       async def do_work():
+           await conn.execute("INSERT INTO t (x) VALUES (?)", ["a"])
+       await transaction_retry(conn, do_work, max_retries=3)
+
+Transaction timeout
+~~~~~~~~~~~~~~~~~~~
+
+Use **``transaction_with_timeout(conn, work, timeout_secs=30)``** to run a transaction
+with a maximum duration. Raises ``asyncio.TimeoutError`` if the transaction exceeds
+the timeout. Use this to prevent long-running transactions from blocking other work.
+
+.. code-block:: python
+
+   from rapsqlite import connect, transaction_with_timeout
+
+   async with connect("app.db") as conn:
+       async def do_work():
+           await conn.execute("INSERT INTO t (x) VALUES (?)", ["a"])
+       await transaction_with_timeout(conn, do_work, timeout_secs=5)
 
 .. _error-handling-strategies:
 
@@ -202,6 +405,102 @@ Best Practice: Always handle exceptions within your callback functions:
 
    await conn.create_function("safe_func", 1, safe_user_function)
 
+Streaming and large result sets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To process large SELECT result sets without loading every row into memory:
+
+- **Cursor iteration**: ``async for row in cursor`` after ``await cursor.execute(...)``
+  iterates over rows, but the cursor currently loads the full result set when
+  ``execute`` runs. Use this when the result size is acceptable in memory.
+
+- **Chunked fetching**: Use ``cursor.fetchmany(size)`` in a loop after
+  ``execute``; each call returns up to ``size`` rows from the already-fetched
+  result set. For true streaming (fetch from the database in chunks), use
+  pagination below.
+
+- **Streaming iterator (memory-efficient)**: Use ``execute_iter(conn, sql, parameters=None, chunk_size=None)`` or ``conn.execute_iter(sql, ...)`` to get an async iterator that yields **chunks** of rows. Uses ``LIMIT``/``OFFSET`` under the hood so memory stays bounded by ``chunk_size`` (default: ``conn.iter_chunk_size``, e.g. 64). One connection is used for the duration of iteration; closing the connection or cancelling the task stops iteration.
+
+  .. code-block:: python
+
+     from rapsqlite import connect, execute_iter
+
+     async with connect("app.db") as conn:
+         async for chunk in conn.execute_iter("SELECT * FROM big_table ORDER BY id", chunk_size=1000):
+             for row in chunk:
+                 process(row)
+
+  Ensure the query has a deterministic order (e.g. ``ORDER BY id``) so pages are consistent.
+
+- **Page-based pagination**: Use ``paginate(conn, sql, parameters=None, page_size=64, offset=0)`` to fetch one page at a time. Returns a list of rows for that page.
+
+  .. code-block:: python
+
+     from rapsqlite import connect, paginate
+
+     async with connect("app.db") as conn:
+         offset = 0
+         while True:
+             rows = await paginate(conn, "SELECT * FROM big_table ORDER BY id", page_size=100, offset=offset)
+             if not rows:
+                 break
+             for row in rows:
+                 process(row)
+             offset += len(rows)
+
+- **Manual pagination**: You can still run ``fetch_all`` with ``LIMIT``/``OFFSET`` in a loop if you prefer; ``execute_iter`` and ``paginate`` do this for you.
+
+- **Rows to dicts**: Use ``rows_to_dicts(rows, columns)`` to convert list-of-list rows to list-of-dicts using column names from ``cursor.description``:
+
+  .. code-block:: python
+
+     from rapsqlite import connect, rows_to_dicts
+
+     async with connect("app.db") as conn:
+         rows = await conn.fetch_all("SELECT id, name FROM users")
+         dicts = rows_to_dicts(rows, ["id", "name"])
+         # [{"id": 1, "name": "Alice"}, ...]
+
+Query plan analysis
+~~~~~~~~~~~~~~~~~~~
+
+Use ``analyze_query_plan(conn, sql, parameters=None)`` to inspect how SQLite will execute a query. Returns a dict with ``rows`` (raw EXPLAIN QUERY PLAN output), ``details`` (list of detail strings), ``uses_index`` (True if index is used), and ``table_scan`` (True if full table scan):
+
+  .. code-block:: python
+
+     from rapsqlite import connect, analyze_query_plan
+
+     async with connect("app.db") as conn:
+         analysis = await analyze_query_plan(conn, "SELECT * FROM users WHERE id = ?", [1])
+         if analysis["table_scan"] and not analysis["uses_index"]:
+             print("Consider adding an index on users(id)")
+
+Use **``suggest_indexes(conn, sql, parameters=None)``** to get index suggestions when the plan shows a full table scan. Returns a list of dicts with ``table``, ``column`` (may be empty), and ``suggestion`` (CREATE INDEX template):
+
+  .. code-block:: python
+
+     from rapsqlite import connect, suggest_indexes
+
+     async with connect("app.db") as conn:
+         suggestions = await suggest_indexes(conn, "SELECT * FROM users WHERE email = ?", ["x"])
+         for s in suggestions:
+             print(s["suggestion"])  # e.g. CREATE INDEX idx_users_<columns> ON users(<columns>) ...
+
+FTS, JSON, and UPSERT
+~~~~~~~~~~~~~~~~~~~~~
+
+rapsqlite uses standard SQLite; you can use FTS, JSON, and UPSERT directly:
+
+- **Full-Text Search (FTS)**: Create a virtual table with ``CREATE VIRTUAL TABLE
+  ... USING fts5(...)`` and query with ``MATCH``. No extra setup required.
+
+- **JSON**: Use SQLite's JSON1 functions (e.g. ``json_extract``, ``json_object``,
+  ``->``, ``->>``) in your SQL. Results are returned as text; parse in Python
+  if needed.
+
+- **UPSERT**: Use ``INSERT ... ON CONFLICT (...) DO UPDATE SET ...`` or ``DO
+  NOTHING``. Works with rapsqlite like any other DML.
+
 Connection Lifecycle and Cleanup
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -254,6 +553,8 @@ Error messages include current pool configuration and suggestions:
 Performance Tuning
 ------------------
 
+For a full performance tuning guide (pool sizing, prepared statements, PRAGMAs, benchmarks), see :doc:`performance`.
+
 Use Parameterized Queries
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -268,6 +569,22 @@ Use Parameterized Queries
 .. code-block:: python
 
    await conn.execute(f"INSERT INTO users (name) VALUES ('{name}')")  # SQL injection risk, no caching
+
+IN clause expansion
+~~~~~~~~~~~~~~~~~~~
+
+Use **``in_clause_query(sql, values)``** when you have ``WHERE id IN (?)`` and a list of IDs. It returns ``(processed_sql, params)`` to pass to ``fetch_all``:
+
+.. code-block:: python
+
+   from rapsqlite import connect, in_clause_query
+
+   ids = [1, 2, 3]
+   sql, params = in_clause_query("SELECT * FROM users WHERE id IN (?)", ids)
+   rows = await conn.fetch_all(sql, params)
+   # Equivalent to: SELECT * FROM users WHERE id IN (?, ?, ?) with params [1, 2, 3]
+
+Alternatively, build the placeholders manually: ``", ".join("?" * len(ids))``.
 
 Batch Operations
 ~~~~~~~~~~~~~~~~
@@ -450,13 +767,51 @@ Common Anti-Patterns
    async with connect("example.db") as conn:
        user = await conn.fetch_one("SELECT * FROM users WHERE id = ?", [user_id])
 
+❌ Abandoning Connections Without Closing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   # Bad: Connection left open; GC cleanup is best-effort and can cause issues
+   conn = await connect("example.db").__await__()
+   await conn.execute("INSERT INTO test VALUES (1)")
+   # conn never closed
+
+.. code-block:: python
+
+   # Good: Always use async with or explicitly close
+   async with connect("example.db") as conn:
+       await conn.execute("INSERT INTO test VALUES (1)")
+   # conn closed on exit
+
+❌ Blocking the Event Loop
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   # Bad: Blocking call inside async code stalls the event loop
+   async def bad():
+       async with connect("example.db") as conn:
+           time.sleep(1)  # Blocks entire event loop
+           await conn.fetch_all("SELECT * FROM test")
+
+.. code-block:: python
+
+   # Good: Use async sleep and keep I/O in rapsqlite (already non-blocking)
+   async def good():
+       await asyncio.sleep(1)
+       async with connect("example.db") as conn:
+           await conn.fetch_all("SELECT * FROM test")
+
 .. _best-practices:
 
 Best Practices
 --------------
 
-1. Always Use Context Managers
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1. Always Use Context Managers for Connections
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``async with connect(...)`` or ``async with Connection(...)`` so connections are always closed. Avoid holding a connection reference without ensuring ``close()`` is called (e.g. on error paths or when storing in globals).
 
 .. code-block:: python
 
@@ -464,8 +819,10 @@ Best Practices
    async with connect("example.db") as conn:
        await conn.execute("CREATE TABLE test (id INTEGER)")
 
-2. Use Transactions for Related Operations
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+2. Use Transactions for Related Operations and Keep Them Short
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Wrap related reads/writes in a single transaction. Keep transaction boundaries tight so locks are held briefly; avoid long-running work (e.g. network calls) inside a transaction.
 
 .. code-block:: python
 
@@ -546,6 +903,13 @@ Best Practices
 
    # Get table structure
    columns = await conn.get_table_info("users")
+
+9. Prefer Parameterized Queries and Choose the Right Fetch Pattern
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Parameterized queries**: Always use ``?`` placeholders and pass parameters as a list/tuple; never string-format SQL (SQL injection risk, no prepared-statement caching).
+* **Large result sets**: Use ``execute_iter`` for streaming (memory-efficient, async iterator) or ``paginate`` for page-based access (manual offset). Use ``fetch_all`` only when the result set fits in memory.
+* **Pool sizing**: Set ``pool_size`` before first use; default 1 is fine for most apps; increase for concurrent reads.
 
 Further Reading
 ---------------

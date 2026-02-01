@@ -3,6 +3,8 @@
 import pytest
 import rapsqlite
 
+pytestmark = [pytest.mark.unit]
+
 
 @pytest.mark.asyncio
 async def test_timeout_default_value(test_db):

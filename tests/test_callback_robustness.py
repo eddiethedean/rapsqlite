@@ -4,35 +4,11 @@ These tests cover edge cases, error scenarios, and complex usage patterns
 that might differ between rapsqlite and aiosqlite implementations.
 """
 
-import pytest
-import tempfile
 import os
-import sys
+
+import pytest
 
 from rapsqlite import connect, DatabaseError, OperationalError
-
-
-def cleanup_db(test_db: str) -> None:
-    """Helper to clean up database file."""
-    if os.path.exists(test_db):
-        try:
-            os.unlink(test_db)
-        except (PermissionError, OSError):
-            if sys.platform == "win32":
-                pass
-            else:
-                raise
-
-
-@pytest.fixture
-def test_db():
-    """Create a temporary database file for testing."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
-    try:
-        yield db_path
-    finally:
-        cleanup_db(db_path)
 
 
 # ============================================================================
@@ -418,6 +394,8 @@ async def test_authorizer_all_action_codes(test_db):
 async def test_authorizer_selective_deny(test_db):
     """Test authorizer denying specific operations."""
     async with connect(test_db) as db:
+        db.connection_timeout = 60
+        db.pool_size = 2
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)")
         await db.execute("INSERT INTO test VALUES (1, 'test')")
 
@@ -592,6 +570,7 @@ async def test_progress_handler_exception_handling(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_empty_database(test_db):
     """Test iterdump on an empty database."""
     async with connect(test_db) as db:
@@ -603,6 +582,7 @@ async def test_iterdump_empty_database(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_indexes(test_db):
     """Test iterdump includes indexes."""
     async with connect(test_db) as db:
@@ -620,6 +600,7 @@ async def test_iterdump_with_indexes(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_triggers(test_db):
     """Test iterdump includes triggers."""
     async with connect(test_db) as db:
@@ -642,6 +623,7 @@ async def test_iterdump_with_triggers(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_views(test_db):
     """Test iterdump includes views."""
     async with connect(test_db) as db:
@@ -660,6 +642,7 @@ async def test_iterdump_with_views(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_blobs(test_db):
     """Test iterdump handles BLOB data correctly."""
     async with connect(test_db) as db:
@@ -677,6 +660,7 @@ async def test_iterdump_with_blobs(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_special_characters(test_db):
     """Test iterdump handles special characters in data."""
     async with connect(test_db) as db:
@@ -695,6 +679,7 @@ async def test_iterdump_with_special_characters(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_quotes_identifiers(tmp_path):
     """iterdump should quote identifiers so dumps are replayable for weird names."""
     src_db = tmp_path / "src.db"
@@ -712,14 +697,26 @@ async def test_iterdump_quotes_identifiers(tmp_path):
         dump = await db.iterdump()
 
     # Replay the dump into a new database and verify we can read the data back.
+    # Skip BEGIN TRANSACTION; and COMMIT; from the dump to avoid "cannot start a
+    # transaction within a transaction" (replay connection may already be in one).
     async with connect(str(dst_db)) as db:
-        for stmt in dump:
-            await db.execute(stmt)
+        await db.begin()
+        try:
+            for stmt in dump:
+                s = stmt.strip()
+                if s in ("BEGIN TRANSACTION;", "COMMIT;"):
+                    continue
+                await db.execute(stmt)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
         rows = await db.fetch_all('SELECT "col space", "a""b" FROM "weird ""name"""')
         assert rows == [["hello", 1]]
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_multiple_tables(test_db):
     """Test iterdump with multiple tables."""
     async with connect(test_db) as db:
@@ -738,6 +735,7 @@ async def test_iterdump_multiple_tables(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_preserves_data_types(test_db):
     """Test iterdump preserves different data types correctly."""
     async with connect(test_db) as db:
@@ -765,6 +763,7 @@ async def test_iterdump_preserves_data_types(test_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_iterdump_with_transactions(test_db):
     """Test iterdump works correctly when database has transaction state."""
     async with connect(test_db) as db:
@@ -912,48 +911,51 @@ async def test_callbacks_with_cursor(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_basic(test_db):
+@pytest.mark.slow
+async def test_backup_basic(test_db_file):
     """Test basic backup functionality."""
     import rapsqlite
-    import os
 
-    source_conn = rapsqlite.Connection(test_db)
-    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
-    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
-    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
+    async with rapsqlite.Connection(test_db_file) as source_conn:
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
+        await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
+        await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
         pass
 
     target_conn = rapsqlite.Connection(target_path)
-    await source_conn.backup(target_conn)
-
-    # Verify data
-    rows = await target_conn.fetch_all("SELECT * FROM test ORDER BY id")
-    assert len(rows) == 2
-    assert rows[0][1] == "test1"
-    assert rows[1][1] == "test2"
-
-    await source_conn.close()
-    await target_conn.close()
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn)
+        rows = await target_conn.fetch_all("SELECT * FROM test ORDER BY id")
+        assert len(rows) == 2
+        assert rows[0][1] == "test1"
+        assert rows[1][1] == "test2"
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
 
 @pytest.mark.asyncio
-async def test_backup_target_in_transaction_raises(test_db):
+@pytest.mark.slow
+async def test_backup_target_in_transaction_raises(test_db_file):
     """Backup should fail cleanly if target connection has an active transaction."""
     import rapsqlite
-    import os
 
-    source_conn = rapsqlite.Connection(test_db)
-    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
-    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
+    async with rapsqlite.Connection(test_db_file) as source_conn:
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
+        await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
-    target_path = test_db + ".backup_txn"
+    target_path = test_db_file + ".backup_txn"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -963,235 +965,232 @@ async def test_backup_target_in_transaction_raises(test_db):
     await target_conn.begin()
     try:
         with pytest.raises(OperationalError, match="active transaction"):
-            await source_conn.backup(target_conn)
+            async with rapsqlite.Connection(test_db_file) as source_conn2:
+                await source_conn2.backup(target_conn)
     finally:
-        # Ensure we leave target in a clean state regardless of assertion outcome
         try:
             await target_conn.rollback()
         except Exception:
             pass
-        await source_conn.close()
         await target_conn.close()
         if os.path.exists(target_path):
             os.remove(target_path)
 
 
 @pytest.mark.asyncio
-async def test_backup_empty_database(test_db):
+@pytest.mark.slow
+async def test_backup_empty_database(test_db_file):
     """Test backing up an empty database."""
     import rapsqlite
-    import os
 
-    source_conn = rapsqlite.Connection(test_db)
-    # No tables created
-
-    target_path = test_db + ".backup"
+    # No tables created; source is empty
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
         pass
 
     target_conn = rapsqlite.Connection(target_path)
-    await source_conn.backup(target_conn)
-
-    # Verify target is also empty
-    tables = await target_conn.fetch_all(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )
-    assert len(tables) == 0
-
-    await source_conn.close()
-    await target_conn.close()
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn:
+            await source_conn.backup(target_conn)
+        tables = await target_conn.fetch_all(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+        assert len(tables) == 0
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
 
 @pytest.mark.asyncio
-async def test_backup_progress_callback(test_db):
+@pytest.mark.slow
+async def test_backup_progress_callback(test_db_file):
     """Test backup with progress callback."""
     import rapsqlite
-    import os
 
-    source_conn = rapsqlite.Connection(test_db)
-    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)")
-    # Insert some data to make backup non-trivial
-    for i in range(10):
-        await source_conn.execute("INSERT INTO test (data) VALUES (?)", [f"data{i}"])
+    async with rapsqlite.Connection(test_db_file) as source_conn:
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)"
+        )
+        for i in range(10):
+            await source_conn.execute(
+                "INSERT INTO test (data) VALUES (?)", [f"data{i}"]
+            )
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
         pass
 
     target_conn = rapsqlite.Connection(target_path)
-
     progress_calls = []
 
     def progress_callback(remaining, page_count, pages_copied):
         progress_calls.append((remaining, page_count, pages_copied))
 
-    await source_conn.backup(target_conn, progress=progress_callback)
-
-    # Progress callback may or may not be called depending on backup size
-    # If backup completes in one step, callback won't be called
-    # If backup takes multiple steps, callback will be called
-    # Either way, backup should succeed
-    if len(progress_calls) > 0:
-        # If called, last call should have remaining=0 (backup complete)
-        assert progress_calls[-1][0] == 0
-
-    # Verify data was backed up
-    rows = await target_conn.fetch_all("SELECT COUNT(*) FROM test")
-    assert rows[0][0] == 10
-
-    await source_conn.close()
-    await target_conn.close()
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn, progress=progress_callback)
+        if len(progress_calls) > 0:
+            assert progress_calls[-1][0] == 0
+        rows = await target_conn.fetch_all("SELECT COUNT(*) FROM test")
+        assert rows[0][0] == 10
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
 
 @pytest.mark.asyncio
-async def test_backup_with_pages_parameter(test_db):
+@pytest.mark.slow
+async def test_backup_with_pages_parameter(test_db_file):
     """Test backup with pages parameter to copy incrementally."""
     import rapsqlite
-    import os
 
-    source_conn = rapsqlite.Connection(test_db)
-    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)")
-    for i in range(5):
-        await source_conn.execute("INSERT INTO test (data) VALUES (?)", [f"data{i}"])
+    async with rapsqlite.Connection(test_db_file) as source_conn:
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)"
+        )
+        for i in range(5):
+            await source_conn.execute(
+                "INSERT INTO test (data) VALUES (?)", [f"data{i}"]
+            )
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
         pass
 
     target_conn = rapsqlite.Connection(target_path)
-    # Copy 1 page at a time
-    await source_conn.backup(target_conn, pages=1)
-
-    # Verify data
-    rows = await target_conn.fetch_all("SELECT COUNT(*) FROM test")
-    assert rows[0][0] == 5
-
-    await source_conn.close()
-    await target_conn.close()
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn, pages=1)
+        rows = await target_conn.fetch_all("SELECT COUNT(*) FROM test")
+        assert rows[0][0] == 5
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
 
 @pytest.mark.asyncio
-async def test_backup_with_custom_name(test_db):
+@pytest.mark.slow
+async def test_backup_with_custom_name(test_db_file):
     """Test backup with custom database name."""
     import rapsqlite
-    import os
 
-    source_conn = rapsqlite.Connection(test_db)
-    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
-    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
+    async with rapsqlite.Connection(test_db_file) as source_conn:
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
+        await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
         pass
 
     target_conn = rapsqlite.Connection(target_path)
-    # Use default "main" database name
-    await source_conn.backup(target_conn, name="main")
-
-    # Verify data
-    rows = await target_conn.fetch_all("SELECT * FROM test")
-    assert len(rows) == 1
-
-    await source_conn.close()
-    await target_conn.close()
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn, name="main")
+        rows = await target_conn.fetch_all("SELECT * FROM test")
+        assert len(rows) == 1
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
 
 @pytest.mark.asyncio
-async def test_backup_multiple_tables(test_db):
+@pytest.mark.slow
+async def test_backup_multiple_tables(test_db_file):
     """Test backing up database with multiple tables."""
     import rapsqlite
-    import os
 
-    source_conn = rapsqlite.Connection(test_db)
-    await source_conn.execute("CREATE TABLE table1 (id INTEGER PRIMARY KEY, name TEXT)")
-    await source_conn.execute(
-        "CREATE TABLE table2 (id INTEGER PRIMARY KEY, value INTEGER)"
-    )
-    await source_conn.execute("INSERT INTO table1 (name) VALUES (?)", ["test1"])
-    await source_conn.execute("INSERT INTO table2 (value) VALUES (?)", [42])
+    async with rapsqlite.Connection(test_db_file) as source_conn:
+        await source_conn.execute(
+            "CREATE TABLE table1 (id INTEGER PRIMARY KEY, name TEXT)"
+        )
+        await source_conn.execute(
+            "CREATE TABLE table2 (id INTEGER PRIMARY KEY, value INTEGER)"
+        )
+        await source_conn.execute("INSERT INTO table1 (name) VALUES (?)", ["test1"])
+        await source_conn.execute("INSERT INTO table2 (value) VALUES (?)", [42])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
         pass
 
     target_conn = rapsqlite.Connection(target_path)
-    await source_conn.backup(target_conn)
-
-    # Verify both tables
-    rows1 = await target_conn.fetch_all("SELECT * FROM table1")
-    rows2 = await target_conn.fetch_all("SELECT * FROM table2")
-    assert len(rows1) == 1
-    assert len(rows2) == 1
-    assert rows1[0][1] == "test1"
-    assert rows2[0][1] == 42
-
-    await source_conn.close()
-    await target_conn.close()
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn)
+        rows1 = await target_conn.fetch_all("SELECT * FROM table1")
+        rows2 = await target_conn.fetch_all("SELECT * FROM table2")
+        assert len(rows1) == 1
+        assert len(rows2) == 1
+        assert rows1[0][1] == "test1"
+        assert rows2[0][1] == 42
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
 
 @pytest.mark.asyncio
-async def test_backup_with_indexes(test_db):
+@pytest.mark.slow
+async def test_backup_with_indexes(test_db_file):
     """Test backing up database with indexes."""
     import rapsqlite
-    import os
 
-    source_conn = rapsqlite.Connection(test_db)
-    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
-    await source_conn.execute("CREATE INDEX idx_name ON test(name)")
-    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
+    async with rapsqlite.Connection(test_db_file) as source_conn:
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
+        await source_conn.execute("CREATE INDEX idx_name ON test(name)")
+        await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
         pass
 
     target_conn = rapsqlite.Connection(target_path)
-    await source_conn.backup(target_conn)
-
-    # Verify index exists in target
-    indexes = await target_conn.fetch_all(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_name'"
-    )
-    assert len(indexes) == 1
-
-    await source_conn.close()
-    await target_conn.close()
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn)
+        indexes = await target_conn.fetch_all(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_name'"
+        )
+        assert len(indexes) == 1
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)
 
 
 @pytest.mark.asyncio
-async def test_backup_progress_callback_exception(test_db):
+@pytest.mark.slow
+async def test_backup_progress_callback_exception(test_db_file):
     """Test that exceptions in progress callback don't abort backup."""
     import rapsqlite
-    import os
 
-    source_conn = rapsqlite.Connection(test_db)
-    await source_conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
-    await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
+    async with rapsqlite.Connection(test_db_file) as source_conn:
+        await source_conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+        )
+        await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
-    target_path = test_db + ".backup"
+    target_path = test_db_file + ".backup"
     if os.path.exists(target_path):
         os.remove(target_path)
     with open(target_path, "w"):
@@ -1200,18 +1199,15 @@ async def test_backup_progress_callback_exception(test_db):
     target_conn = rapsqlite.Connection(target_path)
 
     def progress_callback(remaining, page_count, pages_copied):
-        # Raise exception - should not abort backup
         if pages_copied > 0:
             raise ValueError("Test exception")
 
-    # Backup should complete despite exception
-    await source_conn.backup(target_conn, progress=progress_callback)
-
-    # Verify data was still backed up
-    rows = await target_conn.fetch_all("SELECT * FROM test")
-    assert len(rows) == 1
-
-    await source_conn.close()
-    await target_conn.close()
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    try:
+        async with rapsqlite.Connection(test_db_file) as source_conn2:
+            await source_conn2.backup(target_conn, progress=progress_callback)
+        rows = await target_conn.fetch_all("SELECT * FROM test")
+        assert len(rows) == 1
+    finally:
+        await target_conn.close()
+        if os.path.exists(target_path):
+            os.remove(target_path)

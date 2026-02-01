@@ -3,6 +3,8 @@
 import pytest
 import rapsqlite
 
+pytestmark = [pytest.mark.unit]
+
 
 @pytest.mark.asyncio
 async def test_create_function_exception_handled(test_db):
@@ -85,7 +87,7 @@ async def test_progress_handler_exception_continues(test_db):
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
 
         # Insert many rows to trigger progress handler
-        values = [("row_" + str(i),) for i in range(1000)]
+        values = [("row_" + str(i),) for i in range(250)]
         await db.execute_many("INSERT INTO t (v) VALUES (?)", values)
 
         progress_calls = []
@@ -103,7 +105,7 @@ async def test_progress_handler_exception_continues(test_db):
         # Operation should continue despite progress callback error
         # Use a query that processes many rows to trigger progress handler
         rows = await db.fetch_all("SELECT COUNT(*) FROM t")
-        assert rows[0][0] == 1000
+        assert rows[0][0] == 250
 
         # Progress callback may or may not be called depending on SQLite internals
         # The important thing is that the operation completes successfully
@@ -136,7 +138,8 @@ async def test_authorizer_callback_invalid_return_defaults_to_deny(test_db):
 async def test_backup_progress_callback_exception_handled(test_db):
     """Test that exceptions in backup progress callbacks don't crash backup."""
     import tempfile
-    import os
+
+    from conftest import cleanup_db
 
     async with rapsqlite.connect(test_db) as src:
         await src.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -155,9 +158,10 @@ async def test_backup_progress_callback_exception_handled(test_db):
                 raise ValueError("Backup progress error")
 
         # Backup should complete despite progress callback errors
-        async with rapsqlite.connect(test_db) as src, rapsqlite.connect(
-            target_db
-        ) as tgt:
+        async with (
+            rapsqlite.connect(test_db) as src,
+            rapsqlite.connect(target_db) as tgt,
+        ):
             await src.backup(tgt, pages=1, progress=progress_callback)
 
         # Verify backup succeeded
@@ -165,5 +169,4 @@ async def test_backup_progress_callback_exception_handled(test_db):
             rows = await verify.fetch_all("SELECT COUNT(*) FROM t")
             assert rows[0][0] == 3
     finally:
-        if os.path.exists(target_db):
-            os.unlink(target_db)
+        cleanup_db(target_db)

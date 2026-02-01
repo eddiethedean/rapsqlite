@@ -1,31 +1,10 @@
 """Robust tests for Connection.row_factory and Cursor row_factory behavior."""
 
-import os
-import sys
-import tempfile
-
 import pytest
 
 from rapsqlite import DatabaseError, Row, connect
 
-
-def _cleanup(path: str) -> None:
-    if os.path.exists(path):
-        try:
-            os.unlink(path)
-        except (PermissionError, OSError):
-            if sys.platform != "win32":
-                raise
-
-
-@pytest.fixture
-def test_db():
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        path = f.name
-    try:
-        yield path
-    finally:
-        _cleanup(path)
+pytestmark = [pytest.mark.unit]
 
 
 async def _ensure_table(db, table="t", cols="id INTEGER PRIMARY KEY, a TEXT, b REAL"):
