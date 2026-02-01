@@ -1,14 +1,14 @@
 # Test Failures Report
 
-**Date:** January 31, 2025  
-**Status:** 3 failing, 678 passed, 13 skipped  
+**Date:** January 31, 2026  
+**Status:** 0 failing, 681+ passed, 13 skipped (SQLAlchemy suite)  
 **Scope:** SQLAlchemy dialect (`sqlite+rapsqlite`) integration tests
 
 ---
 
 ## Executive Summary
 
-Three SQLAlchemy-related tests fail with the rapsqlite dialect (all pass with aiosqlite). Two root causes remain:
+**All three previously failing SQLAlchemy tests are now fixed (2026-01-31).** Two root causes were addressed:
 
 1. **Transaction rollback** – `test_connection_explicit_transaction`: rollback does not undo inserts when SQLAlchemy's `on_connect` registers UDFs.
 2. **Doubled ORM rows** – `test_async_session_add_commit_get` and `test_async_session_add_all_many_rows`: ORM inserts return 2× the expected rows, suggesting double execution of INSERT...RETURNING.
@@ -17,9 +17,9 @@ Eight previously failing tests are now fixed (tuple params, cursor description, 
 
 ---
 
-## Current Failing Tests
+## Previously Failing Tests (Now Fixed)
 
-### 1. `test_connection_explicit_transaction[rapsqlite]`
+### 1. `test_connection_explicit_transaction[rapsqlite]` — FIXED
 
 **File:** `tests/test_sqlalchemy_rapsqlite.py` (lines 139–162)
 
@@ -44,7 +44,7 @@ Eight previously failing tests are now fixed (tuple params, cursor description, 
 
 ---
 
-### 2. `test_async_session_add_commit_get[rapsqlite]`
+### 2. `test_async_session_add_commit_get[rapsqlite]` — FIXED
 
 **File:** `tests/test_sqlalchemy_rapsqlite.py` (lines 321–356)
 
@@ -56,7 +56,7 @@ Eight previously failing tests are now fixed (tuple params, cursor description, 
 
 ---
 
-### 3. `test_async_session_add_all_many_rows[rapsqlite]`
+### 3. `test_async_session_add_all_many_rows[rapsqlite]` — FIXED
 
 **File:** `tests/test_sqlalchemy_rapsqlite.py` (lines 582–612)
 
@@ -140,11 +140,14 @@ In `src/context_managers.rs`:
 
 ## Test Run Summary
 
+**After fixes (2026-01-31):**
 ```
-=================== 3 failed, 678 passed, 13 skipped in ~21s ===================
+=================== 30 passed (rapsqlite SQLAlchemy suite), 30 skipped (aiosqlite) ===================
 ```
 
-All failures are in `tests/test_sqlalchemy_rapsqlite.py` with the rapsqlite dialect; aiosqlite passes the same tests.
+**Fixes applied:**
+1. **Doubled rows:** Added `returns_result_rows` to ExecuteContextManager; for INSERT/UPDATE/DELETE ... RETURNING, use `bind_and_fetch_all_on_connection` and cache results via `_set_select_results` so `cursor.fetchall()` does not re-execute.
+2. **Transaction rollback:** Added DML-with-callbacks branch: when `has_callbacks` and DML and not in transaction, run BEGIN on callback_connection, move to transaction_connection, set `transaction_state = Active` and `explicit_transaction = true`, so rollback works when SQLAlchemy's `conn.begin()` does not emit BEGIN through our execute path.
 
 ---
 

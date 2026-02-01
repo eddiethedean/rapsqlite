@@ -5,6 +5,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
+use sqlx::Row;
 use sqlx::pool::PoolConnection;
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +40,8 @@ pub(crate) struct ExecuteContextManager {
     pub(crate) query: String,
     pub(crate) param_values: Vec<SqliteParam>,
     pub(crate) is_select: bool,
+    /// True for INSERT/UPDATE/DELETE ... RETURNING; triggers fetch-and-cache to prevent re-execution
+    pub(crate) returns_result_rows: bool,
     // Connection state needed for execution
     pub(crate) path: String,
     pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
@@ -68,6 +71,7 @@ pub(crate) struct ExecuteContextManager {
     pub(crate) timeout: Arc<StdMutex<f64>>,
     pub(crate) isolation_level: Arc<StdMutex<Option<String>>>,
     pub(crate) closed: Arc<StdMutex<bool>>,
+    pub(crate) explicit_transaction: Arc<Mutex<bool>>,
 }
 
 #[pymethods]
@@ -80,6 +84,7 @@ impl ExecuteContextManager {
             let query = slf.borrow(py).query.clone();
             let param_values = slf.borrow(py).param_values.clone();
             let is_select = slf.borrow(py).is_select;
+            let returns_result_rows = slf.borrow(py).returns_result_rows;
             let path = slf.borrow(py).path.clone();
             let pool = Arc::clone(&slf.borrow(py).pool);
             let session_connection = Arc::clone(&slf.borrow(py).session_connection);
@@ -108,6 +113,7 @@ impl ExecuteContextManager {
             let isolation_level = Arc::clone(&slf.borrow(py).isolation_level);
             let closed = Arc::clone(&slf.borrow(py).closed);
             let converters = Arc::clone(&slf.borrow(py).converters);
+            let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
             // Get cursor's results Arc to mark it as executed for non-SELECT queries
             // Note: Python::with_gil is used here for sync result caching in async context.
             // The deprecation warning is acceptable as this is a sync operation within async.
@@ -175,12 +181,32 @@ impl ExecuteContextManager {
                         &progress_handler,
                     );
 
-                    let result = if in_transaction_after_hook {
+                    // For INSERT/UPDATE/DELETE ... RETURNING, fetch rows and cache them so
+                    // cursor.fetchall() does not re-execute (SQLAlchemy ORM insertmanyvalues).
+                    let use_fetch_for_returning =
+                        returns_result_rows && is_dml_query(&query) && !is_begin_query(&query);
+
+                    enum DmlOutcome {
+                        Executed(sqlx::sqlite::SqliteQueryResult),
+                        Fetched(Vec<sqlx::sqlite::SqliteRow>),
+                    }
+
+                    let outcome = if in_transaction_after_hook {
                         let mut conn_guard = transaction_connection.lock().await;
                         let conn = conn_guard.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
-                        bind_and_execute_on_connection(&query, &param_values, conn, &path).await?
+                        if use_fetch_for_returning {
+                            let rows =
+                                bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r =
+                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Executed(r)
+                        }
                     } else if has_callbacks_flag && is_begin_query(&query) {
                         // Raw "BEGIN" from SQLAlchemy: execute on callback_connection, then move to
                         // transaction_connection so subsequent DML and rollback() work correctly.
@@ -210,7 +236,57 @@ impl ExecuteContextManager {
                             let mut g = transaction_connection.lock().await;
                             *g = Some(conn);
                         }
-                        result
+                        {
+                            let mut ex_guard = explicit_transaction.lock().await;
+                            *ex_guard = true;
+                        }
+                        DmlOutcome::Executed(result)
+                    } else if has_callbacks_flag && is_dml_query(&query) && !in_transaction_after_hook {
+                        // DML (INSERT/UPDATE/DELETE) with callbacks but no active transaction:
+                        // SQLAlchemy's conn.begin() may not emit BEGIN through our execute path.
+                        // Run BEGIN and move connection to transaction_connection so rollback() works.
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+
+                        let mut conn_guard = callback_connection.lock().await;
+                        let mut conn = conn_guard.take().ok_or_else(|| {
+                            OperationalError::new_err("Callback connection not available")
+                        })?;
+                        sqlx::query("BEGIN")
+                            .execute(&mut *conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, "BEGIN"))?;
+                        {
+                            let mut g = transaction_state.lock().await;
+                            *g = TransactionState::Active;
+                        }
+                        {
+                            let mut g = transaction_connection.lock().await;
+                            *g = Some(conn);
+                        }
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Transaction connection not available")
+                        })?;
+                        if use_fetch_for_returning {
+                            let rows =
+                                bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r =
+                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Executed(r)
+                        }
                     } else if has_callbacks_flag {
                         ensure_callback_connection(
                             &path,
@@ -227,7 +303,17 @@ impl ExecuteContextManager {
                         let conn = conn_guard.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
-                        bind_and_execute_on_connection(&query, &param_values, conn, &path).await?
+                        if use_fetch_for_returning {
+                            let rows =
+                                bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r =
+                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Executed(r)
+                        }
                     } else if hook_already_called || !is_dml_query(&query) {
                         // Inside init_hook, or DDL (CREATE/DROP etc.): use session connection.
                         ensure_session_connection(
@@ -244,7 +330,17 @@ impl ExecuteContextManager {
                         let conn = conn_guard.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
-                        bind_and_execute_on_connection(&query, &param_values, conn, &path).await?
+                        if use_fetch_for_returning {
+                            let rows =
+                                bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r =
+                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Executed(r)
+                        }
                     } else {
                         // Implicit transaction (aiosqlite compat): first DML (INSERT/UPDATE/DELETE)
                         // without explicit begin() starts a transaction; commit()/rollback() end it.
@@ -282,9 +378,25 @@ impl ExecuteContextManager {
                             .execute(&mut *conn)
                             .await
                             .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
-                        let result =
-                            bind_and_execute_on_connection(&query, &param_values, &mut conn, &path)
-                                .await?;
+                        let outcome = if use_fetch_for_returning {
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                &mut conn,
+                                &path,
+                            )
+                            .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r = bind_and_execute_on_connection(
+                                &query,
+                                &param_values,
+                                &mut conn,
+                                &path,
+                            )
+                            .await?;
+                            DmlOutcome::Executed(r)
+                        };
                         {
                             let mut g = transaction_state.lock().await;
                             *g = TransactionState::Active;
@@ -293,7 +405,7 @@ impl ExecuteContextManager {
                             let mut g = transaction_connection.lock().await;
                             *g = Some(conn);
                         }
-                        result
+                        outcome
                     };
 
                     // Raw COMMIT/ROLLBACK from SQLAlchemy: reset state and return connection to
@@ -302,6 +414,10 @@ impl ExecuteContextManager {
                         let mut trans_guard = transaction_state.lock().await;
                         *trans_guard = TransactionState::None;
                         drop(trans_guard);
+                        {
+                            let mut ex_guard = explicit_transaction.lock().await;
+                            *ex_guard = false;
+                        }
                         if has_callbacks_flag {
                             let mut conn_guard = transaction_connection.lock().await;
                             if let Some(conn) = conn_guard.take() {
@@ -311,8 +427,17 @@ impl ExecuteContextManager {
                         }
                     }
 
-                    let rowid = result.last_insert_rowid();
-                    let changes = result.rows_affected();
+                    let (rowid, changes) = match &outcome {
+                        DmlOutcome::Executed(r) => (r.last_insert_rowid(), r.rows_affected()),
+                        DmlOutcome::Fetched(rows) => {
+                            let changes = rows.len() as u64;
+                            let rowid = rows
+                                .last()
+                                .and_then(|r| r.try_get::<i64, usize>(0).ok())
+                                .unwrap_or(0);
+                            (rowid, changes)
+                        }
+                    };
 
                     *last_rowid.lock().await = rowid;
                     *last_changes.lock().await = changes;
@@ -326,9 +451,41 @@ impl ExecuteContextManager {
                         Ok(())
                     });
 
-                    // Mark cursor results as cached (empty for non-SELECT) to prevent re-execution
-                    // The fetchall() method will check if it's non-SELECT and results are None,
-                    // and return empty results without executing. This is handled in fetchall().
+                    // For RETURNING: cache rows in cursor so fetchall() does not re-execute
+                    if let DmlOutcome::Fetched(ref rows) = outcome {
+                        #[allow(deprecated)]
+                        let _ = Python::with_gil(|py| -> PyResult<()> {
+                            let cur = cursor.bind(py);
+                            let conn = connection_for_fetch.bind(py);
+                            let rf = cur.getattr("row_factory").ok().map(|o| o.unbind());
+                            let tf = conn.getattr("text_factory").ok().map(|o| o.unbind());
+                            let rf_bound = rf.as_ref().map(|r| r.bind(py));
+                            let tf_bound = tf.as_ref().map(|t| t.bind(py));
+                            let mut py_vec = Vec::with_capacity(rows.len());
+                            let conv_opt = Some(&converters);
+                            for row in rows {
+                                let out = row_to_py_with_factory(
+                                    py,
+                                    row,
+                                    rf_bound.as_ref().map(|b| b.as_ref()),
+                                    tf_bound.as_ref().map(|b| b.as_ref()),
+                                    conv_opt,
+                                )?;
+                                py_vec.push(out.unbind());
+                            }
+                            let list = PyList::empty(py);
+                            for o in &py_vec {
+                                list.append(o.bind(py))?;
+                            }
+                            let desc: Py<PyAny> = if let Some(first) = rows.first() {
+                                build_description_tuple(py, first)?.unbind().into()
+                            } else {
+                                build_description_empty_result(py, Some(&query))?.unbind().into()
+                            };
+                            cur.call_method1("_set_select_results", (list, desc))?;
+                            Ok(())
+                        });
+                    }
                 } else {
                     // For SELECT queries, ensure pool exists for lazy execution
                     // Only check for Active state, not Starting (Starting means transaction is being set up,
