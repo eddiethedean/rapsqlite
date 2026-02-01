@@ -31,8 +31,7 @@ use crate::context_managers::next_savepoint_name;
 use crate::conversion::{py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py};
 use crate::errors::map_sqlx_error;
 use crate::parameters::{
-    process_named_parameters, process_positional_parameters,
-    process_positional_parameters_tuple,
+    process_named_parameters, process_positional_parameters, process_positional_parameters_tuple,
 };
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
@@ -1389,8 +1388,7 @@ impl Connection {
 
             // Check if it's a tuple (SQLAlchemy qmark style)
             if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec =
-                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
 
@@ -1822,8 +1820,7 @@ impl Connection {
 
             // Check if it's a tuple (SQLAlchemy qmark style)
             if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec =
-                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
 
@@ -2021,8 +2018,7 @@ impl Connection {
                 return Ok((query, params_vec));
             }
             if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec =
-                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
             let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
@@ -2230,8 +2226,7 @@ impl Connection {
                 return Ok((query, params_vec));
             }
             if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec =
-                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
             let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
@@ -2407,8 +2402,7 @@ impl Connection {
                 return Ok((query, params_vec));
             }
             if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec =
-                    process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
+                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
                 return Ok((query, params_vec));
             }
             let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
@@ -3151,7 +3145,9 @@ impl Connection {
                                     Err(e) => {
                                         let msg = format!("Error converting argument {i}: {e}");
                                         libsqlite3_sys::sqlite3_result_error(
-                                            ctx, msg.as_ptr() as *const std::ffi::c_char, msg.len() as i32,
+                                            ctx,
+                                            msg.as_ptr() as *const std::ffi::c_char,
+                                            msg.len() as i32,
                                         );
                                         return;
                                     }
@@ -3160,35 +3156,56 @@ impl Connection {
                             let result = match py_args.len() {
                                 0 => callback.bind(py).call0(),
                                 1 => callback.bind(py).call1((py_args[0].clone_ref(py),)),
-                                2 => callback.bind(py).call1((py_args[0].clone_ref(py), py_args[1].clone_ref(py))),
+                                2 => callback
+                                    .bind(py)
+                                    .call1((py_args[0].clone_ref(py), py_args[1].clone_ref(py))),
                                 3 => callback.bind(py).call1((
-                                    py_args[0].clone_ref(py), py_args[1].clone_ref(py), py_args[2].clone_ref(py),
+                                    py_args[0].clone_ref(py),
+                                    py_args[1].clone_ref(py),
+                                    py_args[2].clone_ref(py),
                                 )),
                                 4 => callback.bind(py).call1((
-                                    py_args[0].clone_ref(py), py_args[1].clone_ref(py),
-                                    py_args[2].clone_ref(py), py_args[3].clone_ref(py),
+                                    py_args[0].clone_ref(py),
+                                    py_args[1].clone_ref(py),
+                                    py_args[2].clone_ref(py),
+                                    py_args[3].clone_ref(py),
                                 )),
                                 5 => callback.bind(py).call1((
-                                    py_args[0].clone_ref(py), py_args[1].clone_ref(py), py_args[2].clone_ref(py),
-                                    py_args[3].clone_ref(py), py_args[4].clone_ref(py),
+                                    py_args[0].clone_ref(py),
+                                    py_args[1].clone_ref(py),
+                                    py_args[2].clone_ref(py),
+                                    py_args[3].clone_ref(py),
+                                    py_args[4].clone_ref(py),
                                 )),
                                 _ => {
                                     let args_tuple = PyTuple::new(
                                         py,
                                         py_args.iter().map(|arg: &Py<PyAny>| arg.clone_ref(py)),
-                                    ).map_err(|e| format!("Error creating tuple: {e}"));
+                                    )
+                                    .map_err(|e| format!("Error creating tuple: {e}"));
                                     match args_tuple {
                                         Ok(t) => {
-                                            let code = py.eval(
-                                                std::ffi::CString::new("lambda f, args: f(*args)").unwrap().as_c_str(),
-                                                None, None,
-                                            ).map_err(|e| format!("Error: {e}"));
+                                            let code = py
+                                                .eval(
+                                                    std::ffi::CString::new(
+                                                        "lambda f, args: f(*args)",
+                                                    )
+                                                    .unwrap()
+                                                    .as_c_str(),
+                                                    None,
+                                                    None,
+                                                )
+                                                .map_err(|e| format!("Error: {e}"));
                                             match code {
-                                                Ok(unpack_code) => unpack_code.call1((callback.bind(py), t)),
+                                                Ok(unpack_code) => {
+                                                    unpack_code.call1((callback.bind(py), t))
+                                                }
                                                 Err(e) => {
                                                     let msg = format!("Error: {e}");
                                                     libsqlite3_sys::sqlite3_result_error(
-                                                        ctx, msg.as_ptr() as *const std::ffi::c_char, msg.len() as i32,
+                                                        ctx,
+                                                        msg.as_ptr() as *const std::ffi::c_char,
+                                                        msg.len() as i32,
                                                     );
                                                     return;
                                                 }
@@ -3196,7 +3213,9 @@ impl Connection {
                                         }
                                         Err(e) => {
                                             libsqlite3_sys::sqlite3_result_error(
-                                                ctx, e.as_ptr() as *const std::ffi::c_char, e.len() as i32,
+                                                ctx,
+                                                e.as_ptr() as *const std::ffi::c_char,
+                                                e.len() as i32,
                                             );
                                             return;
                                         }
@@ -3210,7 +3229,9 @@ impl Connection {
                                 Err(e) => {
                                     let msg = format!("Python function error: {e}");
                                     libsqlite3_sys::sqlite3_result_error(
-                                        ctx, msg.as_ptr() as *const std::ffi::c_char, msg.len() as i32,
+                                        ctx,
+                                        msg.as_ptr() as *const std::ffi::c_char,
+                                        msg.len() as i32,
                                     );
                                 }
                             }
@@ -3239,128 +3260,132 @@ impl Connection {
                     })?;
                     let sqlite_conn: &mut SqliteConnection = conn;
                     let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                })?;
-                let raw_db = handle.as_raw_handle().as_ptr();
-
-                if func_clone.is_none() {
-                    // Remove the function from user_functions
-                    {
-                        let mut funcs_guard = user_functions.lock().unwrap();
-                        funcs_guard.remove(&name);
-                    }
-
-                    // Remove from SQLite by calling sqlite3_create_function_v2 with NULL callback
-                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                        OperationalError::new_err(format!("Function name contains null byte: {e}"))
+                        OperationalError::new_err(format!("Failed to lock handle: {e}"))
                     })?;
-                    // Safety: raw_db is a valid sqlite3* pointer obtained from
-                    // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                    // for the lifetime of the handle lock. name_cstr is a valid CString.
-                    // We pass NULL for all callbacks to remove the function, which is safe.
-                    let result = unsafe {
-                        sqlite3_create_function_v2(
-                            raw_db,
-                            name_cstr.as_ptr(),
-                            nargs,
-                            SQLITE_UTF8,
-                            std::ptr::null_mut(), // pApp (user data)
-                            None,                 // xFunc (scalar function callback)
-                            None,                 // xStep (aggregate step callback)
-                            None,                 // xFinal (aggregate final callback)
-                            None,                 // xDestroy (destructor)
-                        )
-                    };
+                    let raw_db = handle.as_raw_handle().as_ptr();
 
-                    if result != SQLITE_OK {
-                        return Err(OperationalError::new_err(format!(
-                            "Failed to remove function '{name}': SQLite error code {result}"
-                        )));
-                    }
-
-                    // After removing, check if all callbacks are now cleared
-                    let all_cleared = !has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-                    if all_cleared {
-                        // Used transaction_connection: do not release (we're in a transaction)
-                        drop(handle);
-                        return Ok(());
-                    }
-                } else {
-                    let enc = if deterministic {
-                        SQLITE_UTF8 | SQLITE_DETERMINISTIC
-                    } else {
-                        SQLITE_UTF8
-                    };
-                    // Store the function - need to clone the callback with GIL
-                    // Note: Python::with_gil is used here for sync callback storage in async context.
-                    // The deprecation warning is acceptable as this is a sync operation within async.
-                    #[allow(deprecated)]
-                    let callback_for_storage =
-                        Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
-                    {
-                        let mut funcs_guard = user_functions.lock().unwrap();
-                        funcs_guard.insert(name.clone(), (nargs, callback_for_storage));
-                    }
-
-                    // Create a boxed callback pointer to pass as user data
-                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                        OperationalError::new_err(format!("Function name contains null byte: {e}"))
-                    })?;
-
-                    // Store the Python callback in a Box and pass it as user_data
-                    // Clone it with GIL
-                    // Note: Python::with_gil is used here for sync callback access in async context.
-                    // The deprecation warning is acceptable as this is a sync operation within async.
-                    #[allow(deprecated)]
-                    let callback =
-                        Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
-                    let callback_box: Box<Py<PyAny>> = Box::new(callback);
-                    let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
-
-                    // Safety: raw_db is a valid sqlite3* pointer obtained from
-                    // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                    // for the lifetime of the handle lock. name_cstr is a valid CString.
-                    // callback_ptr is a pointer to Box<Py<PyAny>> created with Box::into_raw.
-                    // The trampoline and destructor functions handle the callback safely.
-                    let result = unsafe {
-                        sqlite3_create_function_v2(
-                            raw_db,
-                            name_cstr.as_ptr(),
-                            nargs,
-                            enc,
-                            callback_ptr, // pApp (user data - the Python callback)
-                            Some(udf_trampoline), // xFunc (scalar function callback)
-                            None,         // xStep (aggregate step callback)
-                            None,         // xFinal (aggregate final callback)
-                            Some(udf_destructor), // xDestroy (destructor)
-                        )
-                    };
-
-                    if result != SQLITE_OK {
-                        // Clean up the callback pointer on error
-                        // Safety: callback_ptr was created with Box::into_raw, so we can
-                        // safely convert it back to Box and drop it. This is safe because
-                        // the function registration failed, so SQLite won't call the destructor.
-                        unsafe {
-                            let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
-                        }
+                    if func_clone.is_none() {
+                        // Remove the function from user_functions
                         {
                             let mut funcs_guard = user_functions.lock().unwrap();
                             funcs_guard.remove(&name);
                         }
-                        return Err(OperationalError::new_err(format!(
-                            "Failed to create function '{name}': SQLite error code {result}"
-                        )));
+
+                        // Remove from SQLite by calling sqlite3_create_function_v2 with NULL callback
+                        let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                            OperationalError::new_err(format!(
+                                "Function name contains null byte: {e}"
+                            ))
+                        })?;
+                        // Safety: raw_db is a valid sqlite3* pointer obtained from
+                        // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                        // for the lifetime of the handle lock. name_cstr is a valid CString.
+                        // We pass NULL for all callbacks to remove the function, which is safe.
+                        let result = unsafe {
+                            sqlite3_create_function_v2(
+                                raw_db,
+                                name_cstr.as_ptr(),
+                                nargs,
+                                SQLITE_UTF8,
+                                std::ptr::null_mut(), // pApp (user data)
+                                None,                 // xFunc (scalar function callback)
+                                None,                 // xStep (aggregate step callback)
+                                None,                 // xFinal (aggregate final callback)
+                                None,                 // xDestroy (destructor)
+                            )
+                        };
+
+                        if result != SQLITE_OK {
+                            return Err(OperationalError::new_err(format!(
+                                "Failed to remove function '{name}': SQLite error code {result}"
+                            )));
+                        }
+
+                        // After removing, check if all callbacks are now cleared
+                        let all_cleared = !has_callbacks(
+                            &load_extension_enabled,
+                            &user_functions,
+                            &user_aggregates,
+                            &user_collations,
+                            &trace_callback,
+                            &authorizer_callback,
+                            &progress_handler,
+                        );
+                        if all_cleared {
+                            // Used transaction_connection: do not release (we're in a transaction)
+                            drop(handle);
+                            return Ok(());
+                        }
+                    } else {
+                        let enc = if deterministic {
+                            SQLITE_UTF8 | SQLITE_DETERMINISTIC
+                        } else {
+                            SQLITE_UTF8
+                        };
+                        // Store the function - need to clone the callback with GIL
+                        // Note: Python::with_gil is used here for sync callback storage in async context.
+                        // The deprecation warning is acceptable as this is a sync operation within async.
+                        #[allow(deprecated)]
+                        let callback_for_storage =
+                            Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
+                        {
+                            let mut funcs_guard = user_functions.lock().unwrap();
+                            funcs_guard.insert(name.clone(), (nargs, callback_for_storage));
+                        }
+
+                        // Create a boxed callback pointer to pass as user data
+                        let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
+                            OperationalError::new_err(format!(
+                                "Function name contains null byte: {e}"
+                            ))
+                        })?;
+
+                        // Store the Python callback in a Box and pass it as user_data
+                        // Clone it with GIL
+                        // Note: Python::with_gil is used here for sync callback access in async context.
+                        // The deprecation warning is acceptable as this is a sync operation within async.
+                        #[allow(deprecated)]
+                        let callback =
+                            Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
+                        let callback_box: Box<Py<PyAny>> = Box::new(callback);
+                        let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
+
+                        // Safety: raw_db is a valid sqlite3* pointer obtained from
+                        // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
+                        // for the lifetime of the handle lock. name_cstr is a valid CString.
+                        // callback_ptr is a pointer to Box<Py<PyAny>> created with Box::into_raw.
+                        // The trampoline and destructor functions handle the callback safely.
+                        let result = unsafe {
+                            sqlite3_create_function_v2(
+                                raw_db,
+                                name_cstr.as_ptr(),
+                                nargs,
+                                enc,
+                                callback_ptr, // pApp (user data - the Python callback)
+                                Some(udf_trampoline), // xFunc (scalar function callback)
+                                None,         // xStep (aggregate step callback)
+                                None,         // xFinal (aggregate final callback)
+                                Some(udf_destructor), // xDestroy (destructor)
+                            )
+                        };
+
+                        if result != SQLITE_OK {
+                            // Clean up the callback pointer on error
+                            // Safety: callback_ptr was created with Box::into_raw, so we can
+                            // safely convert it back to Box and drop it. This is safe because
+                            // the function registration failed, so SQLite won't call the destructor.
+                            unsafe {
+                                let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
+                            }
+                            {
+                                let mut funcs_guard = user_functions.lock().unwrap();
+                                funcs_guard.remove(&name);
+                            }
+                            return Err(OperationalError::new_err(format!(
+                                "Failed to create function '{name}': SQLite error code {result}"
+                            )));
+                        }
                     }
-                }
 
                     return Ok(());
                 }

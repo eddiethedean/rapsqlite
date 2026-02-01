@@ -5,8 +5,8 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
-use sqlx::Row;
 use sqlx::pool::PoolConnection;
+use sqlx::Row;
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -19,7 +19,9 @@ pub(crate) fn next_savepoint_name() -> String {
 }
 
 use crate::connection::ensure_not_closed;
-use crate::conversion::{build_description_empty_result, build_description_tuple, row_to_py_with_factory};
+use crate::conversion::{
+    build_description_empty_result, build_description_tuple, row_to_py_with_factory,
+};
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
     execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
@@ -197,9 +199,13 @@ impl ExecuteContextManager {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         if use_fetch_for_returning {
-                            let rows =
-                                bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
-                                    .await?;
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                            )
+                            .await?;
                             DmlOutcome::Fetched(rows)
                         } else {
                             let r =
@@ -241,7 +247,10 @@ impl ExecuteContextManager {
                             *ex_guard = true;
                         }
                         DmlOutcome::Executed(result)
-                    } else if has_callbacks_flag && is_dml_query(&query) && !in_transaction_after_hook {
+                    } else if has_callbacks_flag
+                        && is_dml_query(&query)
+                        && !in_transaction_after_hook
+                    {
                         // DML (INSERT/UPDATE/DELETE) with callbacks but no active transaction:
                         // SQLAlchemy's conn.begin() may not emit BEGIN through our execute path.
                         // Run BEGIN and move connection to transaction_connection so rollback() works.
@@ -277,9 +286,13 @@ impl ExecuteContextManager {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         if use_fetch_for_returning {
-                            let rows =
-                                bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
-                                    .await?;
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                            )
+                            .await?;
                             DmlOutcome::Fetched(rows)
                         } else {
                             let r =
@@ -304,9 +317,13 @@ impl ExecuteContextManager {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         if use_fetch_for_returning {
-                            let rows =
-                                bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
-                                    .await?;
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                            )
+                            .await?;
                             DmlOutcome::Fetched(rows)
                         } else {
                             let r =
@@ -331,9 +348,13 @@ impl ExecuteContextManager {
                             OperationalError::new_err("Session connection not available")
                         })?;
                         if use_fetch_for_returning {
-                            let rows =
-                                bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
-                                    .await?;
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                            )
+                            .await?;
                             DmlOutcome::Fetched(rows)
                         } else {
                             let r =
@@ -480,7 +501,7 @@ impl ExecuteContextManager {
                             let desc: Py<PyAny> = if let Some(first) = rows.first() {
                                 build_description_tuple(py, first)?.unbind().into()
                             } else {
-                                build_description_empty_result(py, Some(&query))?.unbind().into()
+                                build_description_empty_result(py, Some(&query))?.unbind()
                             };
                             cur.call_method1("_set_select_results", (list, desc))?;
                             Ok(())
@@ -622,7 +643,7 @@ impl ExecuteContextManager {
                         } else {
                             // Empty result: set description from parsed SELECT columns so SQLAlchemy ORM
                             // keymap matches (e.g. session.get(Model, missing_id), two get(missing) in a row).
-                            build_description_empty_result(py, Some(&query))?.unbind().into()
+                            build_description_empty_result(py, Some(&query))?.unbind()
                         };
                         cur.call_method1("_set_select_results", (list, desc))?;
                         Ok(())

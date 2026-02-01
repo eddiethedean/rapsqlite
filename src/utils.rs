@@ -19,7 +19,10 @@ pub(crate) fn returns_result_rows(query: &str) -> bool {
     if trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") {
         return true;
     }
-    if trimmed.starts_with("INSERT") || trimmed.starts_with("UPDATE") || trimmed.starts_with("DELETE") {
+    if trimmed.starts_with("INSERT")
+        || trimmed.starts_with("UPDATE")
+        || trimmed.starts_with("DELETE")
+    {
         return trimmed.contains("RETURNING");
     }
     false
@@ -265,7 +268,9 @@ mod tests {
     fn test_returns_result_rows() {
         assert!(returns_result_rows("SELECT 1"));
         assert!(returns_result_rows("WITH x AS (SELECT 1) SELECT * FROM x"));
-        assert!(returns_result_rows("INSERT INTO t (a) VALUES (1) RETURNING id"));
+        assert!(returns_result_rows(
+            "INSERT INTO t (a) VALUES (1) RETURNING id"
+        ));
         assert!(returns_result_rows("UPDATE t SET x = 1 RETURNING id"));
         assert!(returns_result_rows("DELETE FROM t RETURNING id"));
         assert!(!returns_result_rows("INSERT INTO t VALUES (1)"));
