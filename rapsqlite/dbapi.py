@@ -6,9 +6,11 @@ See docs/true_async_dbapi_spec.md for the interface contract.
 from __future__ import annotations  # PEP 563: forward references without quotes
 
 import asyncio
-from typing import Any
+from typing import Any, Callable, Coroutine, Iterable, Sequence, TypeVar
 
 import re
+
+T = TypeVar("T")
 
 from . import (
     Connection as _Connection,
@@ -53,36 +55,18 @@ def _dbapi_exc(name: str, ext_cls: Any, base: type) -> type:
     return type(name, (ext_cls, base), {})
 
 
-DataError = _dbapi_exc(
-    "DataError",
-    getattr(_ext, "DataError", type("DataError", (DatabaseError,), {})),
-    DatabaseError,
-)
-OperationalError = _dbapi_exc(
-    "OperationalError",
-    getattr(_ext, "OperationalError", type("OperationalError", (DatabaseError,), {})),
-    DatabaseError,
-)
-IntegrityError = _dbapi_exc(
-    "IntegrityError",
-    getattr(_ext, "IntegrityError", type("IntegrityError", (DatabaseError,), {})),
-    DatabaseError,
-)
-InternalError = _dbapi_exc(
-    "InternalError",
-    getattr(_ext, "InternalError", type("InternalError", (DatabaseError,), {})),
-    DatabaseError,
-)
-NotSupportedError = _dbapi_exc(
-    "NotSupportedError",
-    getattr(_ext, "NotSupportedError", type("NotSupportedError", (DatabaseError,), {})),
-    DatabaseError,
-)
-ProgrammingError = _dbapi_exc(
-    "ProgrammingError",
-    getattr(_ext, "ProgrammingError", type("ProgrammingError", (DatabaseError,), {})),
-    DatabaseError,
-)
+# DBAPI exception list: (name, base). Each is exposed as a module-level name.
+_DBAPI_EXCEPTIONS = [
+    ("DataError", DatabaseError),
+    ("OperationalError", DatabaseError),
+    ("IntegrityError", DatabaseError),
+    ("InternalError", DatabaseError),
+    ("NotSupportedError", DatabaseError),
+    ("ProgrammingError", DatabaseError),
+]
+for _name, _base in _DBAPI_EXCEPTIONS:
+    _ext_cls = getattr(_ext, _name, type(_name, (DatabaseError,), {}))
+    globals()[_name] = _dbapi_exc(_name, _ext_cls, _base)
 
 apilevel = "2.0"
 threadsafety = 0
@@ -140,10 +124,12 @@ class AsyncCursor:
         self._result_index: int = 0
         self._cached_description: Any = None
 
-    def _with_lock(self, coro_factory):
+    def _with_lock(
+        self, coro_factory: Callable[[], Coroutine[Any, Any, T]]
+    ) -> Coroutine[Any, Any, T]:
         """Run coro_factory() while holding connection op lock; raise ProgrammingError if busy."""
 
-        async def _run() -> Any:
+        async def _run() -> T:
             try:
                 # Timeout of 1e-4s (100 microseconds) allows lock acquisition under normal
                 # conditions while still failing quickly if another operation is in progress.
@@ -222,9 +208,11 @@ class AsyncCursor:
                         (name, None, None, None, None, None, None) for name in names
                     )
 
-        return await self._with_lock(_do)  # type: ignore[no-any-return]
+        return await self._with_lock(_do)
 
-    async def executemany(self, sql: str, seq_of_params: Any) -> None:
+    async def executemany(
+        self, sql: str, seq_of_params: Iterable[Sequence[Any]]
+    ) -> None:
         async def _do() -> None:
             self._result_buffer = None
             self._result_index = 0
@@ -242,7 +230,7 @@ class AsyncCursor:
                     for i in range(n)
                 )
 
-        await self._with_lock(_do)  # type: ignore[no-any-return]
+        await self._with_lock(_do)
 
     async def fetchone(self) -> Any:
         if self._result_buffer is not None:
@@ -313,7 +301,9 @@ class AsyncConnection:
         self._closed = False
         self._op_lock = asyncio.Lock()
 
-    async def _with_op_lock(self, coro_factory) -> Any:
+    async def _with_op_lock(
+        self, coro_factory: Callable[[], Coroutine[Any, Any, T]]
+    ) -> T:
         """Run coro_factory() while holding op lock; raise ProgrammingError if busy."""
         try:
             # Timeout of 1e-4s (100 microseconds) allows lock acquisition under normal
@@ -362,14 +352,14 @@ class AsyncConnection:
             raw = self._conn.cursor()
             return AsyncCursor(self, raw)  # type: ignore[no-any-return]
 
-        return await self._with_op_lock(_do)  # type: ignore[no-any-return]
+        return await self._with_op_lock(_do)
 
     async def execute(self, sql: str, params: Any = None) -> AsyncCursor:
         async def _do() -> AsyncCursor:
             raw = await self._conn.execute(sql, params)
             return AsyncCursor(self, raw)  # type: ignore[no-any-return]
 
-        return await self._with_op_lock(_do)  # type: ignore[no-any-return]
+        return await self._with_op_lock(_do)
 
     async def executemany(self, sql: str, seq_of_params: Any) -> None:
         async def _do() -> None:
@@ -438,7 +428,9 @@ class AsyncConnection:
 Cursor = _Cursor
 
 
-async def connect(*args: Any, **kwargs: Any) -> AsyncConnection:
+async def connect(
+    *args: Any, **kwargs: Any
+) -> Coroutine[Any, Any, AsyncConnection]:
     """
     Async connect per True Async DBAPI spec.
 

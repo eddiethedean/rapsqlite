@@ -69,6 +69,69 @@ def cleanup_db(test_db: str) -> None:
                 raise
 
 
+# ---- Skip helpers for feature-dependent tests ----
+
+
+def skip_if_no_phase3(*, allow_module_level: bool = False) -> None:
+    """Skip if Phase 3 APIs (iter_chunk_size, etc.) are not supported by this build."""
+    pytest.importorskip("rapsqlite")
+    from rapsqlite import Connection
+
+    if not hasattr(Connection, "iter_chunk_size"):
+        pytest.skip(
+            "Phase 3 APIs (iter_chunk_size, etc.) not supported by this build",
+            allow_module_level=allow_module_level,
+        )
+
+
+def skip_if_no_register_adapter() -> None:
+    """Skip if register_adapter is not supported by this build."""
+    pytest.importorskip("rapsqlite")
+    from rapsqlite import Connection
+
+    if not hasattr(Connection, "register_adapter"):
+        pytest.skip("register_adapter not supported by this build")
+
+
+def skip_if_no_register_converter() -> None:
+    """Skip if register_converter is not supported by this build."""
+    pytest.importorskip("rapsqlite")
+    from rapsqlite import Connection
+
+    if not hasattr(Connection, "register_converter"):
+        pytest.skip("register_converter not supported by this build")
+
+
+def skip_if_no_create_aggregate() -> None:
+    """Skip if create_aggregate is not supported by this build."""
+    pytest.importorskip("rapsqlite")
+    from rapsqlite import Connection
+
+    if not hasattr(Connection, "create_aggregate"):
+        pytest.skip("create_aggregate not supported by this build")
+
+
+def skip_if_no_create_collation() -> None:
+    """Skip if create_collation is not supported by this build."""
+    pytest.importorskip("rapsqlite")
+    from rapsqlite import Connection
+
+    if not hasattr(Connection, "create_collation"):
+        pytest.skip("create_collation not supported by this build")
+
+
+def skip_if_no_create_function_deterministic() -> None:
+    """Skip if create_function(deterministic=...) is not supported by this build."""
+    import inspect
+
+    pytest.importorskip("rapsqlite")
+    from rapsqlite import Connection
+
+    sig = inspect.signature(Connection.create_function)
+    if "deterministic" not in sig.parameters:
+        pytest.skip("create_function(deterministic=...) not supported by this build")
+
+
 def _unique_memory_uri(request: Any) -> str:
     """Return a unique in-memory SQLite URI per test (file:mem_<hash>?mode=memory&cache=shared).
 
@@ -178,6 +241,20 @@ async def dbapi_conn() -> AsyncGenerator[Any, None]:
         yield conn
     finally:
         await conn.close()
+
+
+@pytest.fixture
+async def connected_db(test_db: str) -> AsyncGenerator[Any, None]:
+    """Open rapsqlite connection to test_db; guaranteed close after test.
+
+    Use when you only need a single open connection. Use test_db when you need
+    the path or multiple connections (e.g. backup source and target).
+    """
+    pytest.importorskip("rapsqlite")
+    from rapsqlite import connect
+
+    async with connect(test_db) as conn:
+        yield conn
 
 
 # Pytest markers for test categorization

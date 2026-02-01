@@ -7,6 +7,8 @@ import pytest
 
 from rapsqlite import connect, transaction_retry
 
+pytestmark = [pytest.mark.unit]
+
 
 @pytest.mark.asyncio
 async def test_transaction_retry_max_retries_zero_raises(test_db):

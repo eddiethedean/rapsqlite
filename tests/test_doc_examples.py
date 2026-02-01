@@ -13,6 +13,8 @@ import pytest
 
 from rapsqlite import Row, connect
 
+pytestmark = [pytest.mark.integration]
+
 
 def _temp_db():
     fd, path = tempfile.mkstemp(suffix=".db")

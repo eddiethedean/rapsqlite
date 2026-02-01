@@ -8,6 +8,8 @@ pytest.importorskip("aiohttp")
 
 from rapsqlite import connect
 
+pytestmark = [pytest.mark.integration]
+
 
 async def _fetch_items(db_path: str) -> dict[str, Any]:
     """Simulate an aiohttp handler that fetches items from the database.

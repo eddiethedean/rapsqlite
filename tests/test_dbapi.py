@@ -7,6 +7,8 @@ import pytest
 pytest.importorskip("rapsqlite")
 from rapsqlite import dbapi
 
+pytestmark = [pytest.mark.unit]
+
 
 @pytest.mark.asyncio
 async def test_module_level_contract():

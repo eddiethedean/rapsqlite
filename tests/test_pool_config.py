@@ -7,6 +7,8 @@ import pytest
 import rapsqlite
 from rapsqlite import connect
 
+pytestmark = [pytest.mark.unit]
+
 
 # ---- Validation: negative values ----
 

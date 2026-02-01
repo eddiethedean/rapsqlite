@@ -4,6 +4,8 @@ import pytest
 
 from rapsqlite import connect
 
+pytestmark = [pytest.mark.unit]
+
 
 @pytest.mark.asyncio
 async def test_json_extract(test_db):

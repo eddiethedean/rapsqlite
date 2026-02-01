@@ -38,6 +38,7 @@ test = [
     "pytest-asyncio",
     "pytest-xdist",
     "pytest-timeout",
+    "pytest-cov",
     "hypothesis",
     "fastapi",
     "sqlalchemy>=2.0",
@@ -110,6 +111,15 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
+strict_optional = true
+
+[[tool.mypy.overrides]]
+module = "rapsqlite.*"
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+files = ["tests/*", "examples/*"]
+ignore_errors = true
 
 [tool.ruff]
 exclude = ["*.pyi"]

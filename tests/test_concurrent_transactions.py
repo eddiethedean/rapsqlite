@@ -11,7 +11,7 @@ import rapsqlite
 from rapsqlite import Error, OperationalError
 
 # Mark tests that verify concurrent behavior (may have different results in parallel)
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.concurrency]
 
 
 @pytest.mark.asyncio

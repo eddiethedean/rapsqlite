@@ -7,7 +7,10 @@
 
 import pytest
 
+from conftest import skip_if_no_register_adapter, skip_if_no_register_converter
 from rapsqlite import connect
+
+pytestmark = [pytest.mark.unit]
 
 
 # ---- Basic type round-trip ----
@@ -105,10 +108,7 @@ async def test_type_unicode_execute(test_db):
 @pytest.mark.asyncio
 async def test_register_adapter_round_trip(test_db, unique_table_prefix):
     """register_adapter converts custom type for binding."""
-    from rapsqlite import Connection
-
-    if not hasattr(Connection, "register_adapter"):
-        pytest.skip("register_adapter not supported by this build")
+    skip_if_no_register_adapter()
 
     class Point:
         def __init__(self, x, y):
@@ -132,10 +132,7 @@ async def test_register_adapter_round_trip(test_db, unique_table_prefix):
 @pytest.mark.asyncio
 async def test_register_converter_declared_type(test_db, unique_table_prefix):
     """register_converter converts column value by declared type."""
-    from rapsqlite import Connection
-
-    if not hasattr(Connection, "register_converter"):
-        pytest.skip("register_converter not supported by this build")
+    skip_if_no_register_converter()
 
     async with connect(test_db) as db:
         # Use DATE (sqlx reports this declared type); converter uppercases to verify it was applied
@@ -155,10 +152,7 @@ async def test_register_converter_declared_type(test_db, unique_table_prefix):
 @pytest.mark.asyncio
 async def test_register_converter_remove(test_db, unique_table_prefix):
     """register_converter(typename, None) removes converter."""
-    from rapsqlite import Connection
-
-    if not hasattr(Connection, "register_converter"):
-        pytest.skip("register_converter not supported by this build")
+    skip_if_no_register_converter()
 
     async with connect(test_db) as db:
         db.register_converter("DATE", lambda b: b.decode("utf-8") if b else None)

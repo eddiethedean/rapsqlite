@@ -22,6 +22,8 @@ from rapsqlite import (
     connect,
 )
 
+pytestmark = [pytest.mark.unit]
+
 
 # ---- Module-level (DB-API from rapsqlite.dbapi) ----
 

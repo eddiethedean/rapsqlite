@@ -21,6 +21,8 @@ from sqlalchemy.sql.expression import false
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy.pool import StaticPool
 
+pytestmark = [pytest.mark.integration]
+
 
 @pytest.fixture(params=["rapsqlite", "aiosqlite"])
 def sqlite_dialect(request: pytest.FixtureRequest) -> str:

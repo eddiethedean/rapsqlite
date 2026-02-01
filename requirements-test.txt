@@ -3,6 +3,7 @@ pytest
 pytest-asyncio
 pytest-xdist
 pytest-timeout
+pytest-cov
 hypothesis
 
 # Optional: for benchmarks and aiosqlite compatibility tests

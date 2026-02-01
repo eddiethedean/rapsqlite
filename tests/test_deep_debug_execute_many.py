@@ -6,6 +6,10 @@ import tempfile
 from conftest import cleanup_db
 from rapsqlite import connect
 
+import pytest
+
+pytestmark = [pytest.mark.unit]
+
 
 async def test_connection_identity():
     """Test that connection pointer remains stable across execute_many iterations."""

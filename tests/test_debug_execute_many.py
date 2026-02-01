@@ -6,6 +6,10 @@ import tempfile
 from conftest import cleanup_db
 from rapsqlite import connect
 
+import pytest
+
+pytestmark = [pytest.mark.unit]
+
 
 async def test_execute_in_loop():
     """Test if execute() works when called multiple times in a transaction."""

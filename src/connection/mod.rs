@@ -2,6 +2,8 @@
 
 #![allow(non_local_definitions)] // False positive from pyo3 macros
 
+mod backup;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
@@ -11,20 +13,16 @@ use sqlx::{Column, Row, SqlitePool};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{
-    sqlite3, sqlite3_aggregate_context, sqlite3_backup_finish, sqlite3_backup_init,
-    sqlite3_backup_pagecount, sqlite3_backup_remaining, sqlite3_backup_step, sqlite3_busy_timeout,
-    sqlite3_context, sqlite3_create_collation_v2, sqlite3_create_function_v2,
-    sqlite3_enable_load_extension, sqlite3_errcode, sqlite3_errmsg, sqlite3_free,
+    sqlite3, sqlite3_aggregate_context, sqlite3_context, sqlite3_create_collation_v2,
+    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free,
     sqlite3_get_autocommit, sqlite3_interrupt, sqlite3_libversion, sqlite3_libversion_number,
     sqlite3_load_extension, sqlite3_progress_handler, sqlite3_result_null, sqlite3_set_authorizer,
-    sqlite3_total_changes, sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_BUSY,
-    SQLITE_DENY, SQLITE_DETERMINISTIC, SQLITE_DONE, SQLITE_LOCKED, SQLITE_OK, SQLITE_TRACE_STMT,
-    SQLITE_UTF8,
+    sqlite3_total_changes, sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_DENY,
+    SQLITE_DETERMINISTIC, SQLITE_OK, SQLITE_TRACE_STMT, SQLITE_UTF8,
 };
 
 use crate::context_managers::next_savepoint_name;
@@ -124,6 +122,39 @@ pub(crate) struct Connection {
 // For proper cleanup including transaction rollback, always:
 // - Use async context managers: `async with rapsqlite.connect(...) as db:`
 // - Or call close() explicitly: `await db.close()`
+
+/// Shared state needed to run a single execute. Used by Connection and ExecuteContextManager
+/// so we clone one struct instead of 25+ individual fields when creating ExecuteContextManager.
+#[derive(Clone)]
+pub(crate) struct ConnectionExecutionState {
+    pub(crate) path: String,
+    pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
+    pub(crate) session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
+    pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
+    pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
+    pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
+    pub(crate) user_functions: UserFunctions,
+    pub(crate) user_aggregates: UserAggregates,
+    pub(crate) user_collations: UserCollations,
+    pub(crate) adapters: Adapters,
+    pub(crate) converters: Converters,
+    pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) progress_handler: ProgressHandler,
+    pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) init_hook_called: Arc<StdMutex<bool>>,
+    pub(crate) last_rowid: Arc<Mutex<i64>>,
+    pub(crate) last_changes: Arc<Mutex<u64>>,
+    pub(crate) timeout: Arc<StdMutex<f64>>,
+    pub(crate) isolation_level: Arc<StdMutex<Option<String>>>,
+    pub(crate) closed: Arc<StdMutex<bool>>,
+    pub(crate) explicit_transaction: Arc<Mutex<bool>>,
+}
 
 /// Returns Ok(()) if the connection is not closed; otherwise returns InterfaceError.
 pub(crate) fn ensure_not_closed(closed: &Arc<StdMutex<bool>>) -> Result<(), PyErr> {
@@ -1492,12 +1523,7 @@ impl Connection {
         // The deprecation warning is acceptable as this is a sync operation within async.
         #[allow(deprecated)]
         Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-            let ctx_mgr = ExecuteContextManager {
-                cursor: cursor.clone_ref(py),
-                query: processed_query,
-                param_values,
-                is_select,
-                returns_result_rows,
+            let state = ConnectionExecutionState {
                 path,
                 pool: Arc::clone(&pool),
                 session_connection: Arc::clone(&session_connection),
@@ -1521,11 +1547,19 @@ impl Connection {
                 init_hook_called: Arc::clone(&init_hook_called),
                 last_rowid: Arc::clone(&last_rowid),
                 last_changes: Arc::clone(&last_changes),
-                connection: connection_self.clone_ref(py),
                 timeout,
                 isolation_level,
                 closed,
                 explicit_transaction: Arc::clone(&explicit_transaction),
+            };
+            let ctx_mgr = ExecuteContextManager {
+                state,
+                cursor: cursor.clone_ref(py),
+                query: processed_query,
+                param_values,
+                is_select,
+                returns_result_rows,
+                connection: connection_self.clone_ref(py),
             };
             Py::new(py, ctx_mgr).map(|c| c.into())
         })
@@ -6721,11 +6755,6 @@ impl Connection {
 
             let future = async move {
                 ensure_not_closed(&closed)?;
-                // Wrapper to make raw pointers Send-safe
-                struct SendPtr<T>(*mut T);
-                unsafe impl<T> Send for SendPtr<T> {}
-                unsafe impl<T> Sync for SendPtr<T> {}
-
                 // Type alias for connection taken from slot (slot reference + connection)
                 type TakenConnection = (
                     Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
@@ -6820,7 +6849,7 @@ impl Connection {
 
                     // Acquire an exclusive target handle.
                     let mut target_pool_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
-                    let target_handle: SendPtr<sqlite3>;
+                    let target_handle: backup::SendPtr<sqlite3>;
                     if target_is_rapsqlite {
                         // These are guaranteed to be Some when target_is_rapsqlite is true,
                         // but use ok_or_else for defensive programming and clear error messages.
@@ -6991,7 +7020,7 @@ impl Connection {
                         let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
                             OperationalError::new_err(format!("Failed to lock target handle: {e}"))
                         })?;
-                        target_handle = SendPtr(handle.as_raw_handle().as_ptr());
+                        target_handle = backup::SendPtr(handle.as_raw_handle().as_ptr());
                     } else {
                         // sqlite3.Connection - use Python helper to extract handle.
                         #[allow(deprecated)]
@@ -7035,7 +7064,7 @@ impl Connection {
                         }
                         // Keep the Python object alive for the whole backup.
                         let _ensure_target_alive = &target_clone;
-                        target_handle = SendPtr(handle_ptr);
+                        target_handle = backup::SendPtr(handle_ptr);
                     }
 
                     // Get source handle pointer (after ensuring exclusive ownership of the connection).
@@ -7045,7 +7074,7 @@ impl Connection {
                         let mut guard = sqlite_conn.lock_handle().await.map_err(|e| {
                             OperationalError::new_err(format!("Failed to lock source handle: {e}"))
                         })?;
-                        SendPtr(guard.as_raw_handle().as_ptr())
+                        backup::SendPtr(guard.as_raw_handle().as_ptr())
                     };
 
                     // Validate handles.
@@ -7083,134 +7112,23 @@ impl Connection {
                         ));
                     }
 
-                    // Set busy timeout on source and target so SQLite retries internally before returning BUSY.
                     let backup_busy_timeout_secs: u64 = connection_timeout_secs
                         .lock()
                         .unwrap()
                         .unwrap_or(5)
                         .clamp(5, 120);
-                    let timeout_ms: std::ffi::c_int = (backup_busy_timeout_secs * 1000) as std::ffi::c_int;
-                    unsafe {
-                        sqlite3_busy_timeout(source_handle.0, timeout_ms);
-                        sqlite3_busy_timeout(target_handle.0, timeout_ms);
-                    }
 
-                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                        OperationalError::new_err(format!("Invalid database name: {e}"))
-                    })?;
-                    let backup_handle: SendPtr<libsqlite3_sys::sqlite3_backup> = SendPtr(unsafe {
-                        sqlite3_backup_init(
-                            target_handle.0,
-                            name_cstr.as_ptr(),
-                            source_handle.0,
-                            name_cstr.as_ptr(),
-                        )
-                    });
-
-                    if backup_handle.0.is_null() {
-                        let error_code = unsafe { sqlite3_errcode(target_handle.0) };
-                        let error_msg = unsafe {
-                            let msg_ptr = sqlite3_errmsg(target_handle.0);
-                            if msg_ptr.is_null() {
-                                "Unknown error (null error message)".to_string()
-                            } else {
-                                cstr_from_c_char_ptr(msg_ptr as *const std::ffi::c_char)
-                                    .to_string_lossy()
-                                    .to_string()
-                            }
-                        };
-                        return Err(OperationalError::new_err(format!(
-                            "Failed to initialize backup: SQLite error code {error_code}, message: '{error_msg}'. \
-                            Source libversion: {source_libversion}. \
-                            Ensure both connections are open and target has no active transactions."
-                        )));
-                    }
-
-                    let backup_start = Instant::now();
-                    loop {
-                        let pages_to_copy = if pages == 0 { -1 } else { pages };
-                        let step_result = unsafe { sqlite3_backup_step(backup_handle.0, pages_to_copy) };
-
-                        match step_result {
-                            SQLITE_OK | SQLITE_BUSY | SQLITE_LOCKED => {
-                                if (step_result == SQLITE_BUSY || step_result == SQLITE_LOCKED)
-                                    && backup_start.elapsed()
-                                        > Duration::from_secs(backup_busy_timeout_secs)
-                                {
-                                    unsafe {
-                                        sqlite3_backup_finish(backup_handle.0);
-                                    }
-                                    return Err(OperationalError::new_err(format!(
-                                        "Backup timed out: database busy or locked after {} seconds",
-                                        backup_busy_timeout_secs
-                                    )));
-                                }
-
-                                if let Some(ref progress_cb) = progress_callback {
-                                    let remaining = unsafe { sqlite3_backup_remaining(backup_handle.0) };
-                                    let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
-                                    let pages_copied = page_count - remaining;
-                                    #[allow(deprecated)]
-                                    Python::with_gil(|py| {
-                                        let callback = progress_cb.bind(py);
-                                        let remaining_py: Py<PyAny> =
-                                            PyInt::new(py, remaining as i64).into_any().unbind();
-                                        let page_count_py: Py<PyAny> =
-                                            PyInt::new(py, page_count as i64).into_any().unbind();
-                                        let pages_copied_py: Py<PyAny> =
-                                            PyInt::new(py, pages_copied as i64).into_any().unbind();
-                                        if let Ok(args) = PyTuple::new(
-                                            py,
-                                            &[remaining_py, page_count_py, pages_copied_py],
-                                        ) {
-                                            let _ = callback.call1(args);
-                                        }
-                                    });
-                                }
-
-                                if step_result == SQLITE_BUSY || step_result == SQLITE_LOCKED {
-                                    tokio::time::sleep(Duration::from_secs_f64(sleep)).await;
-                                }
-                            }
-                            SQLITE_DONE => {
-                                if let Some(ref progress_cb) = progress_callback {
-                                    let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
-                                    #[allow(deprecated)]
-                                    Python::with_gil(|py| {
-                                        let callback = progress_cb.bind(py);
-                                        let remaining_py: Py<PyAny> =
-                                            PyInt::new(py, 0i64).into_any().unbind();
-                                        let page_count_py: Py<PyAny> =
-                                            PyInt::new(py, page_count as i64).into_any().unbind();
-                                        let pages_copied_py: Py<PyAny> =
-                                            PyInt::new(py, page_count as i64).into_any().unbind();
-                                        if let Ok(args) = PyTuple::new(
-                                            py,
-                                            &[remaining_py, page_count_py, pages_copied_py],
-                                        ) {
-                                            let _ = callback.call1(args);
-                                        }
-                                    });
-                                }
-                                break;
-                            }
-                            _ => {
-                                unsafe {
-                                    sqlite3_backup_finish(backup_handle.0);
-                                }
-                                return Err(OperationalError::new_err(format!(
-                                    "Backup failed with SQLite error code: {step_result}"
-                                )));
-                            }
-                        }
-                    }
-
-                    let final_result = unsafe { sqlite3_backup_finish(backup_handle.0) };
-                    if final_result != SQLITE_OK {
-                        return Err(OperationalError::new_err(format!(
-                            "Backup finish failed with SQLite error code: {final_result}"
-                        )));
-                    }
+                    backup::run_backup_loop(
+                        source_handle,
+                        target_handle,
+                        &name,
+                        pages,
+                        sleep,
+                        progress_callback,
+                        backup_busy_timeout_secs,
+                        source_libversion,
+                    )
+                    .await?;
 
                     Ok(())
                 }

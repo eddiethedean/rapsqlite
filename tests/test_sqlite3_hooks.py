@@ -7,6 +7,8 @@ import pytest
 
 from rapsqlite import connect
 
+pytestmark = [pytest.mark.unit]
+
 
 @pytest.mark.asyncio
 async def test_set_authorizer_allow_and_invoked(test_db, unique_table_prefix):

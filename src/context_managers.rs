@@ -18,7 +18,7 @@ pub(crate) fn next_savepoint_name() -> String {
     format!("sp_{}", SAVEPOINT_COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-use crate::connection::ensure_not_closed;
+use crate::connection::{ensure_not_closed, ConnectionExecutionState};
 use crate::conversion::{
     build_description_empty_result, build_description_tuple, row_to_py_with_factory,
 };
@@ -27,10 +27,7 @@ use crate::pool::{
     execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
-use crate::types::{
-    Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
-    UserCollations, UserFunctions,
-};
+use crate::types::{SqliteParam, TransactionState};
 use crate::utils::{is_begin_query, is_commit_or_rollback_query, is_dml_query};
 use crate::{map_sqlx_error, Connection, Cursor, OperationalError};
 
@@ -38,42 +35,14 @@ use crate::{map_sqlx_error, Connection, Cursor, OperationalError};
 /// Allows `async with db.execute(...)` pattern by being both awaitable and an async context manager.
 #[pyclass]
 pub(crate) struct ExecuteContextManager {
+    pub(crate) state: ConnectionExecutionState,
     pub(crate) cursor: Py<Cursor>,
     pub(crate) query: String,
     pub(crate) param_values: Vec<SqliteParam>,
     pub(crate) is_select: bool,
     /// True for INSERT/UPDATE/DELETE ... RETURNING; triggers fetch-and-cache to prevent re-execution
     pub(crate) returns_result_rows: bool,
-    // Connection state needed for execution
-    pub(crate) path: String,
-    pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
-    pub(crate) session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-    pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
-    pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
-    pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
-    pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
-    pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
-    pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-    pub(crate) callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-    pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
-    pub(crate) user_functions: UserFunctions,
-    pub(crate) user_aggregates: UserAggregates,
-    pub(crate) user_collations: UserCollations,
-    #[allow(dead_code)]
-    pub(crate) adapters: Adapters,
-    pub(crate) converters: Converters,
-    pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub(crate) authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub(crate) progress_handler: ProgressHandler,
-    pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub(crate) init_hook_called: Arc<StdMutex<bool>>,
-    pub(crate) last_rowid: Arc<Mutex<i64>>,
-    pub(crate) last_changes: Arc<Mutex<u64>>,
     pub(crate) connection: Py<Connection>,
-    pub(crate) timeout: Arc<StdMutex<f64>>,
-    pub(crate) isolation_level: Arc<StdMutex<Option<String>>>,
-    pub(crate) closed: Arc<StdMutex<bool>>,
-    pub(crate) explicit_transaction: Arc<Mutex<bool>>,
 }
 
 #[pymethods]
@@ -87,35 +56,36 @@ impl ExecuteContextManager {
             let param_values = slf.borrow(py).param_values.clone();
             let is_select = slf.borrow(py).is_select;
             let returns_result_rows = slf.borrow(py).returns_result_rows;
-            let path = slf.borrow(py).path.clone();
-            let pool = Arc::clone(&slf.borrow(py).pool);
-            let session_connection = Arc::clone(&slf.borrow(py).session_connection);
-            let pragmas = Arc::clone(&slf.borrow(py).pragmas);
-            let pool_size = Arc::clone(&slf.borrow(py).pool_size);
-            let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);
-            let idle_timeout_secs = Arc::clone(&slf.borrow(py).idle_timeout_secs);
-            let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
-            let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
-            let callback_connection = Arc::clone(&slf.borrow(py).callback_connection);
-            let load_extension_enabled = Arc::clone(&slf.borrow(py).load_extension_enabled);
-            let user_functions = Arc::clone(&slf.borrow(py).user_functions);
-            let user_aggregates = Arc::clone(&slf.borrow(py).user_aggregates);
-            let user_collations = Arc::clone(&slf.borrow(py).user_collations);
-            let trace_callback = Arc::clone(&slf.borrow(py).trace_callback);
-            let authorizer_callback = Arc::clone(&slf.borrow(py).authorizer_callback);
-            let progress_handler = Arc::clone(&slf.borrow(py).progress_handler);
-            let init_hook = Arc::clone(&slf.borrow(py).init_hook);
-            let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
-            let last_rowid = Arc::clone(&slf.borrow(py).last_rowid);
-            let last_changes = Arc::clone(&slf.borrow(py).last_changes);
+            let state = slf.borrow(py).state.clone();
+            let path = state.path.clone();
+            let pool = Arc::clone(&state.pool);
+            let session_connection = Arc::clone(&state.session_connection);
+            let pragmas = Arc::clone(&state.pragmas);
+            let pool_size = Arc::clone(&state.pool_size);
+            let connection_timeout_secs = Arc::clone(&state.connection_timeout_secs);
+            let idle_timeout_secs = Arc::clone(&state.idle_timeout_secs);
+            let transaction_state = Arc::clone(&state.transaction_state);
+            let transaction_connection = Arc::clone(&state.transaction_connection);
+            let callback_connection = Arc::clone(&state.callback_connection);
+            let load_extension_enabled = Arc::clone(&state.load_extension_enabled);
+            let user_functions = Arc::clone(&state.user_functions);
+            let user_aggregates = Arc::clone(&state.user_aggregates);
+            let user_collations = Arc::clone(&state.user_collations);
+            let trace_callback = Arc::clone(&state.trace_callback);
+            let authorizer_callback = Arc::clone(&state.authorizer_callback);
+            let progress_handler = Arc::clone(&state.progress_handler);
+            let init_hook = Arc::clone(&state.init_hook);
+            let init_hook_called = Arc::clone(&state.init_hook_called);
+            let last_rowid = Arc::clone(&state.last_rowid);
+            let last_changes = Arc::clone(&state.last_changes);
             let connection = slf.borrow(py).connection.clone_ref(py);
             let connection_for_fetch = connection.clone_ref(py);
             let cursor = slf.borrow(py).cursor.clone_ref(py);
-            let timeout = Arc::clone(&slf.borrow(py).timeout);
-            let isolation_level = Arc::clone(&slf.borrow(py).isolation_level);
-            let closed = Arc::clone(&slf.borrow(py).closed);
-            let converters = Arc::clone(&slf.borrow(py).converters);
-            let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
+            let timeout = Arc::clone(&state.timeout);
+            let isolation_level = Arc::clone(&state.isolation_level);
+            let closed = Arc::clone(&state.closed);
+            let converters = Arc::clone(&state.converters);
+            let explicit_transaction = Arc::clone(&state.explicit_transaction);
             // Get cursor's results Arc to mark it as executed for non-SELECT queries
             // Note: Python::with_gil is used here for sync result caching in async context.
             // The deprecation warning is acceptable as this is a sync operation within async.

@@ -12,18 +12,6 @@ import pytest
 from rapsqlite import connect, DatabaseError, OperationalError
 
 
-def _cleanup_db(path: str) -> None:
-    """Helper to clean up database file (used by backup tests for target_path)."""
-    if os.path.exists(path):
-        try:
-            os.unlink(path)
-        except (PermissionError, OSError):
-            if sys.platform == "win32":
-                pass
-            else:
-                raise
-
-
 # ============================================================================
 # create_function robust tests
 # ============================================================================

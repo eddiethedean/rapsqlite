@@ -12,19 +12,10 @@ import tempfile
 import pytest
 import sqlite3
 
+from conftest import cleanup_db
 from rapsqlite import connect, OperationalError, DatabaseError
 
-
-def _cleanup_db(path: str) -> None:
-    """Helper to clean up database file (used for ad-hoc target_db2)."""
-    if os.path.exists(path):
-        try:
-            os.unlink(path)
-        except (PermissionError, OSError):
-            if sys.platform == "win32":
-                pass
-            else:
-                raise
+pytestmark = [pytest.mark.edge_case]
 
 
 # ============================================================================
@@ -59,7 +50,7 @@ async def test_backup_concurrent_sources(test_db_file, target_db_file):
             assert rows1[0][0] == 3
             assert rows2[0][0] == 3
     finally:
-        _cleanup_db(target_db2)
+        cleanup_db(target_db2)
 
 
 @pytest.mark.asyncio

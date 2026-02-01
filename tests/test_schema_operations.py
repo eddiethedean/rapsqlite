@@ -6,6 +6,8 @@ import tempfile
 from conftest import cleanup_db
 from rapsqlite import Connection
 
+pytestmark = [pytest.mark.unit]
+
 
 @pytest.fixture
 def test_db():

@@ -14,19 +14,16 @@ import pytest
 import sys
 from pathlib import Path
 
+from conftest import (
+    skip_if_no_create_aggregate,
+    skip_if_no_create_collation,
+    skip_if_no_create_function_deterministic,
+    skip_if_no_register_adapter,
+    skip_if_no_register_converter,
+)
 from rapsqlite import Connection, connect, Error, InterfaceError, OperationalError
 
-
-def _cleanup_db(path: str) -> None:
-    """Helper to clean up database file (used by backup tests for target_path)."""
-    if os.path.exists(path):
-        try:
-            os.unlink(path)
-        except (PermissionError, OSError):
-            if sys.platform == "win32":
-                pass
-            else:
-                raise
+pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
@@ -371,9 +368,7 @@ async def test_create_function(test_db):
 @pytest.mark.asyncio
 async def test_create_function_deterministic(test_db):
     """Test create_function(..., deterministic=True) (Phase 3.10)."""
-    sig = inspect.signature(Connection.create_function)
-    if "deterministic" not in sig.parameters:
-        pytest.skip("create_function(deterministic=...) not supported by this build")
+    skip_if_no_create_function_deterministic()
     async with connect(test_db) as db:
 
         def double(x):
@@ -399,8 +394,7 @@ async def test_create_function_deterministic(test_db):
 )
 async def test_create_aggregate(test_db):
     """Test create_aggregate (custom SQL aggregate with step/finalize)."""
-    if not hasattr(Connection, "create_aggregate"):
-        pytest.skip("create_aggregate not supported by this build")
+    skip_if_no_create_aggregate()
 
     class SumAggregate:
         def __init__(self):
@@ -429,8 +423,7 @@ async def test_create_aggregate(test_db):
 @pytest.mark.asyncio
 async def test_register_adapter(test_db):
     """Test register_adapter: custom type -> SQLite-compatible value when binding."""
-    if not hasattr(Connection, "register_adapter"):
-        pytest.skip("register_adapter not supported by this build")
+    skip_if_no_register_adapter()
 
     class Point:
         def __init__(self, x: int, y: int):
@@ -454,8 +447,7 @@ async def test_register_adapter(test_db):
 @pytest.mark.asyncio
 async def test_register_converter(test_db):
     """Test register_converter: declared column type -> Python value when reading rows."""
-    if not hasattr(Connection, "register_converter"):
-        pytest.skip("register_converter not supported by this build")
+    skip_if_no_register_converter()
 
     async with connect(test_db) as db:
         db.register_converter("DATE", lambda b: b.decode("utf-8") if b else None)
@@ -479,8 +471,7 @@ async def test_register_converter(test_db):
 )
 async def test_create_collation(test_db):
     """Test create_collation: custom ORDER BY collation."""
-    if not hasattr(Connection, "create_collation"):
-        pytest.skip("create_collation not supported by this build")
+    skip_if_no_create_collation()
 
     def reverse_collation(s1: str, s2: str) -> int:
         if s1 < s2:

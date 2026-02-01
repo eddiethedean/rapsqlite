@@ -17,6 +17,8 @@ from fastapi.testclient import TestClient
 
 from rapsqlite import connect
 
+pytestmark = [pytest.mark.integration]
+
 
 def _make_app(db_path: str) -> FastAPI:
     app = FastAPI()

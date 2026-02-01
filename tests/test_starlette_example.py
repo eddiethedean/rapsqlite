@@ -11,6 +11,8 @@ from starlette.testclient import TestClient
 
 from rapsqlite import connect
 
+pytestmark = [pytest.mark.integration]
+
 
 def _make_app(db_path: str) -> Starlette:
     async def homepage(request):

@@ -4,70 +4,42 @@ These tests verify that rapsqlite can be used as a drop-in replacement for aiosq
 using the pattern: `import rapsqlite as aiosqlite`
 """
 
-import pytest
-import tempfile
-import os
-import sys
 import asyncio
+
+import pytest
 
 # Import rapsqlite as aiosqlite to test drop-in replacement
 import rapsqlite as aiosqlite
 
-
-def cleanup_db(test_db: str) -> None:
-    """Helper to clean up database file."""
-    if os.path.exists(test_db):
-        try:
-            os.unlink(test_db)
-        except (PermissionError, OSError):
-            if sys.platform == "win32":
-                pass
-            else:
-                raise
+pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_basic_connection():
+async def test_basic_connection(test_db):
     """Test basic connection using aiosqlite import pattern."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as conn:
+    async with aiosqlite.connect(test_db) as conn:
             assert isinstance(conn, aiosqlite.Connection)
             await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
             await conn.execute("INSERT INTO test (value) VALUES ('hello')")
             rows = await conn.fetch_all("SELECT * FROM test")
             assert len(rows) == 1
             assert rows[0][1] == "hello"
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_connection_context_manager():
+async def test_connection_context_manager(test_db):
     """Test connection context manager compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as db:
+    async with aiosqlite.connect(test_db) as db:
             await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
             await db.execute("INSERT INTO test DEFAULT VALUES")
             rows = await db.fetch_all("SELECT * FROM test")
             assert len(rows) == 1
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_parameterized_queries():
+async def test_parameterized_queries(test_db):
     """Test parameterized queries with aiosqlite API."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as conn:
+    async with aiosqlite.connect(test_db) as conn:
             await conn.execute(
                 "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)"
             )
@@ -88,18 +60,12 @@ async def test_parameterized_queries():
             assert len(rows) == 2
             assert rows[0][1] == "Alice"
             assert rows[1][1] == "Bob"
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_transactions():
+async def test_transactions(test_db):
     """Test transaction methods compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as conn:
+    async with aiosqlite.connect(test_db) as conn:
             await conn.execute(
                 "CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance INTEGER)"
             )
@@ -120,18 +86,12 @@ async def test_transactions():
 
             rows = await conn.fetch_all("SELECT * FROM accounts")
             assert len(rows) >= 1
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_transaction_context_manager():
+async def test_transaction_context_manager(test_db):
     """Test transaction context manager compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as conn:
+    async with aiosqlite.connect(test_db) as conn:
             await conn.execute(
                 "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
             )
@@ -142,18 +102,12 @@ async def test_transaction_context_manager():
 
             rows = await conn.fetch_all("SELECT * FROM test")
             assert len(rows) == 2
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_cursor_api():
+async def test_cursor_api(test_db):
     """Test cursor API compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as conn:
+    async with aiosqlite.connect(test_db) as conn:
             await conn.execute(
                 "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
             )
@@ -178,18 +132,12 @@ async def test_cursor_api():
             # Test fetchall (should be empty now)
             rows = await cursor.fetchall()
             assert len(rows) == 0
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_fetch_methods():
+async def test_fetch_methods(test_db):
     """Test fetch_all, fetch_one, fetch_optional compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as conn:
+    async with aiosqlite.connect(test_db) as conn:
             await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
             await conn.execute("INSERT INTO test (value) VALUES ('hello')")
             await conn.execute("INSERT INTO test (value) VALUES ('world')")
@@ -213,18 +161,12 @@ async def test_fetch_methods():
                 "SELECT * FROM test WHERE value = 'nonexistent'"
             )
             assert row is None
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_execute_many():
+async def test_execute_many(test_db):
     """Test execute_many compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as conn:
+    async with aiosqlite.connect(test_db) as conn:
             await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
 
             params = [["a"], ["b"], ["c"]]
@@ -235,18 +177,12 @@ async def test_execute_many():
             assert rows[0][1] == "a"
             assert rows[1][1] == "b"
             assert rows[2][1] == "c"
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_exception_types():
+async def test_exception_types(test_db):
     """Test that exception types match aiosqlite."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as conn:
+    async with aiosqlite.connect(test_db) as conn:
             await conn.execute(
                 "CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT UNIQUE)"
             )
@@ -259,18 +195,12 @@ async def test_exception_types():
             # Test ProgrammingError (invalid SQL)
             with pytest.raises((aiosqlite.ProgrammingError, aiosqlite.DatabaseError)):
                 await conn.execute("INVALID SQL STATEMENT")
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_row_factory():
+async def test_row_factory(test_db):
     """Test row_factory compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db) as conn:
+    async with aiosqlite.connect(test_db) as conn:
             await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
             await conn.execute("INSERT INTO test (value) VALUES ('hello')")
 
@@ -291,18 +221,12 @@ async def test_row_factory():
             rows = await conn.fetch_all("SELECT * FROM test")
             assert isinstance(rows[0], list)
             assert rows[0][1] == "hello"
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_pragma_settings():
+async def test_pragma_settings(test_db):
     """Test PRAGMA settings compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        async with aiosqlite.connect(test_db, pragmas={"journal_mode": "WAL"}) as conn:
+    async with aiosqlite.connect(test_db, pragmas={"journal_mode": "WAL"}) as conn:
             rows = await conn.fetch_all("PRAGMA journal_mode")
             assert rows[0][0].upper() == "WAL"
 
@@ -310,73 +234,53 @@ async def test_pragma_settings():
             await conn.set_pragma("synchronous", "NORMAL")
             rows = await conn.fetch_all("PRAGMA synchronous")
             assert rows[0][0] == 1  # NORMAL = 1
-    finally:
-        cleanup_db(test_db)
 
 
 @pytest.mark.asyncio
-async def test_concurrent_operations():
+async def test_concurrent_operations(test_db):
     """Test concurrent operations compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
+    async with aiosqlite.connect(test_db) as conn:
+        await conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+        )
 
-    try:
-        async with aiosqlite.connect(test_db) as conn:
-            await conn.execute(
-                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
-            )
+    async def insert_value(i: int):
+        async with aiosqlite.connect(test_db) as conn:  # type: ignore[attr-defined]
+            await conn.execute("INSERT INTO test (value) VALUES (?)", [i])
 
-        async def insert_value(i: int):
-            async with aiosqlite.connect(test_db) as conn:  # type: ignore[attr-defined]
-                await conn.execute("INSERT INTO test (value) VALUES (?)", [i])
+    # Insert values concurrently
+    await asyncio.gather(*[insert_value(i) for i in range(10)])
 
-        # Insert values concurrently
-        await asyncio.gather(*[insert_value(i) for i in range(10)])
-
-        # Verify all inserts
-        async with aiosqlite.connect(test_db) as conn:
-            rows = await conn.fetch_all("SELECT * FROM test ORDER BY id")
-            assert len(rows) == 10
-    finally:
-        cleanup_db(test_db)
+    # Verify all inserts
+    async with aiosqlite.connect(test_db) as conn:
+        rows = await conn.fetch_all("SELECT * FROM test ORDER BY id")
+        assert len(rows) == 10
 
 
 @pytest.mark.asyncio
-async def test_last_insert_rowid():
+async def test_last_insert_rowid(test_db):
     """Test last_insert_rowid compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
+    async with aiosqlite.connect(test_db) as conn:
+        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
+        await conn.execute("INSERT INTO test (value) VALUES ('hello')")
 
-    try:
-        async with aiosqlite.connect(test_db) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
-            await conn.execute("INSERT INTO test (value) VALUES ('hello')")
-
-            rowid = await conn.last_insert_rowid()
-            assert rowid == 1
-    finally:
-        cleanup_db(test_db)
+        rowid = await conn.last_insert_rowid()
+        assert rowid == 1
 
 
 @pytest.mark.asyncio
-async def test_changes():
+async def test_changes(test_db):
     """Test changes() method compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
+    async with aiosqlite.connect(test_db) as conn:
+        await conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
+        )
+        await conn.execute("INSERT INTO test (value) VALUES (1)")
+        await conn.execute("INSERT INTO test (value) VALUES (2)")
 
-    try:
-        async with aiosqlite.connect(test_db) as conn:
-            await conn.execute(
-                "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)"
-            )
-            await conn.execute("INSERT INTO test (value) VALUES (1)")
-            await conn.execute("INSERT INTO test (value) VALUES (2)")
-
-            await conn.execute("UPDATE test SET value = 99 WHERE id = 1")
-            changes = await conn.changes()
-            assert changes == 1
-    finally:
-        cleanup_db(test_db)
+        await conn.execute("UPDATE test SET value = 99 WHERE id = 1")
+        changes = await conn.changes()
+        assert changes == 1
 
 
 @pytest.mark.asyncio
@@ -392,18 +296,12 @@ async def test_in_memory_database():
 
 
 @pytest.mark.asyncio
-async def test_connection_string_uri():
+async def test_connection_string_uri(test_db):
     """Test connection string URI format compatibility."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        test_db = f.name
-
-    try:
-        # Test URI format
-        uri = f"file:{test_db}"
-        async with aiosqlite.connect(uri) as conn:
-            await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            await conn.execute("INSERT INTO test DEFAULT VALUES")
-            rows = await conn.fetch_all("SELECT * FROM test")
-            assert len(rows) == 1
-    finally:
-        cleanup_db(test_db)
+    # Test URI format
+    uri = f"file:{test_db}"
+    async with aiosqlite.connect(uri) as conn:
+        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
+        await conn.execute("INSERT INTO test DEFAULT VALUES")
+        rows = await conn.fetch_all("SELECT * FROM test")
+        assert len(rows) == 1

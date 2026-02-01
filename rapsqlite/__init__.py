@@ -52,12 +52,22 @@ Example:
 import asyncio
 import os
 import re
-import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypedDict, cast
 
 import builtins as _builtins
+
+from rapsqlite._compat import apply_compat
+from rapsqlite._connection_state import apply_state
+
+
+class PoolMetricsGauges(TypedDict):
+    """Return type for pool_metrics_gauges(); gauge names for Prometheus/custom metrics."""
+
+    rapsqlite_pool_size: int
+    rapsqlite_pool_num_idle: int
+    rapsqlite_pool_in_use: int
 
 try:
     # Preferred: import extension from the local module name used when installed.
@@ -72,134 +82,7 @@ except ImportError:  # pragma: no cover - fallback for editable installs/alt lay
 
 # Re-export symbols from the extension module.
 Connection = _ext.Connection
-
-
-def _connection_del(self: "Connection") -> None:  # type: ignore[valid-type]
-    """Best-effort: schedule close() on the running event loop to avoid Tokio panic during GC.
-
-    If a Connection is dropped without close(), Python GC can drop the Rust object;
-    sqlx's PoolConnection::Drop then calls Tokio spawn, which panics when no runtime
-    is current. Scheduling close() here (when a loop exists) runs cleanup under Tokio.
-    This is best-effort only; always use async with or await conn.close().
-    """
-    # Clean up connection state first to prevent memory leak
-    _cleanup_conn_state(self)
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    try:
-        # Schedule close on the event loop; use ensure_future which works from sync context
-        # when there's a running loop (unlike create_task which requires async context)
-        loop.call_soon(lambda: asyncio.ensure_future(self.close()))  # type: ignore[attr-defined]
-    except Exception:
-        pass
-
-
-Connection.__del__ = _connection_del  # type: ignore[assignment]
-
-
-# aiosqlite compat: stop() is a no-op; use close() to close (ensure it exists on older builds)
-if not hasattr(Connection, "stop"):
-
-    def _stop_noop(self: "Connection") -> None:  # type: ignore[valid-type]
-        """No-op for aiosqlite compatibility; use close() to close the connection."""
-
-    Connection.stop = _stop_noop  # type: ignore[assignment]
-
-
-# set_progress_handler: accept (callback, n) as well as (n, callback) for sqlite3/aiosqlite compat
-_orig_set_progress_handler = Connection.set_progress_handler  # type: ignore[attr-defined]
-
-
-async def _set_progress_handler_wrapper(
-    self: "Connection",  # type: ignore[valid-type]
-    a: Any,
-    b: Any = None,
-) -> Any:  # type: ignore[name-defined]
-    if b is not None and callable(a) and isinstance(b, int):
-        n, callback = b, a
-    else:
-        n, callback = a, b
-    return await _orig_set_progress_handler(self, n, callback)
-
-
-Connection.set_progress_handler = _set_progress_handler_wrapper  # type: ignore[assignment]
 Cursor = _ext.Cursor
-
-# aiosqlite compat: await cursor.execute() must return self (same cursor object)
-_orig_cursor_execute = Cursor.execute  # type: ignore[attr-defined]
-
-
-async def _cursor_execute_return_self(
-    self: "Cursor",  # type: ignore[valid-type]
-    query: str,
-    parameters: Any = None,
-) -> "Cursor":  # type: ignore[valid-type]
-    await _orig_cursor_execute(self, query, parameters)
-    return self  # type: ignore[return-value]
-
-
-Cursor.execute = _cursor_execute_return_self  # type: ignore[assignment]
-
-# aiosqlite compat: cursor.executemany() and cursor.executescript() must return self
-_orig_cursor_executemany = Cursor.executemany  # type: ignore[attr-defined]
-_orig_cursor_executescript = Cursor.executescript  # type: ignore[attr-defined]
-
-
-async def _cursor_executemany_return_self(
-    self: "Cursor",  # type: ignore[valid-type]
-    query: str,
-    parameters: Any,
-) -> "Cursor":  # type: ignore[valid-type]
-    await _orig_cursor_executemany(self, query, parameters)  # type: ignore[misc]
-    return self  # type: ignore[return-value]
-
-
-async def _cursor_executescript_return_self(
-    self: "Cursor",  # type: ignore[valid-type]
-    script: str,
-) -> "Cursor":  # type: ignore[valid-type]
-    await _orig_cursor_executescript(self, script)  # type: ignore[misc]
-    return self  # type: ignore[return-value]
-
-
-Cursor.executemany = _cursor_executemany_return_self  # type: ignore[assignment]
-Cursor.executescript = _cursor_executescript_return_self  # type: ignore[assignment]
-
-# Ensure Cursor has close (DBAPI raw cursor contract; fallback if extension built without it)
-# DBAPI compat: commit/rollback no-op when not in a transaction (wrap so old extension doesn't raise)
-_orig_commit = Connection.commit  # type: ignore[attr-defined]
-_orig_rollback = Connection.rollback  # type: ignore[attr-defined]
-
-
-async def _commit_noop_on_no_tx(self: "Connection") -> None:  # type: ignore[valid-type]
-    try:
-        await _orig_commit(self)  # type: ignore[misc]
-    except OperationalError as e:
-        msg = str(e).lower()
-        if "transaction" in msg and (
-            "not available" in msg or "in progress" in msg or "no transaction" in msg
-        ):
-            return
-        raise
-
-
-async def _rollback_noop_on_no_tx(self: "Connection") -> None:  # type: ignore[valid-type]
-    try:
-        await _orig_rollback(self)  # type: ignore[misc]
-    except OperationalError as e:
-        msg = str(e).lower()
-        if "transaction" in msg and (
-            "not available" in msg or "in progress" in msg or "no transaction" in msg
-        ):
-            return
-        raise
-
-
-Connection.commit = _commit_noop_on_no_tx  # type: ignore[assignment]
-Connection.rollback = _rollback_noop_on_no_tx  # type: ignore[assignment]
 
 Error = _ext.Error
 Warning = _ext.Warning
@@ -257,6 +140,23 @@ except AttributeError:
         f"Available attributes: {[x for x in dir(_ext) if not x.startswith('_')]}"
     ) from None
 
+# Apply aiosqlite compat patches, then connection state cache (order matters).
+apply_compat(Connection, Cursor, operational_error=OperationalError)
+apply_state(Connection)
+
+# Connection.execute_iter (streaming helper) - uses Connection.fetch_all
+def _connection_execute_iter(
+    self: Connection,
+    sql: str,
+    parameters: Any | None = None,
+    chunk_size: int | None = None,
+) -> "_StreamChunksIterator":
+    """Return an async iterator that yields rows in chunks (streaming / memory-efficient)."""
+    return _StreamChunksIterator(self, sql, parameters, chunk_size)
+
+
+Connection.execute_iter = _connection_execute_iter  # type: ignore[attr-defined,assignment]
+
 __version__: str = "0.3.0-dev"
 __all__: list[str] = [
     "Connection",
@@ -288,7 +188,7 @@ __all__: list[str] = [
 
 
 def connect(
-    path: str,
+    path: str | os.PathLike[str],
     *,
     pragmas: Any = None,
     timeout: float = 5.0,
@@ -297,7 +197,7 @@ def connect(
     loop: Any = None,
     aiosqlite_compat: bool = False,
     **kwargs: Any,
-) -> "Connection":  # type: ignore[valid-type]
+) -> Connection:
     """Connect to a SQLite database.
 
     This function matches the aiosqlite.connect() API for compatibility,
@@ -406,13 +306,13 @@ def connect(
         else:
             raise
     if idle_timeout is not None:
-        conn.idle_timeout = idle_timeout  # type: ignore[attr-defined]
+        conn.idle_timeout = idle_timeout
     if aiosqlite_compat:
-        conn.row_factory = "tuple"  # type: ignore[assignment]
-    return conn  # type: ignore[no-any-return]
+        conn.row_factory = "tuple"
+    return cast(Connection, conn)
 
 
-async def pool_metrics_gauges(conn: "Connection") -> dict:  # type: ignore[valid-type]
+async def pool_metrics_gauges(conn: Connection) -> PoolMetricsGauges:
     """Return pool metrics as a dict of gauge names to values for Prometheus or custom metrics.
 
     Calls ``conn.pool_metrics()`` and maps the result to gauge-style keys:
@@ -427,7 +327,7 @@ async def pool_metrics_gauges(conn: "Connection") -> dict:  # type: ignore[valid
                 # Expose as Prometheus gauge, or log, etc.
                 pass
     """
-    m = await conn.pool_metrics()  # type: ignore[attr-defined]
+    m = await conn.pool_metrics()
     return {
         "rapsqlite_pool_size": m.get("size", 0),
         "rapsqlite_pool_num_idle": m.get("num_idle", 0),
@@ -436,27 +336,27 @@ async def pool_metrics_gauges(conn: "Connection") -> dict:  # type: ignore[valid
 
 
 async def timed_fetch_all(
-    conn: "Connection",  # type: ignore[valid-type]
+    conn: Connection,
     sql: str,
     parameters: Any | None = None,
     on_timing: Callable[[float, str], None] | None = None,
-) -> list[Any] | tuple[list[Any], float]:
+) -> list[list[Any]] | tuple[list[list[Any]], float]:
     """Run fetch_all and record duration; optionally call on_timing(duration_secs, sql).
 
     If on_timing is None, returns (rows, duration_secs). If on_timing is provided,
     calls on_timing(duration_secs, sql) and returns rows only.
     """
     t0 = time.perf_counter()
-    rows = await conn.fetch_all(sql, parameters)  # type: ignore[attr-defined]
+    rows = await conn.fetch_all(sql, parameters)
     duration = time.perf_counter() - t0
     if on_timing is not None:
         on_timing(duration, sql)
-        return rows  # type: ignore[return-value,no-any-return]
-    return (rows, duration)  # type: ignore[return-value]
+        return rows
+    return (rows, duration)
 
 
 async def transaction_retry(
-    conn: "Connection",  # type: ignore[valid-type]
+    conn: Connection,
     work: Any,
     max_retries: int = 5,
     initial_delay: float = 0.01,
@@ -476,14 +376,14 @@ async def transaction_retry(
     delay = initial_delay
     for attempt in range(max_retries):
         try:
-            await conn.begin()  # type: ignore[attr-defined]
+            await conn.begin()
             try:
                 coro = work() if callable(work) else work
                 result = await coro
-                await conn.commit()  # type: ignore[attr-defined]
+                await conn.commit()
                 return result
             except Exception as e:
-                await conn.rollback()  # type: ignore[attr-defined]
+                await conn.rollback()
                 last_err = e
                 msg = str(e).lower()
                 if "busy" in msg or "locked" in msg:
@@ -502,7 +402,7 @@ async def transaction_retry(
 
 
 async def transaction_with_timeout(
-    conn: "Connection",  # type: ignore[valid-type]
+    conn: Connection,
     work: Any,
     timeout_secs: float = 30.0,
 ) -> Any:
@@ -524,7 +424,7 @@ async def transaction_with_timeout(
     """
 
     async def _run() -> Any:
-        async with conn.transaction():  # type: ignore[attr-defined]
+        async with conn.transaction():
             coro = work() if callable(work) else work
             return await coro
 
@@ -532,11 +432,11 @@ async def transaction_with_timeout(
 
 
 def execute_iter(
-    conn: "Connection",  # type: ignore[valid-type]
+    conn: Connection,
     sql: str,
     parameters: Any | None = None,
     chunk_size: int | None = None,
-):
+) -> "_StreamChunksIterator":
     """Return an async iterator that yields rows in chunks (streaming / memory-efficient).
 
     Uses LIMIT/OFFSET under the hood so memory stays bounded by chunk_size.
@@ -553,12 +453,12 @@ def execute_iter(
 
 
 async def paginate(
-    conn: "Connection",  # type: ignore[valid-type]
+    conn: Connection,
     sql: str,
     parameters: Any | None = None,
     page_size: int = 64,
     offset: int = 0,
-) -> list[Any]:
+) -> list[list[Any]]:
     """Fetch one page of rows from a SELECT query.
 
     Uses LIMIT/OFFSET under the hood. For multiple pages, call with
@@ -578,12 +478,12 @@ async def paginate(
     sql_clean = sql.strip().rstrip(";")
     wrapped = f"SELECT * FROM ({sql_clean}) LIMIT ? OFFSET ?"
     params = list(parameters) if parameters is not None else []
-    rows = await conn.fetch_all(wrapped, params + [page_size, offset])  # type: ignore[attr-defined]
-    return rows  # type: ignore[return-value,no-any-return]
+    rows = await conn.fetch_all(wrapped, params + [page_size, offset])
+    return rows
 
 
 async def analyze_query_plan(
-    conn: "Connection",  # type: ignore[valid-type]
+    conn: Connection,
     sql: str,
     parameters: Any | None = None,
 ) -> dict[str, Any]:
@@ -600,7 +500,7 @@ async def analyze_query_plan(
         if analysis["table_scan"] and not analysis["uses_index"]:
             print("Consider adding an index")
     """
-    rows = await conn.explain_query_plan(sql, parameters)  # type: ignore[attr-defined]
+    rows = await conn.explain_query_plan(sql, parameters)
     details: list[str] = []
     for row in rows:
         if isinstance(row, (list, tuple)) and len(row) >= 4:
@@ -619,7 +519,7 @@ async def analyze_query_plan(
 
 
 async def suggest_indexes(
-    conn: "Connection",  # type: ignore[valid-type]
+    conn: Connection,
     sql: str,
     parameters: Any | None = None,
 ) -> list[dict[str, Any]]:
@@ -746,7 +646,7 @@ class _StreamChunksIterator:
 
     def __init__(
         self,
-        conn: "Connection",  # type: ignore[valid-type]
+        conn: Connection,
         sql: str,
         parameters: Any | None = None,
         chunk_size: int | None = None,
@@ -765,467 +665,22 @@ class _StreamChunksIterator:
     def __aiter__(self) -> "_StreamChunksIterator":
         return self
 
-    async def __anext__(self) -> list[Any]:
+    async def __anext__(self) -> list[list[Any]]:
         # Wrap query so we can paginate: SELECT * FROM (user_query) LIMIT ? OFFSET ?
         wrapped = f"SELECT * FROM ({self._sql}) LIMIT ? OFFSET ?"
         params = self._params + [self._chunk_size, self._offset]
-        rows = await self._conn.fetch_all(wrapped, params)  # type: ignore[attr-defined]
+        rows = await self._conn.fetch_all(wrapped, params)
         if not rows:
             raise StopAsyncIteration
         self._offset += len(rows)
-        return rows  # type: ignore[no-any-return]
+        return rows
 
 
 def _connection_execute_iter(
-    self: "Connection",  # type: ignore[valid-type]
+    self: Connection,
     sql: str,
     parameters: Any | None = None,
     chunk_size: int | None = None,
 ) -> _StreamChunksIterator:
     """Return an async iterator that yields rows in chunks (streaming / memory-efficient)."""
     return _StreamChunksIterator(self, sql, parameters, chunk_size)
-
-
-Connection.execute_iter = _connection_execute_iter  # type: ignore[attr-defined,assignment]
-
-
-# -----------------------------------------------------------------------------
-# aiosqlite-compat helpers: iterdump and backup
-# -----------------------------------------------------------------------------
-
-# Save raw methods so we can wrap them while preserving original behaviour.
-_raw_iterdump = Connection.iterdump
-_raw_backup = Connection.backup
-
-
-class _IterdumpWrapper:
-    """Dual-mode wrapper for iterdump: async-iter and await-to-list.
-
-    This wrapper allows iterdump() to support both async iteration and
-    direct await patterns for backwards compatibility.
-
-    Example:
-        Async iteration (aiosqlite-compatible)::
-
-            async for line in conn.iterdump():
-                print(line)
-
-        Direct await (rapsqlite enhancement)::
-
-            lines = await conn.iterdump()
-            for line in lines:
-                print(line)
-    """
-
-    def __init__(self, conn: "Connection") -> None:  # type: ignore[valid-type]
-        self._conn = conn
-        self._lines: list[str] | None = None
-        self._index: int = 0
-
-    def __aiter__(self) -> "_IterdumpWrapper":
-        return self
-
-    async def __anext__(self) -> str:
-        # Lazily fetch all lines once using the underlying raw iterdump.
-        if self._lines is None:
-            self._lines = await _raw_iterdump(self._conn)  # type: ignore[arg-type]
-            self._index = 0
-
-        if self._index >= len(self._lines):
-            raise StopAsyncIteration
-
-        line = self._lines[self._index]
-        self._index += 1
-        return line
-
-    def __await__(self):
-        async def _inner() -> list[str]:
-            # Preserve existing semantics: await conn.iterdump() -> list[str]
-            result = await _raw_iterdump(self._conn)  # type: ignore[arg-type]
-            return result  # type: ignore[no-any-return]
-
-        return _inner().__await__()
-
-
-def _iterdump(self: "Connection") -> _IterdumpWrapper:  # type: ignore[valid-type]
-    """Return a dual-mode iterdump wrapper.
-
-    - async for line in conn.iterdump():  # async iterator
-    - lines = await conn.iterdump()       # list[str], backwards compatible
-    """
-    return _IterdumpWrapper(self)
-
-
-Connection._iterdump_raw = _raw_iterdump  # type: ignore[attr-defined]
-Connection.iterdump = _iterdump  # type: ignore[assignment]
-
-
-async def _execute_fetchall(
-    self: "Connection",  # type: ignore[valid-type]
-    sql: str,
-    parameters: Any | None = None,
-) -> list[Any]:
-    """Execute a SELECT and return all rows (aiosqlite-compatible helper)."""
-    return await self.fetch_all(sql, parameters)  # type: ignore[attr-defined,no-any-return]
-
-
-Connection.execute_fetchall = _execute_fetchall  # type: ignore[attr-defined]
-
-
-async def _explain_query_plan(
-    self: "Connection",  # type: ignore[valid-type]
-    sql: str,
-    parameters: Any | None = None,
-) -> list[Any]:
-    """Run EXPLAIN QUERY PLAN for the given SQL and return result rows (Phase 3.1)."""
-    prepended = f"EXPLAIN QUERY PLAN {sql}"
-    return await self.fetch_all(prepended, parameters)  # type: ignore[attr-defined,no-any-return]
-
-
-Connection.explain_query_plan = _explain_query_plan  # type: ignore[attr-defined]
-
-
-async def _pool_health(self: "Connection") -> bool:  # type: ignore[valid-type]
-    """Run a minimal health check (SELECT 1) and return True (Phase 3.2). Raises on failure."""
-    await self.fetch_all("SELECT 1")  # type: ignore[attr-defined]
-    return True
-
-
-Connection.pool_health = _pool_health  # type: ignore[attr-defined]
-
-# aiosqlite uses executemany; we expose execute_many. Alias for compat.
-Connection.executemany = Connection.execute_many  # type: ignore[attr-defined,assignment]
-
-
-# Slow query threshold (Phase 3.5) - use module-level dict since Connection may not allow arbitrary attrs
-# Only wrap fetch_all; execute returns ExecuteContextManager (sync) for "async with conn.execute()"
-_slow_query_state: dict[int, tuple[float, Callable[[float, str], None] | None]] = {}
-_orig_connection_fetch_all = Connection.fetch_all  # type: ignore[attr-defined]
-
-
-def set_slow_query_threshold(
-    self: "Connection",  # type: ignore[valid-type]
-    threshold_secs: float,
-    callback: Callable[[float, str], None] | None = None,
-) -> None:
-    """Set threshold and optional callback for slow query detection (Phase 3.5).
-
-    When threshold_secs > 0, fetch_all() is wrapped to measure duration. If
-    duration >= threshold_secs, callback(duration_secs, sql) is called. Set
-    threshold_secs to 0 or negative to disable.
-
-    Args:
-        self: Connection instance (bound when used as conn.set_slow_query_threshold).
-        threshold_secs: Minimum duration in seconds to trigger the callback.
-        callback: Optional callable(duration_secs, sql) invoked when fetch_all
-            exceeds threshold_secs. If None, only the threshold is stored (e.g.
-            for use with timed_fetch_all or custom logging).
-    """
-    cid = id(self)
-    if threshold_secs <= 0:
-        _slow_query_state.pop(cid, None)
-    else:
-        _slow_query_state[cid] = (threshold_secs, callback)
-
-
-Connection.set_slow_query_threshold = set_slow_query_threshold  # type: ignore[attr-defined,assignment]
-
-
-async def _fetch_all_with_slow_check(
-    self: "Connection",  # type: ignore[valid-type]
-    query: str,
-    parameters: Any = None,
-) -> Any:
-    state = _slow_query_state.get(id(self), (0, None))
-    threshold, cb = state[0], state[1]
-    if threshold <= 0:
-        return await _orig_connection_fetch_all(self, query, parameters)  # type: ignore[misc]
-    t0 = time.perf_counter()
-    try:
-        return await _orig_connection_fetch_all(self, query, parameters)  # type: ignore[misc]
-    finally:
-        duration = time.perf_counter() - t0
-        if duration >= threshold and cb:
-            cb(duration, query)
-
-
-Connection.fetch_all = _fetch_all_with_slow_check  # type: ignore[assignment]
-
-
-def _connection_await(self: "Connection"):  # type: ignore[valid-type]
-    """Support `await conn` (aiosqlite-compatible). Enters connection and returns self."""
-
-    async def _inner() -> "Connection":  # type: ignore[valid-type]
-        await self.__aenter__()  # type: ignore[attr-defined]
-        return self  # type: ignore[return-value]
-
-    return _inner().__await__()
-
-
-Connection.__await__ = _connection_await  # type: ignore[attr-defined]
-
-# aiosqlite compat: total_changes and in_transaction as sync PROPERTIES
-# aiosqlite (and sqlite3) expose these as sync properties; rapsqlite's Rust extension
-# exposes them as async methods. We cache values and expose as sync properties.
-# The cache is updated after operations that may change these values.
-
-_connection_state: dict[int, dict[str, Any]] = {}
-_connection_state_lock = threading.Lock()
-
-
-def _get_conn_state(conn: "Connection") -> dict[str, Any]:  # type: ignore[valid-type]
-    """Get or create state dict for a connection (thread-safe)."""
-    cid = id(conn)
-    with _connection_state_lock:
-        if cid not in _connection_state:
-            _connection_state[cid] = {"total_changes": 0, "in_transaction": False}
-        return _connection_state[cid]
-
-
-def _cleanup_conn_state(conn: "Connection") -> None:  # type: ignore[valid-type]
-    """Remove state for a connection (thread-safe, call on close)."""
-    with _connection_state_lock:
-        _connection_state.pop(id(conn), None)
-
-
-@property  # type: ignore[misc]
-def _total_changes_prop(self: "Connection") -> int:  # type: ignore[valid-type]
-    """Get total database changes since connection was opened (sync property for aiosqlite compat)."""
-    return _get_conn_state(self).get("total_changes", 0)  # type: ignore[no-any-return]
-
-
-@property  # type: ignore[misc]
-def _in_transaction_prop(self: "Connection") -> bool:  # type: ignore[valid-type]
-    """Check if connection is in a transaction (sync property for aiosqlite compat)."""
-    return _get_conn_state(self).get("in_transaction", False)  # type: ignore[no-any-return]
-
-
-# Keep the original async methods available
-_orig_total_changes = Connection.total_changes  # type: ignore[attr-defined]
-_orig_in_transaction = Connection.in_transaction  # type: ignore[attr-defined]
-
-
-async def _update_connection_state(conn: "Connection") -> None:  # type: ignore[valid-type]
-    """Update cached total_changes and in_transaction from the database."""
-    state = _get_conn_state(conn)
-    try:
-        state["total_changes"] = await _orig_total_changes(conn)
-    except Exception:
-        pass
-    try:
-        state["in_transaction"] = await _orig_in_transaction(conn)
-    except Exception:
-        pass
-
-
-# Replace total_changes and in_transaction with sync properties
-Connection.total_changes = _total_changes_prop  # type: ignore[assignment,method-assign]
-Connection.in_transaction = _in_transaction_prop  # type: ignore[assignment,method-assign]
-
-# Also expose async methods under different names for those who need them
-Connection.total_changes_async = _orig_total_changes  # type: ignore[attr-defined]
-Connection.in_transaction_async = _orig_in_transaction  # type: ignore[attr-defined]
-
-# Wrap execute to update state after operations
-_orig_execute = Connection.execute  # type: ignore[attr-defined]
-
-
-# Don't wrap execute with state updates - it causes issues with the timed test decorator
-# State updates happen in begin/commit/rollback which is sufficient
-
-# Wrap begin/commit/rollback to update in_transaction state
-_orig_begin = Connection.begin  # type: ignore[attr-defined]
-
-
-async def _begin_with_state_update(self: "Connection") -> None:  # type: ignore[valid-type]
-    await _orig_begin(self)
-    _get_conn_state(self)["in_transaction"] = True
-
-
-Connection.begin = _begin_with_state_update  # type: ignore[assignment,method-assign]
-
-# Update commit wrapper to also update state
-_orig_commit_base = _orig_commit  # Already saved above
-
-
-async def _commit_with_state_update(self: "Connection") -> None:  # type: ignore[valid-type]
-    await _commit_noop_on_no_tx(self)
-    state = _get_conn_state(self)
-    state["in_transaction"] = False
-    # Update total_changes after commit
-    try:
-        state["total_changes"] = await _orig_total_changes(self)
-    except Exception:
-        pass
-
-
-Connection.commit = _commit_with_state_update  # type: ignore[assignment,method-assign]
-
-# Update rollback wrapper to also update state
-_orig_rollback_base = _orig_rollback  # Already saved above
-
-
-async def _rollback_with_state_update(self: "Connection") -> None:  # type: ignore[valid-type]
-    await _rollback_noop_on_no_tx(self)
-    _get_conn_state(self)["in_transaction"] = False
-
-
-Connection.rollback = _rollback_with_state_update  # type: ignore[assignment,method-assign]
-
-# Wrap __aenter__ to initialize state
-_orig_aenter = Connection.__aenter__  # type: ignore[attr-defined]
-
-
-async def _aenter_with_state_init(self: "Connection") -> "Connection":  # type: ignore[valid-type]
-    result = await _orig_aenter(self)
-    # Initialize state on connection enter
-    _get_conn_state(self)
-    return result  # type: ignore[return-value,no-any-return]
-
-
-Connection.__aenter__ = _aenter_with_state_init  # type: ignore[assignment,method-assign]
-
-# Wrap close to cleanup state
-_orig_close = Connection.close  # type: ignore[attr-defined]
-
-
-async def _close_with_state_cleanup(self: "Connection") -> None:  # type: ignore[valid-type]
-    _cleanup_conn_state(self)
-    await _orig_close(self)
-
-
-Connection.close = _close_with_state_cleanup  # type: ignore[assignment,method-assign]
-
-# Wrap transaction() to update in_transaction state
-_orig_transaction = Connection.transaction  # type: ignore[attr-defined]
-
-
-class _TransactionContextManagerWithState:
-    """Wrapper around TransactionContextManager that updates in_transaction state."""
-
-    def __init__(self, conn: "Connection", orig_cm: Any) -> None:  # type: ignore[valid-type]
-        self._conn = conn
-        self._orig_cm = orig_cm
-
-    async def __aenter__(self) -> "Connection":  # type: ignore[valid-type]
-        result = await self._orig_cm.__aenter__()
-        _get_conn_state(self._conn)["in_transaction"] = True
-        return result  # type: ignore[return-value,no-any-return]
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        await self._orig_cm.__aexit__(exc_type, exc_val, exc_tb)
-        _get_conn_state(self._conn)["in_transaction"] = False
-
-
-def _transaction_with_state(self: "Connection") -> _TransactionContextManagerWithState:  # type: ignore[valid-type]
-    """Return a transaction context manager that updates in_transaction state."""
-    orig_cm = _orig_transaction(self)
-    return _TransactionContextManagerWithState(self, orig_cm)
-
-
-Connection.transaction = _transaction_with_state  # type: ignore[assignment,method-assign]
-
-
-async def _backup(
-    self: "Connection",  # type: ignore[valid-type]
-    target: Any,
-    *,
-    pages: int = 0,
-    progress: Any = None,
-    name: str = "main",
-    sleep: float = 0.25,
-) -> None:
-    """Backup supporting both rapsqlite.Connection and sqlite3.Connection targets.
-
-    This wrapper provides safe backup functionality for both rapsqlite and
-    sqlite3 connection targets. For rapsqlite targets, it delegates to the
-    original Rust implementation. For sqlite3.Connection targets, it uses
-    Python's sqlite3 backup API on the on-disk database file, avoiding unsafe
-    handle sharing between different SQLite library instances.
-
-    Args:
-        self: The source connection to backup from.
-        target: Target connection. Can be a rapsqlite.Connection or
-            sqlite3.Connection. For sqlite3 targets, only file-backed databases
-            are supported (not :memory: or non-file URIs).
-        pages: Number of pages to copy per step. If 0, copy all pages in one step.
-            For large databases, use a positive value to allow progress callbacks.
-        progress: Optional progress callback function. Called with
-            (remaining, page_count, pages_copied) after each step.
-        name: Database name to backup (default: "main").
-        sleep: Sleep duration in seconds between backup steps when pages > 0.
-
-    Raises:
-        OperationalError: If backup fails, target has active transaction,
-            or target is not a supported type.
-
-    Note:
-        For sqlite3.Connection targets, the source database must be file-backed.
-        The backup operation performs a WAL checkpoint before backing up to
-        ensure committed state is visible.
-    """
-    import sqlite3  # Local import to avoid mandatory dependency at import time.
-
-    # sqlite3.Connection target: use file-based backup via sqlite3 API.
-    if isinstance(target, sqlite3.Connection):
-        import os
-
-        # Get file path: prefer Connection.path (same file we opened), fallback to PRAGMA.
-        conn_path = getattr(self, "path", None)
-        if conn_path and conn_path != ":memory:" and (conn_path.strip() or "") != "":
-            db_filename = os.path.abspath(conn_path)
-        else:
-            rows = await self.fetch_all("PRAGMA database_list")  # type: ignore[attr-defined]
-            main_row = next((row for row in rows if row[1] == "main"), None)
-            if not main_row or not main_row[2]:
-                raise OperationalError(
-                    "backup to sqlite3.Connection is only supported for file-backed "
-                    "databases (got in-memory or unsupported URI)."
-                )
-            db_filename = main_row[2]
-            db_filename = os.path.abspath(db_filename)
-
-        # Best-effort flush of WAL to ensure committed state is visible on disk.
-        try:
-            await self.execute("PRAGMA wal_checkpoint(FULL)")  # type: ignore[attr-defined]
-        except Exception:
-            # Not all configurations use WAL; ignore failures here.
-            pass
-
-        # Disallow backup if target has an active transaction, matching previous
-        # error semantics and sqlite3 best practices.
-        if getattr(target, "in_transaction", False):
-            raise OperationalError(
-                "Cannot backup to sqlite3.Connection while it has an active transaction."
-            )
-
-        # Open a temporary sqlite3.Connection to the same file and run backup in the
-        # same thread (sqlite3 connections must be used in the thread that created them;
-        # target was created by the caller so we run backup here).
-        source_sqlite3 = sqlite3.connect(db_filename)
-        try:
-            source_sqlite3.backup(
-                target,
-                pages=pages,
-                progress=progress,
-                name=name,
-                sleep=sleep,
-            )
-        finally:
-            source_sqlite3.close()
-        return None
-
-    # Fallback: rapsqlite-to-rapsqlite backup via the original Rust method.
-    await _raw_backup(
-        self,
-        target,
-        pages=pages,
-        progress=progress,
-        name=name,
-        sleep=sleep,
-    )
-    return None
-
-
-Connection._backup_raw = _raw_backup  # type: ignore[attr-defined]
-Connection.backup = _backup  # type: ignore[assignment]

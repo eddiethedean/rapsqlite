@@ -2,6 +2,7 @@
 
 import pytest
 
+from conftest import skip_if_no_phase3
 from rapsqlite import (
     Connection,
     connect,
@@ -17,11 +18,9 @@ from rapsqlite import (
     transaction_with_timeout,
 )
 
-if not hasattr(Connection, "iter_chunk_size"):
-    pytest.skip(
-        "Phase 3 APIs (iter_chunk_size, etc.) not supported by this build",
-        allow_module_level=True,
-    )
+skip_if_no_phase3(allow_module_level=True)
+
+pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio

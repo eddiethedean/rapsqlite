@@ -5,10 +5,11 @@ from Python's sqlite3.Connection objects for use in backup operations.
 """
 
 import ctypes
+import sqlite3
 import sys
 
 
-def get_sqlite3_handle(conn) -> int | None:
+def get_sqlite3_handle(conn: sqlite3.Connection) -> int | None:
     """
     Extract sqlite3* handle from sqlite3.Connection object.
 
@@ -92,7 +93,7 @@ def get_sqlite3_handle(conn) -> int | None:
         return None
 
 
-def is_sqlite3_connection(obj) -> bool:
+def is_sqlite3_connection(obj: object) -> bool:
     """
     Check if an object is a sqlite3.Connection.
 
