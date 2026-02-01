@@ -3,46 +3,45 @@
 #![allow(non_local_definitions)]
 
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::pool::PoolConnection;
+use sqlx::Row;
 use sqlx::SqlitePool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
-use crate::pool::{
-    ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
-    pool_acquisition_error,
+static SAVEPOINT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn next_savepoint_name() -> String {
+    format!("sp_{}", SAVEPOINT_COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+use crate::connection::{ensure_not_closed, ConnectionExecutionState};
+use crate::conversion::{
+    build_description_empty_result, build_description_tuple, row_to_py_with_factory,
 };
-use crate::query::{bind_and_execute, bind_and_execute_on_connection};
-use crate::types::{ProgressHandler, SqliteParam, TransactionState, UserFunctions};
+use crate::pool::{
+    acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
+    execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
+};
+use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
+use crate::types::{SqliteParam, TransactionState};
+use crate::utils::{is_begin_query, is_commit_or_rollback_query, is_dml_query};
 use crate::{map_sqlx_error, Connection, Cursor, OperationalError};
 
 /// Execute context manager returned by `Connection::execute()`.
 /// Allows `async with db.execute(...)` pattern by being both awaitable and an async context manager.
 #[pyclass]
 pub(crate) struct ExecuteContextManager {
+    pub(crate) state: ConnectionExecutionState,
     pub(crate) cursor: Py<Cursor>,
     pub(crate) query: String,
     pub(crate) param_values: Vec<SqliteParam>,
     pub(crate) is_select: bool,
-    // Connection state needed for execution
-    pub(crate) path: String,
-    pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
-    pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
-    pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
-    pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
-    pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
-    pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-    pub(crate) callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-    pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
-    pub(crate) user_functions: UserFunctions,
-    pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub(crate) authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub(crate) progress_handler: ProgressHandler,
-    pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub(crate) init_hook_called: Arc<StdMutex<bool>>,
-    pub(crate) last_rowid: Arc<Mutex<i64>>,
-    pub(crate) last_changes: Arc<Mutex<u64>>,
+    /// True for INSERT/UPDATE/DELETE ... RETURNING; triggers fetch-and-cache to prevent re-execution
+    pub(crate) returns_result_rows: bool,
     pub(crate) connection: Py<Connection>,
 }
 
@@ -56,25 +55,37 @@ impl ExecuteContextManager {
             let query = slf.borrow(py).query.clone();
             let param_values = slf.borrow(py).param_values.clone();
             let is_select = slf.borrow(py).is_select;
-            let path = slf.borrow(py).path.clone();
-            let pool = Arc::clone(&slf.borrow(py).pool);
-            let pragmas = Arc::clone(&slf.borrow(py).pragmas);
-            let pool_size = Arc::clone(&slf.borrow(py).pool_size);
-            let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);
-            let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
-            let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
-            let callback_connection = Arc::clone(&slf.borrow(py).callback_connection);
-            let load_extension_enabled = Arc::clone(&slf.borrow(py).load_extension_enabled);
-            let user_functions = Arc::clone(&slf.borrow(py).user_functions);
-            let trace_callback = Arc::clone(&slf.borrow(py).trace_callback);
-            let authorizer_callback = Arc::clone(&slf.borrow(py).authorizer_callback);
-            let progress_handler = Arc::clone(&slf.borrow(py).progress_handler);
-            let init_hook = Arc::clone(&slf.borrow(py).init_hook);
-            let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
-            let last_rowid = Arc::clone(&slf.borrow(py).last_rowid);
-            let last_changes = Arc::clone(&slf.borrow(py).last_changes);
+            let returns_result_rows = slf.borrow(py).returns_result_rows;
+            let state = slf.borrow(py).state.clone();
+            let path = state.path.clone();
+            let pool = Arc::clone(&state.pool);
+            let session_connection = Arc::clone(&state.session_connection);
+            let pragmas = Arc::clone(&state.pragmas);
+            let pool_size = Arc::clone(&state.pool_size);
+            let connection_timeout_secs = Arc::clone(&state.connection_timeout_secs);
+            let idle_timeout_secs = Arc::clone(&state.idle_timeout_secs);
+            let transaction_state = Arc::clone(&state.transaction_state);
+            let transaction_connection = Arc::clone(&state.transaction_connection);
+            let callback_connection = Arc::clone(&state.callback_connection);
+            let load_extension_enabled = Arc::clone(&state.load_extension_enabled);
+            let user_functions = Arc::clone(&state.user_functions);
+            let user_aggregates = Arc::clone(&state.user_aggregates);
+            let user_collations = Arc::clone(&state.user_collations);
+            let trace_callback = Arc::clone(&state.trace_callback);
+            let authorizer_callback = Arc::clone(&state.authorizer_callback);
+            let progress_handler = Arc::clone(&state.progress_handler);
+            let init_hook = Arc::clone(&state.init_hook);
+            let init_hook_called = Arc::clone(&state.init_hook_called);
+            let last_rowid = Arc::clone(&state.last_rowid);
+            let last_changes = Arc::clone(&state.last_changes);
             let connection = slf.borrow(py).connection.clone_ref(py);
+            let connection_for_fetch = connection.clone_ref(py);
             let cursor = slf.borrow(py).cursor.clone_ref(py);
+            let timeout = Arc::clone(&state.timeout);
+            let isolation_level = Arc::clone(&state.isolation_level);
+            let closed = Arc::clone(&state.closed);
+            let converters = Arc::clone(&state.converters);
+            let explicit_transaction = Arc::clone(&state.explicit_transaction);
             // Get cursor's results Arc to mark it as executed for non-SELECT queries
             // Note: Python::with_gil is used here for sync result caching in async context.
             // The deprecation warning is acceptable as this is a sync operation within async.
@@ -90,6 +101,7 @@ impl ExecuteContextManager {
             .unwrap_or_else(|_| Arc::new(StdMutex::new(None)));
 
             let future = async move {
+                ensure_not_closed(&closed)?;
                 // For non-SELECT queries, execute immediately when entering context
                 if !is_select {
                     // Check if we're currently executing init_hook FIRST (before checking transaction state)
@@ -99,13 +111,10 @@ impl ExecuteContextManager {
                         *guard
                     };
 
-                    // Only check for Active state, not Starting (Starting means transaction is being set up,
-                    // and init_hook may need to execute queries using pool connection)
-                    // If we're inside init_hook execution, don't use transaction connection
-                    let in_transaction = if hook_already_called {
-                        // If we're inside init_hook, don't use transaction connection even if state is Starting
-                        false
-                    } else {
+                    // Only check for Active state, not Starting (Starting means transaction is being set up).
+                    // When inside init_hook and transaction is Active, use transaction_connection so we don't
+                    // try to acquire a second connection from the pool (pool may have size 1).
+                    let in_transaction = {
                         let g = transaction_state.lock().await;
                         *g == TransactionState::Active
                     };
@@ -117,6 +126,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                     }
@@ -125,15 +135,10 @@ impl ExecuteContextManager {
                     // This prevents deadlocks when init_hook calls conn.execute() which triggers __aenter__
                     execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
 
-                    // Re-check transaction state after init_hook (state may have changed during hook execution)
-                    // Only check for Active state, not Starting (Starting means transaction is being set up)
-                    // Also, if we're inside init_hook execution, don't use transaction connection
-                    let in_transaction_after_hook = if hook_already_called {
-                        // If we were already inside init_hook when this execute() was called,
-                        // we should use pool connection, not transaction connection
-                        false
-                    } else {
-                        // Check transaction state - only use transaction connection if state is Active
+                    // Re-check transaction state after init_hook (state may have changed during hook execution).
+                    // When inside init_hook and transaction is Active, use transaction_connection so init_hook's
+                    // conn.execute() runs on the same connection (avoids pool timeout when pool size is 1).
+                    let in_transaction_after_hook = {
                         let g = transaction_state.lock().await;
                         *g == TransactionState::Active
                     };
@@ -141,17 +146,130 @@ impl ExecuteContextManager {
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
+                        &user_aggregates,
+                        &user_collations,
                         &trace_callback,
                         &authorizer_callback,
                         &progress_handler,
                     );
 
-                    let result = if in_transaction_after_hook {
+                    // For INSERT/UPDATE/DELETE ... RETURNING, fetch rows and cache them so
+                    // cursor.fetchall() does not re-execute (SQLAlchemy ORM insertmanyvalues).
+                    let use_fetch_for_returning =
+                        returns_result_rows && is_dml_query(&query) && !is_begin_query(&query);
+
+                    enum DmlOutcome {
+                        Executed(sqlx::sqlite::SqliteQueryResult),
+                        Fetched(Vec<sqlx::sqlite::SqliteRow>),
+                    }
+
+                    let outcome = if in_transaction_after_hook {
                         let mut conn_guard = transaction_connection.lock().await;
                         let conn = conn_guard.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
-                        bind_and_execute_on_connection(&query, &param_values, conn, &path).await?
+                        if use_fetch_for_returning {
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                            )
+                            .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r =
+                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Executed(r)
+                        }
+                    } else if has_callbacks_flag && is_begin_query(&query) {
+                        // Raw "BEGIN" from SQLAlchemy: execute on callback_connection, then move to
+                        // transaction_connection so subsequent DML and rollback() work correctly.
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+
+                        let mut conn_guard = callback_connection.lock().await;
+                        let mut conn = conn_guard.take().ok_or_else(|| {
+                            OperationalError::new_err("Callback connection not available")
+                        })?;
+                        let result =
+                            bind_and_execute_on_connection(&query, &param_values, &mut conn, &path)
+                                .await?;
+                        {
+                            let mut g = transaction_state.lock().await;
+                            *g = TransactionState::Active;
+                        }
+                        {
+                            let mut g = transaction_connection.lock().await;
+                            *g = Some(conn);
+                        }
+                        {
+                            let mut ex_guard = explicit_transaction.lock().await;
+                            *ex_guard = true;
+                        }
+                        DmlOutcome::Executed(result)
+                    } else if has_callbacks_flag
+                        && is_dml_query(&query)
+                        && !in_transaction_after_hook
+                    {
+                        // DML (INSERT/UPDATE/DELETE) with callbacks but no active transaction:
+                        // SQLAlchemy's conn.begin() may not emit BEGIN through our execute path.
+                        // Run BEGIN and move connection to transaction_connection so rollback() works.
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+
+                        let mut conn_guard = callback_connection.lock().await;
+                        let mut conn = conn_guard.take().ok_or_else(|| {
+                            OperationalError::new_err("Callback connection not available")
+                        })?;
+                        sqlx::query("BEGIN")
+                            .execute(&mut *conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, "BEGIN"))?;
+                        {
+                            let mut g = transaction_state.lock().await;
+                            *g = TransactionState::Active;
+                        }
+                        {
+                            let mut g = transaction_connection.lock().await;
+                            *g = Some(conn);
+                        }
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Transaction connection not available")
+                        })?;
+                        if use_fetch_for_returning {
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                            )
+                            .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r =
+                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Executed(r)
+                        }
                     } else if has_callbacks_flag {
                         ensure_callback_connection(
                             &path,
@@ -160,6 +278,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
 
@@ -167,28 +286,197 @@ impl ExecuteContextManager {
                         let conn = conn_guard.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
-                        bind_and_execute_on_connection(&query, &param_values, conn, &path).await?
-                    } else {
-                        let pool_clone = get_or_create_pool(
+                        if use_fetch_for_returning {
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                            )
+                            .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r =
+                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Executed(r)
+                        }
+                    } else if hook_already_called || !is_dml_query(&query) {
+                        // Inside init_hook, or DDL (CREATE/DROP etc.): use session connection.
+                        ensure_session_connection(
                             &path,
                             &pool,
+                            &session_connection,
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
-                        bind_and_execute(&query, &param_values, &pool_clone, &path).await?
+                        let mut conn_guard = session_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
+                        })?;
+                        if use_fetch_for_returning {
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                            )
+                            .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r =
+                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
+                                    .await?;
+                            DmlOutcome::Executed(r)
+                        }
+                    } else {
+                        // Implicit transaction (aiosqlite compat): first DML (INSERT/UPDATE/DELETE)
+                        // without explicit begin() starts a transaction; commit()/rollback() end it.
+                        // Use session connection for BEGIN then move it to transaction_connection.
+                        ensure_session_connection(
+                            &path,
+                            &pool,
+                            &session_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+                        let mut conn_guard = session_connection.lock().await;
+                        let mut conn = conn_guard.take().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
+                        })?;
+                        let timeout_ms = {
+                            let g = timeout.lock().unwrap();
+                            (*g * 1000.0) as i64
+                        };
+                        let busy = format!("PRAGMA busy_timeout = {}", timeout_ms);
+                        sqlx::query(&busy)
+                            .execute(&mut *conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &busy))?;
+                        let level = isolation_level
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| "IMMEDIATE".to_string());
+                        let begin_sql = format!("BEGIN {level}");
+                        sqlx::query(&begin_sql)
+                            .execute(&mut *conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
+                        let outcome = if use_fetch_for_returning {
+                            let rows = bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                &mut conn,
+                                &path,
+                            )
+                            .await?;
+                            DmlOutcome::Fetched(rows)
+                        } else {
+                            let r = bind_and_execute_on_connection(
+                                &query,
+                                &param_values,
+                                &mut conn,
+                                &path,
+                            )
+                            .await?;
+                            DmlOutcome::Executed(r)
+                        };
+                        {
+                            let mut g = transaction_state.lock().await;
+                            *g = TransactionState::Active;
+                        }
+                        {
+                            let mut g = transaction_connection.lock().await;
+                            *g = Some(conn);
+                        }
+                        outcome
                     };
 
-                    let rowid = result.last_insert_rowid();
-                    let changes = result.rows_affected();
+                    // Raw COMMIT/ROLLBACK from SQLAlchemy: reset state and return connection to
+                    // callback_connection so UDFs remain available.
+                    if is_commit_or_rollback_query(&query) {
+                        let mut trans_guard = transaction_state.lock().await;
+                        *trans_guard = TransactionState::None;
+                        drop(trans_guard);
+                        {
+                            let mut ex_guard = explicit_transaction.lock().await;
+                            *ex_guard = false;
+                        }
+                        if has_callbacks_flag {
+                            let mut conn_guard = transaction_connection.lock().await;
+                            if let Some(conn) = conn_guard.take() {
+                                let mut cb_guard = callback_connection.lock().await;
+                                *cb_guard = Some(conn);
+                            }
+                        }
+                    }
+
+                    let (rowid, changes) = match &outcome {
+                        DmlOutcome::Executed(r) => (r.last_insert_rowid(), r.rows_affected()),
+                        DmlOutcome::Fetched(rows) => {
+                            let changes = rows.len() as u64;
+                            let rowid = rows
+                                .last()
+                                .and_then(|r| r.try_get::<i64, usize>(0).ok())
+                                .unwrap_or(0);
+                            (rowid, changes)
+                        }
+                    };
 
                     *last_rowid.lock().await = rowid;
                     *last_changes.lock().await = changes;
 
-                    // Mark cursor results as cached (empty for non-SELECT) to prevent re-execution
-                    // The fetchall() method will check if it's non-SELECT and results are None,
-                    // and return empty results without executing. This is handled in fetchall().
+                    // Update cursor lastrowid/rowcount (Phase 3.9)
+                    #[allow(deprecated)]
+                    let _ = Python::with_gil(|py| -> pyo3::PyResult<()> {
+                        cursor
+                            .bind(py)
+                            .call_method1("_update_last_result", (rowid, changes as i64))?;
+                        Ok(())
+                    });
+
+                    // For RETURNING: cache rows in cursor so fetchall() does not re-execute
+                    if let DmlOutcome::Fetched(ref rows) = outcome {
+                        #[allow(deprecated)]
+                        let _ = Python::with_gil(|py| -> PyResult<()> {
+                            let cur = cursor.bind(py);
+                            let conn = connection_for_fetch.bind(py);
+                            let rf = cur.getattr("row_factory").ok().map(|o| o.unbind());
+                            let tf = conn.getattr("text_factory").ok().map(|o| o.unbind());
+                            let rf_bound = rf.as_ref().map(|r| r.bind(py));
+                            let tf_bound = tf.as_ref().map(|t| t.bind(py));
+                            let mut py_vec = Vec::with_capacity(rows.len());
+                            let conv_opt = Some(&converters);
+                            for row in rows {
+                                let out = row_to_py_with_factory(
+                                    py,
+                                    row,
+                                    rf_bound.as_ref().map(|b| b.as_ref()),
+                                    tf_bound.as_ref().map(|b| b.as_ref()),
+                                    conv_opt,
+                                )?;
+                                py_vec.push(out.unbind());
+                            }
+                            let list = PyList::empty(py);
+                            for o in &py_vec {
+                                list.append(o.bind(py))?;
+                            }
+                            let desc: Py<PyAny> = if let Some(first) = rows.first() {
+                                build_description_tuple(py, first)?.unbind().into()
+                            } else {
+                                build_description_empty_result(py, Some(&query))?.unbind()
+                            };
+                            cur.call_method1("_set_select_results", (list, desc))?;
+                            Ok(())
+                        });
+                    }
                 } else {
                     // For SELECT queries, ensure pool exists for lazy execution
                     // Only check for Active state, not Starting (Starting means transaction is being set up,
@@ -216,6 +504,7 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                     }
@@ -236,9 +525,99 @@ impl ExecuteContextManager {
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
+                            &idle_timeout_secs,
                         )
                         .await?;
                     }
+
+                    // Eager execution for SELECT: fetch now so "async for row in cursor" works (DBAPI spec).
+                    // When inside init_hook and transaction is Active, use transaction_connection (same as non-SELECT).
+                    let in_transaction_after_hook = {
+                        let g = transaction_state.lock().await;
+                        *g == TransactionState::Active
+                    };
+                    let has_callbacks_flag = has_callbacks(
+                        &load_extension_enabled,
+                        &user_functions,
+                        &user_aggregates,
+                        &user_collations,
+                        &trace_callback,
+                        &authorizer_callback,
+                        &progress_handler,
+                    );
+                    let rows = if in_transaction_after_hook {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Transaction connection not available")
+                        })?;
+                        bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
+                    } else if has_callbacks_flag {
+                        ensure_callback_connection(
+                            &path,
+                            &pool,
+                            &callback_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+                        let mut conn_guard = callback_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Callback connection not available")
+                        })?;
+                        bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
+                    } else {
+                        ensure_session_connection(
+                            &path,
+                            &pool,
+                            &session_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+                        let mut conn_guard = session_connection.lock().await;
+                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
+                        })?;
+                        bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
+                    };
+                    #[allow(deprecated)]
+                    let _ = Python::with_gil(|py| -> PyResult<()> {
+                        let cur = cursor.bind(py);
+                        let conn = connection_for_fetch.bind(py);
+                        let rf = cur.getattr("row_factory").ok().map(|o| o.unbind());
+                        let tf = conn.getattr("text_factory").ok().map(|o| o.unbind());
+                        let rf_bound = rf.as_ref().map(|r| r.bind(py));
+                        let tf_bound = tf.as_ref().map(|t| t.bind(py));
+                        let mut py_vec = Vec::with_capacity(rows.len());
+                        let conv_opt = Some(&converters);
+                        for row in &rows {
+                            let out = row_to_py_with_factory(
+                                py,
+                                row,
+                                rf_bound.as_ref().map(|b| b.as_ref()),
+                                tf_bound.as_ref().map(|b| b.as_ref()),
+                                conv_opt,
+                            )?;
+                            py_vec.push(out.unbind());
+                        }
+                        let list = PyList::empty(py);
+                        for o in &py_vec {
+                            list.append(o.bind(py))?;
+                        }
+                        let desc: Py<PyAny> = if let Some(first) = rows.first() {
+                            build_description_tuple(py, first)?.unbind().into()
+                        } else {
+                            // Empty result: set description from parsed SELECT columns so SQLAlchemy ORM
+                            // keymap matches (e.g. session.get(Model, missing_id), two get(missing) in a row).
+                            build_description_empty_result(py, Some(&query))?.unbind()
+                        };
+                        cur.call_method1("_set_select_results", (list, desc))?;
+                        Ok(())
+                    });
                 }
 
                 Ok(cursor)
@@ -289,15 +668,19 @@ impl ExecuteContextManager {
 pub(crate) struct TransactionContextManager {
     pub(crate) path: String,
     pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
+    pub(crate) session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
     pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
     pub(crate) connection: Py<Connection>,
     pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
     pub(crate) init_hook_called: Arc<StdMutex<bool>>,       // Track if init_hook has been executed
     pub(crate) timeout: Arc<StdMutex<f64>>,                 // SQLite busy_timeout in seconds
+    pub(crate) isolation_level: Arc<StdMutex<Option<String>>>, // Phase 3.9: None | DEFERRED | IMMEDIATE | EXCLUSIVE
+    pub(crate) explicit_transaction: Arc<Mutex<bool>>, // in_transaction() true only when explicit
 }
 
 #[pymethods]
@@ -307,23 +690,64 @@ impl TransactionContextManager {
         Python::attach(|py| {
             let path = slf.borrow(py).path.clone();
             let pool = Arc::clone(&slf.borrow(py).pool);
+            let session_connection = Arc::clone(&slf.borrow(py).session_connection);
             let pragmas = Arc::clone(&slf.borrow(py).pragmas);
             let pool_size = Arc::clone(&slf.borrow(py).pool_size);
             let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);
+            let idle_timeout_secs = Arc::clone(&slf.borrow(py).idle_timeout_secs);
             let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
             let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
             let connection = slf.borrow(py).connection.clone_ref(py);
             let init_hook = Arc::clone(&slf.borrow(py).init_hook);
             let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
             let timeout = Arc::clone(&slf.borrow(py).timeout);
+            let isolation_level = Arc::clone(&slf.borrow(py).isolation_level);
+            let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
             let future = async move {
-                // Check if transaction is already active (before doing any work)
+                // Implicit → explicit: if we have implicit transaction only, commit it and reuse conn for explicit.
                 {
                     let trans_guard = transaction_state.lock().await;
-                    if trans_guard.is_active() {
+                    let ex_guard = explicit_transaction.lock().await;
+                    let implicit_only = *trans_guard == TransactionState::Active && !*ex_guard;
+                    drop(ex_guard);
+                    if implicit_only {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        if let Some(mut conn) = conn_guard.take() {
+                            drop(trans_guard);
+                            let _ = sqlx::query("COMMIT").execute(&mut *conn).await;
+                            let timeout_ms = {
+                                let g = timeout.lock().unwrap();
+                                (*g * 1000.0) as i64
+                            };
+                            let _ = sqlx::query(&format!("PRAGMA busy_timeout = {timeout_ms}"))
+                                .execute(&mut *conn)
+                                .await;
+                            let level = isolation_level
+                                .lock()
+                                .unwrap()
+                                .clone()
+                                .unwrap_or_else(|| "IMMEDIATE".to_string());
+                            let begin_sql = format!("BEGIN {level}");
+                            sqlx::query(&begin_sql)
+                                .execute(&mut *conn)
+                                .await
+                                .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
+                            *conn_guard = Some(conn);
+                            let mut trans_guard = transaction_state.lock().await;
+                            *trans_guard = TransactionState::Active;
+                            drop(trans_guard);
+                            let mut ex_guard = explicit_transaction.lock().await;
+                            *ex_guard = true;
+                            return Ok(connection.into());
+                        }
+                        // No conn despite implicit state; fall through to normal path
+                    } else if trans_guard.is_active() {
                         return Err(OperationalError::new_err("Transaction already in progress"));
                     }
-                } // Lock released immediately
+                } // Lock released
+
+                // Release session connection so we don't hold session + transaction
+                release_session_connection(&session_connection).await;
 
                 let result: Result<Py<PyAny>, PyErr> = async {
                     let pool_clone = get_or_create_pool(
@@ -332,20 +756,11 @@ impl TransactionContextManager {
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
+                        &idle_timeout_secs,
                     )
                     .await?;
 
-                    // Execute init_hook if needed (BEFORE setting transaction state)
-                    // This ensures init_hook can use regular pool connections, not transaction connection
-                    // Clone connection before passing to async function
-                    // Note: Python::with_gil is used here for sync clone_ref in async context.
-                    // The deprecation warning is acceptable as this is a sync operation within async.
-                    #[allow(deprecated)]
-                    let connection_for_hook = Python::with_gil(|py| connection.clone_ref(py));
-                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook)
-                        .await?;
-
-                    // Now atomically reserve the transaction slot
+                    // Atomically reserve the transaction slot (init_hook runs after transaction is active)
                     {
                         let mut trans_guard = transaction_state.lock().await;
                         if trans_guard.is_active() {
@@ -364,9 +779,14 @@ impl TransactionContextManager {
                         let g = connection_timeout_secs.lock().unwrap();
                         *g
                     };
-                    let mut conn = pool_clone.acquire().await.map_err(|e| {
-                        pool_acquisition_error(&path, &e, pool_size_val, timeout_val)
-                    })?;
+                    let mut conn = acquire_with_pragmas(
+                        &pool_clone,
+                        &pragmas,
+                        &path,
+                        pool_size_val,
+                        timeout_val,
+                    )
+                    .await?;
                     // Set PRAGMA busy_timeout on this connection to handle lock contention
                     // Convert timeout from seconds (float) to milliseconds (integer) for SQLite
                     let timeout_ms = {
@@ -378,19 +798,34 @@ impl TransactionContextManager {
                         .execute(&mut *conn)
                         .await
                         .map_err(|e| map_sqlx_error(e, &path, &busy_timeout_query))?;
-                    sqlx::query("BEGIN IMMEDIATE")
+                    let level = isolation_level
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| "IMMEDIATE".to_string());
+                    let begin_sql = format!("BEGIN {level}");
+                    sqlx::query(&begin_sql)
                         .execute(&mut *conn)
                         .await
-                        .map_err(|e| map_sqlx_error(e, &path, "BEGIN IMMEDIATE"))?;
+                        .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
                     {
                         let mut conn_guard = transaction_connection.lock().await;
                         *conn_guard = Some(conn);
                     }
-                    // Re-acquire lock to set transaction state
+                    // Re-acquire lock to set transaction state and mark explicit
                     {
                         let mut trans_guard = transaction_state.lock().await;
                         *trans_guard = TransactionState::Active;
                     }
+                    {
+                        let mut ex_guard = explicit_transaction.lock().await;
+                        *ex_guard = true;
+                    }
+                    // Run init_hook after transaction is active so hook's conn.execute() uses this connection
+                    #[allow(deprecated)]
+                    let connection_for_hook = Python::with_gil(|py| connection.clone_ref(py));
+                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook)
+                        .await?;
                     Ok(connection.into())
                 }
                 .await;
@@ -399,6 +834,8 @@ impl TransactionContextManager {
                 if result.is_err() {
                     let mut trans_guard = transaction_state.lock().await;
                     *trans_guard = TransactionState::None;
+                    let mut ex_guard = explicit_transaction.lock().await;
+                    *ex_guard = false;
                     let mut conn_guard = transaction_connection.lock().await;
                     conn_guard.take();
                 }
@@ -421,10 +858,12 @@ impl TransactionContextManager {
             let path = slf.borrow(py).path.clone();
             let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
             let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
+            let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard != TransactionState::Active {
-                    return Err(OperationalError::new_err("No transaction in progress"));
+                    // No-op when !Active (match Connection.commit/rollback; sqlite3/aiosqlite compat)
+                    return Ok(());
                 }
                 let mut conn_guard = transaction_connection.lock().await;
                 let mut conn = conn_guard.take().ok_or_else(|| {
@@ -437,6 +876,85 @@ impl TransactionContextManager {
                     .map_err(|e| map_sqlx_error(e, &path, query))?;
                 drop(conn);
                 *trans_guard = TransactionState::None;
+                drop(trans_guard);
+                let mut ex_guard = explicit_transaction.lock().await;
+                *ex_guard = false;
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+}
+
+/// Savepoint context manager returned by `Connection::savepoint()`.
+/// SAVEPOINT on enter; RELEASE on clean exit, ROLLBACK TO on exception.
+#[pyclass]
+pub(crate) struct SavepointContextManager {
+    pub(crate) path: String,
+    pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
+    pub(crate) name: String,
+}
+
+#[pymethods]
+impl SavepointContextManager {
+    fn __aenter__(slf: PyRef<Self>) -> PyResult<Py<PyAny>> {
+        let slf: Py<Self> = slf.into();
+        Python::attach(|py| {
+            let path = slf.borrow(py).path.clone();
+            let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
+            let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
+            let name = slf.borrow(py).name.clone();
+            let future = async move {
+                {
+                    let g = transaction_state.lock().await;
+                    if *g != TransactionState::Active {
+                        return Err(OperationalError::new_err(
+                            "Savepoint requires an active transaction. Call begin() or use transaction() first.",
+                        ));
+                    }
+                }
+                let mut conn_guard = transaction_connection.lock().await;
+                let conn = conn_guard.as_mut().ok_or_else(|| {
+                    OperationalError::new_err("Transaction connection not available")
+                })?;
+                let save_sql = format!("SAVEPOINT {name}");
+                sqlx::query(&save_sql)
+                    .execute(&mut **conn)
+                    .await
+                    .map_err(|e| map_sqlx_error(e, &path, &save_sql))?;
+                Ok(())
+            };
+            future_into_py(py, future).map(|bound| bound.unbind())
+        })
+    }
+
+    fn __aexit__(
+        slf: PyRef<Self>,
+        exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_val: Option<&Bound<'_, PyAny>>,
+        _exc_tb: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let slf: Py<Self> = slf.into();
+        let rollback = exc_type.is_some();
+        Python::attach(|py| {
+            let path = slf.borrow(py).path.clone();
+            let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
+            let name = slf.borrow(py).name.clone();
+            let future = async move {
+                let mut conn_guard = transaction_connection.lock().await;
+                let conn = conn_guard.as_mut().ok_or_else(|| {
+                    OperationalError::new_err("Transaction connection not available")
+                })?;
+                let sql = if rollback {
+                    format!("ROLLBACK TO SAVEPOINT {name}")
+                } else {
+                    format!("RELEASE SAVEPOINT {name}")
+                };
+                sqlx::query(&sql)
+                    .execute(&mut **conn)
+                    .await
+                    .map_err(|e| map_sqlx_error(e, &path, &sql))?;
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())

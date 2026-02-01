@@ -3,8 +3,12 @@
 import pytest
 import rapsqlite
 
-# Mark tests that may have timing issues in parallel execution
-pytestmark = pytest.mark.asyncio
+# Run on one worker when using pytest-xdist --dist loadgroup to avoid pool contention
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.xdist_group("pool_exhaustion"),
+    pytest.mark.stress,
+]
 
 
 @pytest.mark.asyncio

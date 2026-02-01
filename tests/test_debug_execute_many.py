@@ -2,8 +2,13 @@
 
 import asyncio
 import tempfile
-import os
+
+from conftest import cleanup_db
 from rapsqlite import connect
+
+import pytest
+
+pytestmark = [pytest.mark.unit]
 
 
 async def test_execute_in_loop():
@@ -25,8 +30,7 @@ async def test_execute_in_loop():
             assert len(rows) == 3
             print("✓ execute() in loop works")
     finally:
-        if os.path.exists(test_db):
-            os.unlink(test_db)
+        cleanup_db(test_db)
 
 
 async def test_execute_many_minimal():
@@ -50,8 +54,7 @@ async def test_execute_many_minimal():
             assert len(rows) == 3
             print("✓ execute_many works")
     finally:
-        if os.path.exists(test_db):
-            os.unlink(test_db)
+        cleanup_db(test_db)
 
 
 async def test_execute_then_execute_many():
@@ -76,8 +79,7 @@ async def test_execute_then_execute_many():
             assert len(rows) == 3
             print("✓ execute then execute_many works")
     finally:
-        if os.path.exists(test_db):
-            os.unlink(test_db)
+        cleanup_db(test_db)
 
 
 if __name__ == "__main__":

@@ -6,11 +6,11 @@ This document analyzes compatibility between rapsqlite and aiosqlite based on ru
 Test Execution
 --------------
 
-**Date**: 2026-01-26 (Updated)  
-**rapsqlite Version**: 0.2.0  
+**Date**: 2026-01-30  
+**rapsqlite Version**: 0.3.0-dev  
 **aiosqlite Test Suite**: Latest from https://github.com/omnilib/aiosqlite
 
-**Last Updated**: 2026-01-26 - Major compatibility improvements implemented
+**Test baseline**: Run ``scripts/run_aiosqlite_tests.py`` to execute the aiosqlite test suite against rapsqlite (patched imports). Results are written to ``docs/AIOSQLITE_TEST_RESULTS.md`` with a per-test breakdown. Summary: some tests pass in ``perf.py`` and ``smoke.py``; failures are often due to **document** (intentional differences: async methods for ``total_changes``/``in_transaction``, no transaction queue, backup API), **environment** (temp dir, package layout when run from script), or compatibility gaps. See ``docs/AIOSQLITE_TEST_RESULTS.md`` for the per-test breakdown.
 
 Known API Differences
 ---------------------
@@ -32,31 +32,34 @@ Known API Differences
 3. Connection Properties
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Status**: ✅ **ALL PROPERTIES NOW SUPPORTED** - All connection properties are implemented.
+**Status**: ✅ **ALL PROPERTIES NOW SUPPORTED** - All connection properties are implemented. ``total_changes`` and ``in_transaction`` are synchronous properties in rapsqlite (no ``await``), matching aiosqlite behavior.
 
-**Note**: ``total_changes`` and ``in_transaction`` are async methods (not properties) in rapsqlite due to internal implementation, but functionally equivalent.
+4. Row Format (lists vs tuples)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-4. Row Factory: ``aiosqlite.Row``
+**Status**: ✅ **CONFIGURABLE** - rapsqlite default is list rows; aiosqlite/sqlite3 use tuples. Use ``connect(..., aiosqlite_compat=True)`` for tuple rows by default (drop-in ``import rapsqlite as aiosqlite``), or set ``conn.row_factory = "tuple"`` on an existing connection. See :doc:`migration-guide` for examples.
+
+5. Row Factory: ``aiosqlite.Row``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Status**: ✅ **NOW SUPPORTED** - ``rapsqlite.Row`` class is implemented with dict-like access (``row["column"]``, ``row[0]``, ``keys()``, ``values()``, ``items()``).
 
-5. ``executescript()`` Method
+6. ``executescript()`` Method
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Status**: ✅ **NOW IMPLEMENTED**
 
-6. ``load_extension()`` Method
+7. ``load_extension()`` Method
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Status**: ✅ **NOW IMPLEMENTED**
 
-7. Backup to sqlite3.Connection
+8. Backup to sqlite3.Connection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``rapsqlite.Connection.backup()`` now supports both ``rapsqlite.Connection`` and ``sqlite3.Connection`` targets. For sqlite3 targets, it uses Python's sqlite3 backup API over the on-disk database file (file-backed databases only; ``:memory:`` and non-file URIs are not supported).
 
-8. ``iterdump()`` Return Type
+9. ``iterdump()`` Return Type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 rapsqlite supports both async iteration and await-to-list:
@@ -70,10 +73,196 @@ rapsqlite supports both async iteration and await-to-list:
    # rapsqlite (backwards compatible)
    lines = await db.iterdump()  # Returns List[str]
 
-9. ``init_hook`` parameter
+10. ``init_hook`` parameter
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
+
+True Async DBAPI (SQLAlchemy-style)
+-----------------------------------
+
+rapsqlite implements a **True Async DBAPI 2.0** interface in ``rapsqlite.dbapi``, suitable for
+SQLAlchemy and other consumers that expect an async driver with no thread offloading.
+See ``docs/true_async_dbapi_spec.md`` for the contract.
+
+* ``apilevel = "2.0"``, ``threadsafety = 0``, ``paramstyle = "qmark"``
+* Full exception hierarchy (``Error``, ``InterfaceError``, ``DataError``, etc.)
+* ``async def connect(database, **kwargs) -> AsyncConnection``
+* ``AsyncConnection``: ``async cursor()``, ``async execute()``, ``executemany``, ``commit``, ``rollback``, ``close``
+* ``Cursor``: ``execute``, ``executemany``, ``fetchone``, ``fetchmany``, ``fetchall``, ``close``; ``description``, ``rowcount``, ``lastrowid``, ``arraysize``
+
+Use ``rapsqlite.dbapi`` when integrating with async frameworks that require a DBAPI-compliant module.
+
+SQLAlchemy
+~~~~~~~~~~
+
+rapsqlite provides a ``sqlite+rapsqlite`` dialect for SQLAlchemy 2.0+. Full ORM support is
+implemented: ``AsyncSession``, ``session.add``/``add_all``, ``session.commit``, ``session.get``,
+transaction rollback, and ``INSERT...RETURNING`` identity fetch all work correctly.
+
+**Requirements**: SQLAlchemy 2.0 or newer (``pip install 'rapsqlite[sqlalchemy]'`` installs
+``sqlalchemy>=2.0``).
+
+**Core usage:**
+
+.. code-block:: python
+
+   import rapsqlite.sqlalchemy  # register dialect
+   from sqlalchemy import text
+   from sqlalchemy.ext.asyncio import create_async_engine
+
+   engine = create_async_engine("sqlite+rapsqlite:///path.db")
+   # or sqlite+rapsqlite:///:memory:
+
+   async with engine.connect() as conn:
+       result = await conn.execute(text("SELECT 1"))
+       print(result.fetchone())
+
+**ORM usage (AsyncSession):**
+
+.. code-block:: python
+
+   import rapsqlite.sqlalchemy
+   from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+   from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+   from sqlalchemy import String, select
+
+   class Base(DeclarativeBase):
+       pass
+
+   class User(Base):
+       __tablename__ = "users"
+       id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+       name: Mapped[str] = mapped_column(String(50))
+
+   engine = create_async_engine("sqlite+rapsqlite:///app.db")
+   async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+   async with engine.begin() as conn:
+       await conn.run_sync(Base.metadata.create_all)
+
+   async with async_session() as session:
+       async with session.begin():
+           session.add_all([User(name="alice"), User(name="bob")])
+
+   async with async_session() as session:
+       result = await session.execute(select(User).order_by(User.id))
+       users = result.scalars().all()
+       # users has 2 User instances
+
+**Transaction rollback** with ``on_connect`` UDFs (e.g. ``regexp``, ``floor``) works correctly:
+``conn.begin()``, inserts, and ``conn.rollback()`` behave as expected.
+
+**Tests**: The suite ``tests/test_sqlalchemy_rapsqlite.py`` validates Core and ORM patterns
+against both ``sqlite+rapsqlite`` and ``sqlite+aiosqlite``.
+
+See ``docs/true_async_dbapi_spec.md`` for the full async DBAPI contract.
+
+Alembic with rapsqlite
+~~~~~~~~~~~~~~~~~~~~~~
+
+You can run Alembic migrations using the ``sqlite+rapsqlite`` dialect.
+
+1. Install dependencies: ``pip install 'rapsqlite[sqlalchemy]' alembic``
+2. Initialize Alembic with async support: ``alembic init -t async alembic``
+3. In ``alembic/env.py``, ensure the dialect is registered and the URL uses ``sqlite+rapsqlite``:
+
+.. code-block:: python
+
+   import rapsqlite.sqlalchemy  # register sqlite+rapsqlite dialect
+   from sqlalchemy.ext.asyncio import create_async_engine
+   # ...
+   # In run_migrations_online(), use:
+   connectable = create_async_engine(
+       config.get_main_option("sqlalchemy.url").replace("sqlite://", "sqlite+rapsqlite://")
+   )
+
+4. Set ``sqlalchemy.url`` in ``alembic.ini`` (e.g. ``sqlite:///app.db``). The env.py replacement above switches it to ``sqlite+rapsqlite:///app.db`` for async runs.
+5. Run migrations: ``alembic upgrade head`` (runs in the async context provided by the template).
+
+For file-backed databases, use a path or ``sqlite+rapsqlite:///path/to/db.db``. In-memory (``:memory:``) is supported for the engine but each connection gets its own database; use a file path for migrations so the same database is used across runs.
+
+FastAPI
+~~~~~~~
+
+Use a connection dependency with ``rapsqlite.connect()`` and lifespan for setup. See ``examples/fastapi_db.py``:
+
+.. code-block:: python
+
+   from contextlib import asynccontextmanager
+   from fastapi import FastAPI, Depends
+   from rapsqlite import connect
+
+   @asynccontextmanager
+   async def lifespan(app: FastAPI):
+       async with connect("app.db") as conn:
+           await conn.execute("CREATE TABLE IF NOT EXISTS ...")
+       yield
+
+   async def get_db():
+       async with connect("app.db") as conn:
+           yield conn
+
+   app = FastAPI(lifespan=lifespan)
+
+   @app.get("/")
+   async def root(db=Depends(get_db)):
+       rows = await db.fetch_all("SELECT ...")
+       return {"data": rows}
+
+Run with ``uvicorn examples.fastapi_db:app --reload``. The test ``tests/test_fastapi_example.py`` validates this pattern.
+
+Starlette
+~~~~~~~~~
+
+Starlette uses the same ASGI base as FastAPI. Use lifespan for setup and create a connection per request. See ``examples/starlette_db.py``:
+
+.. code-block:: python
+
+   from contextlib import asynccontextmanager
+   from starlette.applications import Starlette
+   from starlette.responses import JSONResponse
+   from starlette.routing import Route
+   from rapsqlite import connect
+
+   @asynccontextmanager
+   async def lifespan(app):
+       async with connect("app.db") as conn:
+           await conn.execute("CREATE TABLE IF NOT EXISTS items ...")
+       yield
+
+   async def homepage(request):
+       async with connect("app.db") as conn:
+           rows = await conn.fetch_all("SELECT * FROM items")
+           return JSONResponse({"items": [list(r) for r in rows]})
+
+   app = Starlette(routes=[Route("/", homepage)], lifespan=lifespan)
+
+Run with ``uvicorn examples.starlette_db:app --reload``. The test ``tests/test_starlette_example.py`` validates this pattern.
+
+aiohttp
+~~~~~~~
+
+Use ``on_startup`` for schema setup and create a connection per request. See ``examples/aiohttp_db.py``:
+
+.. code-block:: python
+
+   from aiohttp import web
+   from rapsqlite import connect
+
+   async def init_db(app):
+       async with connect("app.db") as conn:
+           await conn.execute("CREATE TABLE IF NOT EXISTS items ...")
+   async def homepage(request):
+       async with connect("app.db") as conn:
+           rows = await conn.fetch_all("SELECT * FROM items")
+           return web.json_response({"items": [list(r) for r in rows]})
+
+   app = web.Application()
+   app.on_startup.append(init_db)
+   app.router.add_get("/", homepage)
+
+Run with ``python examples/aiohttp_db.py`` or ``aiohttp run examples/aiohttp_db:app``. The test ``tests/test_aiohttp_example.py`` validates this pattern.
 
 Compatibility Summary
 ---------------------
@@ -91,5 +280,10 @@ Performance Characteristics
 * **Connection pooling**: rapsqlite uses connection pooling internally. The default pool size is 1, but can be configured.
 * **Prepared statements**: sqlx (the underlying library) caches prepared statements per connection automatically.
 * **True async**: All operations execute outside the GIL, providing better concurrency under load.
+
+For type conversion and custom types (including ``register_adapter`` and
+``register_converter``), see :doc:`../reference/type-conversion`.
+
+For the aiosqlite test suite baseline and per-test failure categories, see ``docs/AIOSQLITE_TEST_RESULTS.md``.
 
 For more details, see :doc:`migration-guide`.

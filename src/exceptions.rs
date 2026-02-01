@@ -7,8 +7,12 @@ use pyo3::exceptions::PyValueError;
 // Exception classes matching aiosqlite API (ABI3 compatible)
 create_exception!(_rapsqlite, Error, PyException);
 create_exception!(_rapsqlite, Warning, PyException);
+create_exception!(_rapsqlite, InterfaceError, Error);
 create_exception!(_rapsqlite, DatabaseError, Error);
+create_exception!(_rapsqlite, DataError, DatabaseError);
 create_exception!(_rapsqlite, OperationalError, DatabaseError);
-create_exception!(_rapsqlite, ProgrammingError, DatabaseError);
 create_exception!(_rapsqlite, IntegrityError, DatabaseError);
+create_exception!(_rapsqlite, InternalError, DatabaseError);
+create_exception!(_rapsqlite, ProgrammingError, DatabaseError);
+create_exception!(_rapsqlite, NotSupportedError, DatabaseError);
 create_exception!(_rapsqlite, ValueError, PyValueError);

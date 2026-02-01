@@ -1,4 +1,4 @@
-//! Error mapping helpers (sqlx -> Python exceptions).
+//! Error mapping helpers (sqlx -> Python exceptions, raw SQLite C API).
 
 use pyo3::prelude::*;
 
@@ -42,19 +42,35 @@ fn sanitize_query(query: &str) -> String {
                     .map(|i| start + i)
                     .unwrap_or(start);
 
-                // Find the end of the value (space, comma, quote, or end of string)
-                let end = query[start..]
-                    .find(|c: char| {
-                        c == ' '
-                            || c == ','
-                            || c == '\''
-                            || c == '"'
-                            || c == ';'
-                            || c == '\n'
-                            || c == '\r'
-                    })
-                    .map(|i| start + i)
-                    .unwrap_or(query.len());
+                let end = if start < query.len() {
+                    // Use unwrap_or to handle empty slice edge case
+                    let first = match query[start..].chars().next() {
+                        Some(c) => c,
+                        None => {
+                            // Empty slice, nothing to sanitize
+                            continue;
+                        }
+                    };
+                    if first == '\'' || first == '"' {
+                        // Quoted value: find matching closing quote
+                        let rest = &query[start + first.len_utf8()..];
+                        if let Some(close) = rest.find(first) {
+                            start + first.len_utf8() + close + first.len_utf8()
+                        } else {
+                            query.len()
+                        }
+                    } else {
+                        // Find the end of the value (space, comma, or end of string)
+                        query[start..]
+                            .find(|c: char| {
+                                c == ' ' || c == ',' || c == ';' || c == '\n' || c == '\r'
+                            })
+                            .map(|i| start + i)
+                            .unwrap_or(query.len())
+                    }
+                } else {
+                    start
+                };
 
                 if end > start {
                     sanitized.replace_range(start..end, "***");
@@ -115,5 +131,67 @@ pub(crate) fn map_sqlx_error_with_query_visibility(
         }
         SqlxError::Decode(_) => ProgrammingError::new_err(error_msg),
         _ => DatabaseError::new_err(error_msg),
+    }
+}
+
+/// Map raw SQLite result code + message to Python exception (for use from non-Python threads).
+pub(crate) fn map_sqlite_error_from_msg(path: &str, query: &str, rc: i32, msg: &str) -> PyErr {
+    let sanitized = sanitize_query(query);
+    let error_msg =
+        format!("Failed to execute query on database {path}: {msg}\nQuery: {sanitized}");
+    let primary = rc & 0xff;
+    match primary {
+        libsqlite3_sys::SQLITE_CONSTRAINT => IntegrityError::new_err(error_msg),
+        libsqlite3_sys::SQLITE_BUSY | libsqlite3_sys::SQLITE_LOCKED => {
+            OperationalError::new_err(error_msg)
+        }
+        libsqlite3_sys::SQLITE_MISUSE | libsqlite3_sys::SQLITE_ERROR => {
+            ProgrammingError::new_err(error_msg)
+        }
+        _ => DatabaseError::new_err(error_msg),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_query;
+
+    #[test]
+    fn test_sanitize_query_removes_password() {
+        let q = "SELECT * FROM users WHERE password='secret123'";
+        let out = sanitize_query(q);
+        assert!(out.contains("***"));
+        assert!(!out.contains("secret123"));
+    }
+
+    #[test]
+    fn test_sanitize_query_unchanged_for_safe_query() {
+        let q = "SELECT id, name FROM users WHERE id = 1";
+        let out = sanitize_query(q);
+        assert_eq!(out, q);
+    }
+
+    #[test]
+    fn test_sanitize_query_token_value() {
+        let q = "token=abc123";
+        let out = sanitize_query(q);
+        assert!(out.contains("***"));
+        assert!(!out.contains("abc123"));
+    }
+
+    #[test]
+    fn test_sanitize_query_keyword_equals_at_end_no_panic() {
+        // Edge case: keyword followed by = at end of string (no value).
+        // Ensures we don't panic on empty slice in chars().next().
+        let q = "password=";
+        let out = sanitize_query(q);
+        assert_eq!(out, "password=");
+    }
+
+    #[test]
+    fn test_sanitize_query_token_equals_at_end_no_panic() {
+        let q = "token=";
+        let out = sanitize_query(q);
+        assert_eq!(out, "token=");
     }
 }

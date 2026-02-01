@@ -5,11 +5,11 @@ from Python's sqlite3.Connection objects for use in backup operations.
 """
 
 import ctypes
+import sqlite3
 import sys
-from typing import Optional
 
 
-def get_sqlite3_handle(conn) -> Optional[int]:
+def get_sqlite3_handle(conn: sqlite3.Connection) -> int | None:
     """
     Extract sqlite3* handle from sqlite3.Connection object.
 
@@ -47,14 +47,14 @@ def get_sqlite3_handle(conn) -> Optional[int]:
 
         # Determine pointer size based on platform
         if sys.maxsize > 2**32:  # 64-bit
-            Py_ssize_t = ctypes.c_int64
+            Py_ssize_t: type[ctypes.c_int64] | type[ctypes.c_int32] = ctypes.c_int64
         else:  # 32-bit
-            Py_ssize_t = ctypes.c_int32  # type: ignore[assignment]
+            Py_ssize_t = ctypes.c_int32
 
         # Define PyObject_HEAD structure
         class PyObject_HEAD(ctypes.Structure):
             _fields_ = [
-                ("ob_refcnt", Py_ssize_t),  # type: ignore[misc]
+                ("ob_refcnt", Py_ssize_t),
                 ("ob_type", ctypes.c_void_p),  # PyTypeObject*
             ]
 
@@ -93,7 +93,7 @@ def get_sqlite3_handle(conn) -> Optional[int]:
         return None
 
 
-def is_sqlite3_connection(obj) -> bool:
+def is_sqlite3_connection(obj: object) -> bool:
     """
     Check if an object is a sqlite3.Connection.
 

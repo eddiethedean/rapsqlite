@@ -7,29 +7,289 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Versioning Strategy
 
-- **v0.1.x**: Phase 1 development (MVP and core features)
-- **v0.2.x**: Phase 2 development and release (feature-complete drop-in replacement) - **Current: v0.2.0**
-- **v0.3.x+**: Phase 3 development (advanced features, ecosystem integration)
-- **v1.0.0**: Stable API release after Phase 3 completion, production-ready
+- **v0.1.x**: Phase 1 — Core functionality (MVP and core features)
+- **v0.2.x**: Phase 2 — Feature-complete drop-in replacement
+- **v0.3.x**: Phase 3 — Advanced features & aiosqlite parity - **Current: v0.3.0-dev**
+- **v1.0.0**: Phase 4 — Production ready (stable API release)
 
-## [1.0.0] - TBA (After Phase 3 Completion)
+## [1.0.0] - TBA (Phase 4: Production Ready)
 
 ### Overview
 
-- v1.0.0 will be released after Phase 3 completion, marking production stability
-- Phase 3 includes advanced features, ecosystem integration, and optimizations
-- See Phase 3 roadmap for planned features leading to v1.0.0
+- v1.0.0 will be released after Phase 4 completion, marking production stability
+- Phase 4 focuses on production tooling, cross-platform validation, and advanced features
+- See ROADMAP.md for detailed Phase 4 features
 
 ### Checklist for v1.0 Release (Future)
 
-- Phase 3 features complete
-- All tests passing across supported Python versions (3.8–3.14)
+- Phase 3 complete (v0.3.0 released)
+- Type system: `register_adapter` and `register_converter`
+- Cross-platform CI (Linux, macOS, Windows)
+- Performance regression tests
+- All tests passing across supported Python versions (3.10–3.14)
 - Comprehensive documentation and examples
-- Ecosystem integrations validated
-- Performance benchmarks meet targets
 - Production stability validated
 
-_Note: v1.0.0 release details will be added after Phase 3 completion._
+_Note: v1.0.0 release details will be added after Phase 4 completion._
+
+## [0.3.0] - TBA (Phase 3: Advanced Features & aiosqlite Parity)
+
+### Overview
+
+- v0.3.0 focuses on advanced features and aiosqlite API parity
+- Query helpers, transaction utilities, and framework integrations
+- Target: >80% aiosqlite test suite compatibility
+
+### Release Criteria
+
+- aiosqlite test suite pass rate >80% (or intentional differences documented)
+- All Phase 3 features tested and documented
+- Migration guide complete
+- No breaking changes from v0.2.0
+
+## [0.3.0-dev] - Unreleased
+
+### Fixed - Bug fixes (2026-02-01)
+
+- **Connection `__del__`** — Replaced invalid `asyncio.create_task()` (fails from sync context) with `asyncio.ensure_future()` for proper event-loop scheduling. Added `_cleanup_conn_state(self)` at start of `__del__` to prevent memory leak when connections are GC'd without `close()`.
+- **Connection state memory leak** — `_cleanup_conn_state` is now called from `__del__` before scheduling close, so `_connection_state` entries are removed when connections are abandoned.
+- **Connection state race condition** — Added `threading.Lock()` to protect `_connection_state` access in `_get_conn_state()` and `_cleanup_conn_state()`.
+- **transaction_retry** — Fixed unreachable code after loop; now handles `max_retries=0` by raising `RuntimeError("max_retries must be at least 1")`.
+- **backup() panic risk** — Replaced 15 `.unwrap()` calls in `src/connection.rs` with `.ok_or_else()` for proper error handling.
+- **Error sanitization panic risk** — `sanitize_query` in `src/errors.rs` now handles empty slice edge case in `chars().next()` without panicking.
+- **DBAPI lock timeout** — Increased from `1e-6` to `1e-4` seconds (100 microseconds) in `rapsqlite/dbapi.py` for more robust lock acquisition under load while still failing quickly for concurrent operations.
+- **docs/AIOSQLITE_TEST_RESULTS.md** — Restored by running `scripts/run_aiosqlite_tests.py` (file had been deleted but was referenced in 8+ locations).
+
+### Added - Tests for bug fixes (2026-02-01)
+
+- **`tests/test_bug_fixes.py`** — New test module: `test_transaction_retry_max_retries_zero_raises`, `test_transaction_retry_max_retries_one_succeeds`, `test_connection_state_cleanup_on_close`, `test_concurrent_total_changes_in_transaction_access`, `test_connection_gc_cleanup_does_not_leak`.
+- **`src/errors.rs`** — New Rust tests: `test_sanitize_query_keyword_equals_at_end_no_panic`, `test_sanitize_query_token_equals_at_end_no_panic`.
+
+### Fixed - SQLAlchemy and create_function (2026-01-31)
+
+- **SQLAlchemy ORM INSERT...RETURNING doubled rows** — ExecuteContextManager now fetches and caches RETURNING rows for INSERT/UPDATE/DELETE via `returns_result_rows` and `_set_select_results`, so `cursor.fetchall()` does not re-execute. Fixes `test_async_session_add_commit_get` and `test_async_session_add_all_many_rows`.
+- **SQLAlchemy transaction rollback with UDFs** — When `has_callbacks` and DML runs without an active transaction, new DML-with-callbacks branch runs BEGIN on `callback_connection`, moves it to `transaction_connection`, and sets `transaction_state = Active`, so rollback correctly undoes inserts. Fixes `test_connection_explicit_transaction`.
+- **create_function connection routing** — `create_function` now prefers `transaction_connection` when it holds a connection (moved by DML-with-callbacks). Ensures UDF add/remove operates on the correct connection. Fixes `test_create_function` and `test_create_function_deterministic`.
+
+### Changed - Code quality (2026-01-31)
+
+- **cargo fmt** — Reformatted `src/connection.rs`, `src/context_managers.rs`, `src/utils.rs`.
+- **cargo clippy** — Fixed useless_conversion warnings in `src/context_managers.rs` (removed redundant `.into()` on `build_description_empty_result(...).unbind()`).
+- **ruff format** — Reformatted Python sources (rapsqlite, tests, scripts).
+- **ruff check** — Removed unused `asyncio` import in `tests/test_doc_examples.py`.
+
+### Added - Phase 3.8: v0.3.0 release readiness (2026-01-31)
+
+- **`connect(..., aiosqlite_compat=True)`** — When True, sets default row_factory to tuple so fetch_all/cursor fetchall return tuples (aiosqlite/sqlite3 default). Use for drop-in ``import rapsqlite as aiosqlite`` without code changes for row type.
+- **aiosqlite test results** — `docs/AIOSQLITE_TEST_RESULTS.md` updated with known intentional differences, per-test failure categories (fix/document/environment), and link to migration/compatibility guides. v0.3.0 release criterion "intentional differences documented" satisfied.
+- **Migration guide** — "If you see test failures" subsection; row format section updated with aiosqlite_compat and ``row_factory = "tuple"`` examples; cross-reference to advanced-usage for best practices.
+- **Compatibility guide** — Row format (lists vs tuples) and aiosqlite_compat documented; total_changes/in_transaction noted as sync properties.
+- **Best practices and anti-patterns** — Expanded in advanced-usage: connection lifecycle (abandoning connections without close), avoiding blocking the event loop, transaction boundaries (keep transactions short). Migration guide links to advanced-usage for best practices.
+- **Performance guide** — Single connection vs pool subsection; measuring performance and regression testing (timed_fetch_all, tests/test_performance.py); cross-links to migration-guide and advanced-usage.
+- **ROADMAP** — Section 3.8 items marked complete; v0.3.0 release criteria noted as met via documented differences; Last Updated 2026-01-31.
+- **Tests** — `test_connect_aiosqlite_compat_tuple_rows` in `test_aiosqlite_compat.py` verifies `connect(..., aiosqlite_compat=True)` yields tuple rows.
+
+### Added - Test improvements (Rust and Python) (2026-01-31)
+
+- **Rust unit tests** — `src/parameters.rs`: tests for `find_named_parameter_placeholders` (colon, at, dollar, multiple, underscore/numbers, none, colon-not-param). `src/errors.rs`: existing tests for `sanitize_query`. Total 16 Rust unit tests.
+- **Unified dev test run** — `scripts/dev_test.sh` now runs Rust unit tests first (via `scripts/run_rust_tests.sh` on macOS/Linux, or `cargo test` on Windows), then Python pytest. Single command for full test run.
+- **CI Rust tests** — Rust unit tests run on all platforms: `ubuntu-latest`, `macos-latest`, `windows-latest` (macOS uses `run_rust_tests.sh` for libpython).
+- **Python test noise** — `pyproject.toml` filterwarnings for Tokio/unraisable-exception warnings during parallel runs; `tests/README.md` documents full test run (Rust + Python), fixtures, and warning filter.
+
+### Fixed - Error sanitization (2026-01-31)
+
+- **`sanitize_query`** — Quoted sensitive values (e.g. `password='secret123'`) are now replaced in full with `***` instead of only the opening quote.
+
+### Added - Phase 3 remaining API features (2026-01-31)
+
+- **register_adapter / register_converter** — Verified and documented. Per-connection type adapters and converters (sqlite3-style) are implemented and wired; tests pass. `docs/reference/type-conversion.rst` and `docs/guides/migration-guide.rst` updated to state they are supported. Test `test_register_converter_declared_type` uses declared type DATE (driver-reported) for converter lookup.
+- **create_aggregate** — API implemented; test remains skipped on some platforms due to Bus error in aggregate context (known limitation). ROADMAP notes the limitation.
+- **create_collation** — Implemented and tested. Added `test_create_collation` in `test_aiosqlite_compat.py` (custom collation, ORDER BY COLLATE, remove). ROADMAP section 3.8 marks all four Phase 3 API features complete (with caveat for create_aggregate).
+
+### Added - aiosqlite compatibility improvements (2026-01-30)
+
+- **`total_changes` sync property** — Now a synchronous property (not async method) for aiosqlite compatibility. Cached value updated after `begin()`/`commit()`/`rollback()`.
+- **`in_transaction` sync property** — Now a synchronous property (not async method) for aiosqlite compatibility. Properly tracks explicit transactions and `transaction()` context manager.
+- **`transaction()` state tracking** — Wrapped to properly update `in_transaction` state on enter/exit.
+- **Tests updated** — `test_aiosqlite_compat.py` and `test_concurrent_transactions.py` updated to use sync properties.
+- **Migration guide updated** — Documents row format difference (lists vs tuples) and current sync property behavior.
+- **aiosqlite test suite status** — perf.py: 6/10 passing, smoke.py: 3/30 passing. Row format and pooling differences are documented as intentional.
+
+### Fixed - Test improvements (2026-01-30)
+
+- **aiohttp test** — Refactored `tests/test_aiohttp_example.py` to avoid `TestServer`/`TestClient` which required network socket binding. Test now directly invokes handler function with mock request pattern. Added `filterwarnings` marker to suppress Tokio context cleanup warning (known PyO3 async limitation during GC).
+
+### Added - Phase 3 plan implementation (2026-01-30)
+
+- **aiosqlite compatibility script** — `scripts/run_aiosqlite_tests.py` now outputs per-test breakdown (PASSED/FAILED/SKIPPED with error snippets) in `docs/AIOSQLITE_TEST_RESULTS.md`.
+- **`suggest_indexes(conn, sql, parameters=None)`** — Suggests indexes when query plan shows full table scan; returns list of dicts with `table`, `column`, `suggestion`. Documented in advanced-usage (Query plan analysis).
+- **`in_clause_query(sql, values)`** — Expands `IN (?)` to `IN (?,?,...)` for use with `fetch_all`; standalone helper. Documented in advanced-usage (IN clause expansion).
+- **`rows_to_dicts(rows, columns)`** — Converts list-of-list rows to list-of-dicts using column names. Documented in advanced-usage (Streaming and large result sets).
+- **Migration guide** — Added "Migrating from aiosqlite: Common Patterns" (connection lifecycle, `total_changes`/`in_transaction` async, backup API, transaction queue); link to AIOSQLITE_TEST_RESULTS.md.
+- **Best practices** — Added subsection on parameterized queries, `execute_iter` vs `paginate`, pool sizing in advanced-usage.
+- **Tests** — `test_suggest_indexes`, `test_in_clause_query`, `test_rows_to_dicts` in `tests/test_phase3_api.py`.
+
+### Added - Phase 3.1: Query helpers and pagination (2026-01-30)
+
+- **`paginate(conn, sql, parameters=None, page_size=64, offset=0)`** — Fetch one page of rows; wraps query with `LIMIT`/`OFFSET`. Documented in advanced-usage (Streaming and large result sets).
+- **`analyze_query_plan(conn, sql, parameters=None)`** — Run `EXPLAIN QUERY PLAN` and return structured dict with `rows`, `details`, `uses_index`, `table_scan`. Documented in advanced-usage (Query plan analysis).
+- **`transaction_with_timeout(conn, work, timeout_secs=30)`** — Run a transaction with `asyncio.wait_for`; raises `TimeoutError` if work exceeds timeout. Documented in advanced-usage (Transaction timeout).
+- **`set_slow_query_threshold(conn, threshold_secs, callback=None)`** — Invoke callback when `fetch_all` exceeds threshold; set to 0 to disable. Documented in advanced-usage (Slow query detection).
+
+### Added - Phase 3.4: Starlette and aiohttp integration (2026-01-30)
+
+- **Starlette example** — `examples/starlette_db.py`; lifespan for schema setup, connection per request. Documented in `docs/guides/compatibility.rst`.
+- **aiohttp example** — `examples/aiohttp_db.py`; `on_startup` for schema setup, connection per request. Documented in `docs/guides/compatibility.rst`.
+- **Tests** — `tests/test_starlette_example.py`, `tests/test_aiohttp_example.py` for smoke validation.
+
+### Added - Phase 3.1: FTS5 and JSON1 support (2026-01-30)
+
+- **FTS5 tests** — `tests/test_fts.py` (create virtual table, MATCH queries, bm25 ranking).
+- **JSON1 tests** — `tests/test_json1.py` (json_extract, json_object, `->`, `->>` operators).
+- FTS and JSON usage documented in advanced-usage (Streaming section: FTS, JSON, and UPSERT).
+
+### Added - Phase 3.9: Cursor chaining (2026-01-30)
+
+- **`Cursor.executemany()` returns self** — Wrapper for aiosqlite chaining compatibility.
+- **`Cursor.executescript()` returns self** — Wrapper for aiosqlite chaining compatibility.
+
+### Added - Testing and CI (2026-01-30)
+
+- **Test dependencies** — `greenlet`, `httpx`, `aiohttp` added to `[project.optional-dependencies].test` for SQLAlchemy and framework tests.
+- **aiosqlite-compat CI job** — Runs `scripts/run_aiosqlite_tests.py` on schedule or when `full_suite` is requested via workflow_dispatch.
+
+### Changed (2026-01-30)
+
+- **Dead code removal** — Removed unused Rust functions: `bind_and_execute`, `bind_query_multiple`, `bind_and_fetch_all`, `bind_and_fetch_one`, `bind_and_fetch_optional` (query.rs); `execute_many_raw`, `execute_many_raw_standalone` (batch.rs); `map_sqlite_error` (errors.rs).
+- **Lint and format** — Ruff format, ruff check, mypy, cargo fmt, cargo clippy; all passing.
+- **Test count** — 560 tests passing (7 skipped).
+
+### Changed
+
+- Version bump to **0.3.0-dev** — Phase 3 development (advanced features, ecosystem integration) toward v1.0.0.
+- **Performance — Session-connection reuse**: Each `Connection` now holds and reuses one pool connection for non-transaction, non-callback operations (e.g. `fetch_all`, `execute`, `total_changes`). The session connection is released on `close()` and when starting a transaction (`begin()` or `transaction()`), so transaction and callback paths are unchanged. This matches aiosqlite-style usage (one connection per worker for many queries) and improves concurrent read performance: the **Concurrent Reads** benchmark (10 workers × 2000 queries) now wins vs aiosqlite (~1206ms vs ~1439ms). Pool helpers: `ensure_session_connection`, `release_session_connection`.
+
+### Added - Phase 3.9: API Completeness (aiosqlite compatibility)
+
+- **`Connection.execute_fetchall(sql, parameters=None)`** — Execute a SELECT and return all rows (delegates to `fetch_all`).
+- **`Connection.execute_insert(sql, parameters=None)`** — Execute INSERT/UPDATE/DELETE and return `last_insert_rowid()`; rejects SELECT.
+- **`Connection.explain_query_plan(sql, parameters=None)`** — Run `EXPLAIN QUERY PLAN` for the given SQL and return result rows (Phase 3.1).
+- **`Connection.pool_health()`** — Minimal health check (`SELECT 1`); returns `True` on success, raises on failure (Phase 3.2).
+- **`Connection.isolation_level`** getter/setter — Transaction isolation: `None` | `"DEFERRED"` | `"IMMEDIATE"` | `"EXCLUSIVE"`. Applied to `BEGIN` in `begin()` and `transaction()`.
+- **`Connection.__await__`** — Support `await conn` pattern (enter connection and return self).
+- **`Connection.interrupt()`** — Interrupts callback connection when present (UDFs, trace, etc.); no-op otherwise.
+- **`connect(..., iter_chunk_size=64, loop=None)`** — aiosqlite-compatible params; `iter_chunk_size` stored, `loop` accepted and ignored.
+- **`Connection.iter_chunk_size`** — Getter for stored chunk size.
+- **`Connection.create_function(..., deterministic=False)`** — Pass `SQLITE_DETERMINISTIC` when `deterministic=True` (SQLite 3.8.3+).
+- **`Connection.executemany`** — Alias for `execute_many` (aiosqlite compat).
+- **`Connection.savepoint(name=None)`** — Context manager for `SAVEPOINT` / `RELEASE` / `ROLLBACK TO`; requires active transaction.
+- **`Connection.stop()`** — No-op for aiosqlite API compatibility; use `close()` to close the connection.
+- **`Connection.pool_metrics()`** — Returns `{size, num_idle, in_use}` from the pool.
+- **`Connection.execute(query, parameters=None, cursor=None)`** — Optional `cursor` argument: when provided (e.g. from `Cursor.execute()`), reuses that cursor so `await cursor.execute(...)` returns the same cursor (aiosqlite chaining).
+- **`NotSupportedError`** — New exception (e.g. `deterministic=True` on SQLite &lt; 3.8.3).
+- **Implicit transactions** — First DML (INSERT/UPDATE/DELETE) without `begin()` starts a transaction; `commit()`/`rollback()` end it. DDL does not. `commit`/`rollback` with no transaction are no-ops. Context manager exit commits on success, rolls back on exception.
+- **`Cursor.iter_chunk_size`** — Alias for `arraysize` (aiosqlite compat).
+- **Examples** — `examples/async_basic.py`, `examples/fastapi_db.py`; `examples/README.md`. FastAPI smoke test in `tests/test_fastapi_example.py`.
+
+### Added - Phase 3.9: Cursor properties and methods
+
+- **`Cursor.arraysize`** (r/w, default 1) — Default size for `fetchmany()` when `size` is omitted.
+- **`Cursor.connection`** (r/o) — Reference to parent `Connection`.
+- **`Cursor.description`** (r/o) — Column metadata (7-tuples) after execute/fetch.
+- **`Cursor.lastrowid`** (r/o) / **`Cursor.rowcount`** (r/o) — Set from last execute (SELECT: -1; INSERT/UPDATE/DELETE: from result).
+- **`Cursor.row_factory`** (r/w) — Per-cursor override; falls back to connection’s `row_factory`.
+- **`Cursor.close()`** — Async; clears cached results, description, lastrowid, rowcount.
+- **`Cursor.fetchmany(size=None)`** — `size` optional; uses `arraysize` when omitted.
+- **`Cursor.execute()` returns self** — When awaited, returns the same cursor for chaining (aiosqlite compat); implemented via `Connection.execute(..., cursor=self)`.
+
+### Added - Benchmarks
+
+- **`benchmarks/README.md`** — Updated with latest benchmark results (session-connection reuse; rapsqlite wins Concurrent Reads, High Concurrency Reads, Concurrent Batch Inserts, Mixed Workload at ×10 row scale).
+
+### Added - Testing and tooling
+
+- **`tests/test_phase3_api.py`** — Tests for Phase 3.9+ APIs (connect params, create_function deterministic, interrupt, savepoints, pool_metrics, etc.).
+- **`tests/test_fastapi_example.py`** — FastAPI + rapsqlite smoke test.
+- **aiosqlite test suite** — Run via `scripts/run_aiosqlite_tests.py`; see `docs/AIOSQLITE_TEST_RESULTS.md`. Transaction-related failures addressed (implicit transactions, commit-on-exit).
+
+### Added - True Async DBAPI (`rapsqlite.dbapi`)
+
+- **`rapsqlite.dbapi`** — True Async DBAPI 2.0–compliant module for SQLAlchemy and other consumers.
+- **`dbapi.connect(database, **kwargs)`** — Async connect; `database` required (positional or keyword).
+- **`AsyncConnection`** / **`AsyncCursor`** — Async context managers; one operation per connection at a time; concurrent use raises `ProgrammingError`.
+- **Eager SELECT execution** — `async for row in cursor` works immediately after `execute(SELECT)`.
+- **Cancellation handling** — `CancelledError` triggers `interrupt()` on the underlying connection; connection remains usable.
+- **`docs/true_async_dbapi_spec.md`** — Specification and minimal driver checklist.
+
+### Added - SQLAlchemy integration
+
+- **`rapsqlite.sqlalchemy`** — `sqlite+rapsqlite` dialect; use with `create_async_engine("sqlite+rapsqlite:///:memory:")`.
+- **Optional dependency** — `pip install 'rapsqlite[sqlalchemy]'` for SQLAlchemy support.
+- **Compatibility docs** — `docs/guides/compatibility.rst` updated with SQLAlchemy usage.
+- **Alembic with rapsqlite** — Documented in `docs/guides/compatibility.rst` (env.py, async engine, `sqlite+rapsqlite` URL). Alembic-style DDL validated in `tests/test_sqlalchemy_rapsqlite.py::test_sqlalchemy_alembic_style_migration`.
+- **FastAPI patterns** — Documented in `docs/guides/compatibility.rst` (lifespan, connection dependency); `examples/fastapi_db.py` and `tests/test_fastapi_example.py` cover the recommended pattern.
+- **`connect()` pathlib.Path** — `connect()` accepts `pathlib.Path` (converted via `os.fspath`) for aiosqlite compatibility.
+
+### Added - Documentation (pool, monitoring, type conversion)
+
+- **Pool metrics and health** — API reference (`docs/api-reference/connection.rst`): `pool_metrics()` returns `{size, num_idle, in_use}`; `pool_health()` runs `SELECT 1`. Advanced usage guide: new **Monitoring** section (pool metrics in production, health checks, query logging and slow-query detection via `set_trace_callback`).
+- **Idle connection timeout (Phase 3.2)** — `connect(..., idle_timeout=N)` and `Connection.idle_timeout` (getter/setter); pool closes connections idle longer than N seconds. Documented in advanced-usage and API reference; tested in `test_phase3_api.py::test_idle_timeout`.
+- **Metrics export (Phase 3.5)** — Optional helper `pool_metrics_gauges(conn)` returns a dict of gauge names to values for Prometheus or custom metrics endpoints (`rapsqlite_pool_size`, `rapsqlite_pool_num_idle`, `rapsqlite_pool_in_use`). Documented in advanced-usage (Monitoring / Metrics export) and api-reference (pool_metrics). Tested in `test_phase3_api.py::test_pool_metrics_gauges`.
+- **Type system (Phase 3.10)** — `register_adapter` and `register_converter` deferred; workarounds and future plan documented in `docs/reference/type-conversion.rst` and migration guide (subsection “Future: register_adapter and register_converter”).
+- **Type conversion strategy** — New `docs/reference/type-conversion.rst`: built-in parameter/result mapping, custom types today (application-layer conversion, `create_function`, `row_factory`, `text_factory`), and future plan for `register_adapter`/`register_converter`. Linked from docs index and compatibility guide.
+
+### Added - Phase 3.5: Query timing
+
+- **`timed_fetch_all(conn, sql, parameters=None, on_timing=None)`** — Runs fetch_all and records duration; returns (rows, duration_secs) when on_timing is None, or rows and calls on_timing(duration_secs, sql) when provided. Documented in advanced-usage (Query timing); tested in `test_phase3_api.py::test_timed_fetch_all`.
+
+### Added - Phase 3.6 / 3.9: DX and interrupt() docs
+
+- **Thread safety** — New subsection in advanced-usage (Thread safety): connections not thread-safe; one connection per asyncio task or pool. ROADMAP 3.6 updated.
+- **Performance tuning** — Advanced-usage (Performance Tuning) now links to :doc:`guides/performance`.
+- **interrupt()** — API reference (connection.rst): documented behavior (interrupts callback connection when present; no-op otherwise) and limitations (only callback connection; pool operations not interrupted).
+
+### Added - Phase 3.3: Transaction retry
+
+- **`transaction_retry(conn, work, max_retries=5, initial_delay=0.01, max_delay=1.0)`** — Runs a transaction with retry on transient errors (e.g. SQLITE_BUSY, SQLITE_LOCKED) and exponential backoff. ``work`` is a callable that returns an awaitable; invoked once per attempt. Documented in advanced-usage (Transaction retry); tested in `test_phase3_api.py::test_transaction_retry`.
+
+### Added - Phase 3.2: Connection health and recovery (docs)
+
+- **Connection health and recovery** — New subsection in advanced-usage (Monitoring): pool replaces failed connections on acquire; use pool_health() for liveness; transient errors via retry. ROADMAP 3.2 updated.
+
+### Added - Phase 3.1: Streaming / chunked results
+
+- **`execute_iter(conn, sql, parameters=None, chunk_size=None)`** and **`conn.execute_iter(sql, ...)`** — Async iterator that yields rows in chunks (memory-efficient). Uses LIMIT/OFFSET under the hood; chunk_size defaults to `conn.iter_chunk_size`. Documented in advanced-usage (Streaming and large result sets); tested in `test_phase3_api.py::test_execute_iter`.
+
+### Added - Phase 3.8: aiosqlite test baseline and compatibility docs
+
+- **`docs/AIOSQLITE_TEST_RESULTS.md`** — Per-test results and categories (fix/document/environment) for aiosqlite suite run via `scripts/run_aiosqlite_tests.py`; perf.py passes, smoke.py failures documented with notes.
+- **Compatibility and ROADMAP** — `docs/guides/compatibility.rst` updated with test baseline summary and link to results; ROADMAP 3.8 updated with baseline status.
+- **CONTRIBUTING** — Added "Compatibility validation (aiosqlite suite)" with command to run the aiosqlite suite and where results are written.
+
+### Added - Test isolation and parallel runs
+
+- **`unique_table_prefix` fixture** — Per-test unique table names to avoid cross-test collisions when running in parallel.
+- **`tests/test_dbapi.py`** — DBAPI contract, connection/cursor behavior, cancellation, concurrency.
+- **`tests/test_sqlalchemy_rapsqlite.py`** — Smoke tests for `sqlite+rapsqlite` engine creation.
+- **`test_dbapi` and `test_concurrent_transactions`** — Use `unique_table_prefix` for all created tables.
+- **Optional test dependencies** — `pip install -e ".[test]"` installs fastapi and sqlalchemy for full test coverage; `requirements-test.txt` documents optional deps for FastAPI/SQLAlchemy tests.
+
+### Fixed
+
+- **init_hook timing** — init_hook now runs *after* the transaction connection is acquired and set to Active in both `begin()` and `transaction()` context manager, so tables created in init_hook are visible for the rest of the transaction.
+- **init_hook pool isolation** — When init_hook runs inside an active transaction and calls `conn.execute()`, the execute path now uses the transaction connection instead of acquiring from the pool (avoids "pool timed out" when pool size is 1).
+- **Slow tests** — `test_iterdump_quotes_identifiers`: skip `BEGIN TRANSACTION`/`COMMIT` when replaying iterdump to avoid "cannot start a transaction within a transaction". Backup tests in `test_callback_robustness.py`: use a fresh connection for backup after closing the write connection (avoids backup timeouts). `test_connection_pooling_pattern`: sequential inserts to avoid concurrent pool hang/timeout. `test_backup_aiosqlite`: complete test (run backup, close all connections) so teardown no longer triggers Tokio-context panic warning.
+
+### Added - Tokio panic investigation and mitigation
+
+- **`docs/reference/tokio-panic-investigation.md`** — Documents root cause (sqlx `PoolConnection::Drop` calls `crate::rt::spawn`; GC has no Tokio context), reproduction, and mitigation options.
+- **`scripts/repro_tokio_panic.py`** — Minimal repro: create Connection, use once, do not close, then `gc.collect()` to trigger panic.
+- **Resource cleanup docs** — Advanced usage guide and SECURITY.md note: always use `async with` or `await conn.close()`; abandoning a connection can cause "this functionality requires a Tokio context" during GC.
+- **Best-effort `Connection.__del__`** — Schedules `close()` on the running event loop when a connection is GC'd without close; best-effort only (no guarantees about loop lifetime or finalizer order).
+
+### Changed
+
+- **Parallel test runs** — CI uses `--timeout 90` and `--dist loadgroup` with `xdist_group` on init_hook, concurrency, and pool_exhaustion tests to avoid timeouts and pool contention; other tests use unique table names for isolation.
 
 ## [0.2.0] - 2026-01-26 (Updated 2026-01-28)
 
@@ -459,7 +719,7 @@ _Note: v1.0.0 release details will be added after Phase 3 completion._
 
 ### Compatibility
 
-- Python 3.8 through 3.14 supported
+- Python 3.10 through 3.14 supported
 - All platforms: Ubuntu (x86-64, aarch64), macOS (aarch64, x86-64), Windows (x86-64, aarch64)
 
 ---

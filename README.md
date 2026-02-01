@@ -4,15 +4,15 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/rapsqlite.svg)](https://pypi.org/project/rapsqlite/)
 [![Downloads](https://pepy.tech/badge/rapsqlite)](https://pepy.tech/project/rapsqlite)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Documentation](https://readthedocs.org/projects/rapsqlite/badge/?version=latest)](https://rapsqlite.readthedocs.io/en/latest/)
 
 ## Overview
 
-`rapsqlite` provides true async SQLite operations for Python, backed by Rust, Tokio, and sqlx. Unlike libraries that wrap blocking database calls in `async` syntax, `rapsqlite` guarantees that all database operations execute **outside the Python GIL**, ensuring event loops never stall under load.
+`rapsqlite` provides **true async** SQLite for Python, backed by Rust, Tokio, and sqlx. Database operations run **outside the Python GIL**, so the event loop never stalls. Use it as a drop-in replacement for `aiosqlite` with better concurrency and no thread pools.
 
-📚 **[Full Documentation](https://rapsqlite.readthedocs.io/en/latest/)** | **Roadmap Goal**: Achieve drop-in replacement compatibility with `aiosqlite`, enabling seamless migration with true async performance. See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md) for details.
+📚 **[Full Documentation](https://rapsqlite.readthedocs.io/en/latest/)** · [Quickstart](https://rapsqlite.readthedocs.io/en/latest/quickstart.html) · [API Reference](https://rapsqlite.readthedocs.io/en/latest/api-reference/index.html) · [ROADMAP](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md)
 
 ## Why `rap*`?
 
@@ -22,28 +22,31 @@ See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philo
 
 ## Features
 
-- ✅ **True async** SQLite operations (all operations execute outside Python GIL)
-- ✅ **Native Rust-backed** execution (Tokio + sqlx)
-- ✅ **Zero Python thread pools** (no fake async)
-- ✅ **Event-loop-safe** concurrency under load
-- ✅ **GIL-independent** database operations
-- ✅ **Async-safe** SQLite bindings
-- ✅ **Verified** by Fake Async Detector
-- ✅ **Connection lifecycle management** (async context managers)
-- ✅ **Transaction support** (begin, commit, rollback, transaction context managers)
-- ✅ **Type system improvements** (proper Python types: int, float, str, bytes, None)
-- ✅ **Cursor API** (execute, executemany, fetchone, fetchall, fetchmany, executescript)
-- ✅ **Enhanced error handling** (custom exception classes matching aiosqlite)
-- ✅ **aiosqlite-compatible API** (~95% compatibility, drop-in replacement)
-- ✅ **Prepared statement caching** (automatic via sqlx, 2-5x faster for repeated queries)
-- ✅ **Connection pooling** (configurable pool size and timeouts)
-- ✅ **Row factories** (dict, tuple, callable, and `rapsqlite.Row` class)
-- ✅ **Advanced SQLite features** (callbacks, extensions, schema introspection, backup, dump)
-- ✅ **Database initialization hooks** (automatic schema setup)
+- ⚡ **True async** SQLite operations (all operations execute outside Python GIL)
+- 🦀 **Native Rust-backed** execution (Tokio + sqlx)
+- 🚫 **Zero Python thread pools** (no fake async)
+- 🔄 **Event-loop-safe** concurrency under load
+- 🧵 **GIL-independent** database operations
+- 🔌 **Async-safe** SQLite bindings
+- ✔️ **Verified** by Fake Async Detector
+- 🔗 **Connection lifecycle management** (async context managers)
+- 📦 **Transaction support** (begin, commit, rollback, transaction context managers)
+- 🏷️ **Type system improvements** (proper Python types: int, float, str, bytes, None)
+- 📋 **Cursor API** (execute, executemany, fetchone, fetchall, fetchmany, executescript)
+- 🛡️ **Enhanced error handling** (custom exception classes matching aiosqlite)
+- 🔄 **aiosqlite-compatible API** (~95% compatibility, drop-in replacement)
+- 🚀 **Prepared statement caching** (automatic via sqlx, 2-5x faster for repeated queries)
+- 🏊 **Connection pooling** (configurable pool size and timeouts)
+- 📊 **Row factories** (dict, tuple, callable, and `rapsqlite.Row` class)
+- 🔧 **Advanced SQLite features** (callbacks, extensions, schema introspection, backup, dump)
+- 🔀 **Type adapters and converters** (register_adapter, register_converter; per-connection, sqlite3-style)
+- 📐 **Custom aggregates and collations** (create_aggregate, create_collation; sqlite3-style)
+- 🪝 **Database initialization hooks** (automatic schema setup)
+- 🐍 **True Async DBAPI 2.0** (`rapsqlite.dbapi`) for SQLAlchemy-style async drivers
 
 ## Requirements
 
-- Python 3.8+ (including Python 3.13 and 3.14)
+- Python 3.10+ (including Python 3.13 and 3.14)
 - Rust 1.70+ (for building from source)
 - Python development headers (included with most Python installations)
 
@@ -53,44 +56,55 @@ See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philo
 pip install rapsqlite
 ```
 
+To verify: run the [installation example](https://rapsqlite.readthedocs.io/en/latest/installation.html#verifying-installation) in the docs (it prints `[[1]]`).
+
 ### Building from Source
 
 **Prerequisites:**
-- Python 3.8+ with development headers installed
+- Python 3.10+ with development headers installed
 - Rust 1.70+ and Cargo
 
 **Installation:**
 ```bash
 git clone https://github.com/eddiethedean/rapsqlite.git
 cd rapsqlite
-pip install maturin
-maturin develop
+python -m pip install maturin
+python -m maturin develop
 ```
+
+When developing or running tests, use the **same** Python for both build and test (e.g. `python -m pytest tests/`). Using a different interpreter can cause version mismatches. See [CONTRIBUTING.md](CONTRIBUTING.md) and [tests/README.md](tests/README.md).
 
 **Note**: Python development headers are required for building. They're typically included with Python installations, but on some Linux distributions you may need to install `python3-dev` or `python3-devel` package. Use `maturin develop` instead of `cargo build` for development, as maturin automatically handles Python library linking.
 
 ## Documentation
 
-📖 **Full documentation is available at [rapsqlite.readthedocs.io](https://rapsqlite.readthedocs.io/en/latest/)**
-
-The documentation includes:
-- [Quickstart Guide](https://rapsqlite.readthedocs.io/en/latest/quickstart.html) - Get started in minutes
-- [API Reference](https://rapsqlite.readthedocs.io/en/latest/api-reference/index.html) - Complete API documentation
-- [Migration Guide](https://rapsqlite.readthedocs.io/en/latest/guides/migration-guide.html) - Migrating from aiosqlite
-- [Performance Guide](https://rapsqlite.readthedocs.io/en/latest/guides/performance.html) - Optimization tips
-- [Advanced Usage](https://rapsqlite.readthedocs.io/en/latest/guides/advanced-usage.html) - Advanced features and patterns
+📖 **[rapsqlite.readthedocs.io](https://rapsqlite.readthedocs.io/en/latest/)** – Quickstart, API reference, migration from aiosqlite, performance, and advanced usage. Code examples are tested and show real output.
 
 ---
 
 ## Quick Start
 
-See the [Quickstart Guide](https://rapsqlite.readthedocs.io/en/latest/quickstart.html) for getting started with `rapsqlite`.
+```python
+import asyncio
+from rapsqlite import connect
 
-For complete API documentation, see the [API Reference](https://rapsqlite.readthedocs.io/en/latest/api-reference/index.html).
+async def main():
+    async with connect("example.db") as conn:
+        await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+        await conn.execute("INSERT INTO users (name) VALUES ('Alice')")
+        rows = await conn.fetch_all("SELECT * FROM users")
+        print(rows)
+
+asyncio.run(main())
+```
+
+**Output:** `[[1, 'Alice']]`
+
+For more (transactions, cursors, row factories, SQLAlchemy `sqlite+rapsqlite`), see the [Quickstart Guide](https://rapsqlite.readthedocs.io/en/latest/quickstart.html) and [API Reference](https://rapsqlite.readthedocs.io/en/latest/api-reference/index.html). Code examples in the docs are tested and show real output.
 
 ## API Reference
 
-Complete API documentation is available at [rapsqlite.readthedocs.io](https://rapsqlite.readthedocs.io/en/latest/api-reference/index.html):
+Complete API documentation is at [rapsqlite.readthedocs.io](https://rapsqlite.readthedocs.io/en/latest/api-reference/index.html):
 
 - [Connection API](https://rapsqlite.readthedocs.io/en/latest/api-reference/connection.html)
 - [Cursor API](https://rapsqlite.readthedocs.io/en/latest/api-reference/cursor.html)
@@ -174,11 +188,12 @@ For most applications, this is all you need! All core aiosqlite APIs are support
 
 ## Roadmap
 
-See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md) for detailed development plans. Key goals include:
+See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md) for full details.
 
-- ✅ Phase 1: Connection lifecycle, transactions, type system, error handling, cursor API (complete)
-- ✅ Phase 2: Parameterized queries, cursor improvements, connection/pool configuration, row factory, transaction context managers, advanced callbacks, database dump/backup, schema introspection, database initialization hooks, prepared statement caching (complete)
-- ⏳ Phase 3: Advanced SQLite features and ecosystem integration
+- ✅ **Phase 1** – Connection lifecycle, transactions, type system, error handling, cursor API
+- ✅ **Phase 2** – Parameterized queries, pool/row factory, transaction context managers, backup/dump, schema introspection, init hooks, prepared statement caching
+- ✅ **Phase 3** – Type adapters/converters, custom aggregates/collations, True Async DBAPI, aiosqlite-style API parity
+- 🔜 **Next** – Dynamic pool sizing, deadlock handling, 100% aiosqlite test suite coverage
 
 ## Related Projects
 
@@ -191,30 +206,12 @@ See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs
 
 See [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/master/CHANGELOG.md) for detailed release notes and version history.
 
-## Limitations (v0.2.0)
+## Limitations
 
-**Current limitations:**
-- ⏳ Not designed for synchronous use cases
-- ⚠️ **Backup to `sqlite3.Connection`**: The `Connection.backup()` method supports backing up to `sqlite3.Connection` targets, but only for file-backed databases (`:memory:` and non-file URIs are not supported). See [Backup Support](#backup-support) above for details.
+- **Async only** – Not designed for synchronous use; use `sqlite3` for sync code.
+- **Backup to `sqlite3.Connection`** – Supported for file-backed databases only (not `:memory:` or non-file URIs). See [Backup Support](#backup-support) above.
 
-**Phase 2 (v0.2.0) status:**
-- ✅ Phase 2 is complete. See [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/master/CHANGELOG.md) for the full list of features and compatibility notes.
-
-**Phase 1 improvements (v0.1.0 – v0.1.1):**
-- ✅ Connection lifecycle management (async context managers)
-- ✅ Transaction support (begin, commit, rollback)
-- ✅ Type system improvements (proper Python types: int, float, str, bytes, None)
-- ✅ Enhanced error handling (custom exception classes matching aiosqlite)
-- ✅ API improvements (fetch_one, fetch_optional, execute_many, last_insert_rowid, changes)
-- ✅ Cursor API (execute, executemany, fetchone, fetchall, fetchmany)
-- ✅ aiosqlite compatibility (connect function, exception types)
-- ✅ Security fixes: Upgraded dependencies (pyo3 0.27, pyo3-async-runtimes 0.27, sqlx 0.8)
-- ✅ Connection pooling: Connection reuses connection pool across operations
-- ✅ Input validation: Added path validation (non-empty, no null bytes)
-- ✅ Improved error handling: Enhanced error messages with database path and query context
-- ✅ Type stubs: Added `.pyi` type stubs for better IDE support and type checking
-
-**Roadmap**: See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md) for planned improvements. Our goal is to achieve drop-in replacement compatibility with `aiosqlite` while providing true async performance with GIL-independent database operations.
+Release history and full feature list: [CHANGELOG.md](https://github.com/eddiethedean/rapsqlite/blob/master/CHANGELOG.md).
 
 ## Contributing
 

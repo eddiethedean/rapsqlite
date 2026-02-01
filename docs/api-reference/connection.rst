@@ -26,8 +26,28 @@ Callback Exception Handling
 When using callback methods, exceptions in your Python callbacks are handled as follows:
 
 - **User-defined functions** (`create_function`): Exceptions are converted to SQLite errors, causing the query to fail with an ``OperationalError``
+- **User-defined aggregates** (`create_aggregate`): Exceptions in step/finalize are converted to SQLite errors, causing the query to fail with an ``OperationalError``
+- **Custom collations** (`create_collation`): Exceptions in the callable may cause comparison/ORDER BY to fail
 - **Trace callbacks** (`set_trace_callback`): Exceptions are silently ignored to prevent affecting database operations
 - **Authorizer callbacks** (`set_authorizer`): Exceptions default to **DENY** (fail-secure) - operations are denied if callback raises
 - **Progress handlers** (`set_progress_handler`): Exceptions default to **continue** - operation continues even if callback raises
 
 Best practice: Always handle exceptions within your callback functions to avoid unexpected behavior.
+
+Type adapters and converters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Type adapters and converters (``register_adapter``, ``register_converter``) are supported per-connection (sqlite3-style). See :doc:`../reference/type-conversion` for details and examples.
+
+Pool metrics and health
+~~~~~~~~~~~~~~~~~~~~~~~
+
+When using a connection (which uses an internal pool), you can observe pool state and run health checks:
+
+- **``pool_metrics()``** (async): Returns a dict with ``size`` (total connections in pool), ``num_idle`` (idle connections), and ``in_use`` (connections currently in use). Use this to monitor pool usage in production (e.g. log periodically or expose via a metrics endpoint). For Prometheus-style gauges, use the helper :func:`rapsqlite.pool_metrics_gauges` (see :doc:`../guides/advanced-usage` Monitoring / Metrics export).
+
+- **``pool_health()``** (async): Runs a minimal health check (``SELECT 1``) and returns ``True`` on success; raises on failure. Use for liveness/readiness probes.
+
+- **``idle_timeout``** (property): When set (seconds), connections idle in the pool longer than this are closed. ``None`` (default) means no idle timeout. Set before first use (e.g. ``connect(..., idle_timeout=60)`` or ``conn.idle_timeout = 60``).
+
+- **``interrupt()``** (async): Interrupts the callback connection when present (e.g. during a long-running user-defined function or progress handler); no-op when no callback connection is in use. Use from another task to cancel a long-running operation. **Limitations**: Only affects operations on the dedicated callback connection; pool operations (normal execute/fetch) are not interrupted. For aiosqlite compatibility; full interrupt semantics may be extended in a future release.

@@ -1,0 +1,14 @@
+# Test dependencies (CI + CONTRIBUTING). Install: pip install -r requirements-test.txt
+pytest
+pytest-asyncio
+pytest-xdist
+pytest-timeout
+pytest-cov
+hypothesis
+
+# Optional: for benchmarks and aiosqlite compatibility tests
+aiosqlite
+
+# Optional: uncomment to run FastAPI and SQLAlchemy tests
+# fastapi
+# sqlalchemy>=2.0

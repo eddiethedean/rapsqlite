@@ -21,12 +21,6 @@ jobs:
         include:
           # Ubuntu x86-64
           - os: ubuntu-latest
-            python: "3.8"
-            architecture: x86-64
-          - os: ubuntu-latest
-            python: "3.9"
-            architecture: x86-64
-          - os: ubuntu-latest
             python: "3.10"
             architecture: x86-64
           - os: ubuntu-latest
@@ -42,12 +36,6 @@ jobs:
             python: "3.14"
             architecture: x86-64
           # Ubuntu ARM64 (aarch64) — QEMU-emulated on x86 runners; job has extended timeout
-          - os: ubuntu-latest
-            python: "3.8"
-            architecture: aarch64
-          - os: ubuntu-latest
-            python: "3.9"
-            architecture: aarch64
           - os: ubuntu-latest
             python: "3.10"
             architecture: aarch64
@@ -65,12 +53,6 @@ jobs:
             architecture: aarch64
           # macOS latest (typically arm64/Apple Silicon)
           - os: macos-latest
-            python: "3.8"
-            architecture: aarch64
-          - os: macos-latest
-            python: "3.9"
-            architecture: aarch64
-          - os: macos-latest
             python: "3.10"
             architecture: aarch64
           - os: macos-latest
@@ -87,12 +69,6 @@ jobs:
             architecture: aarch64
           # Windows x86-64
           - os: windows-latest
-            python: "3.8"
-            architecture: x86-64
-          - os: windows-latest
-            python: "3.9"
-            architecture: x86-64
-          - os: windows-latest
             python: "3.10"
             architecture: x86-64
           - os: windows-latest
@@ -108,12 +84,6 @@ jobs:
             python: "3.14"
             architecture: x86-64
           # macOS 15 Intel (x86-64)
-          - os: macos-15-intel
-            python: "3.8"
-            architecture: x86-64
-          - os: macos-15-intel
-            python: "3.9"
-            architecture: x86-64
           - os: macos-15-intel
             python: "3.10"
             architecture: x86-64

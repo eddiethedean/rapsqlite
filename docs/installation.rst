@@ -4,7 +4,7 @@ Installation
 Requirements
 ------------
 
-* Python 3.8+ (including Python 3.13 and 3.14)
+* Python 3.10+ (including Python 3.13 and 3.14)
 * Rust 1.70+ (for building from source)
 
 Installing from PyPI
@@ -77,8 +77,14 @@ After installation, verify that rapsqlite is working:
            await conn.execute("CREATE TABLE test (id INTEGER)")
            await conn.execute("INSERT INTO test VALUES (1)")
            rows = await conn.fetch_all("SELECT * FROM test")
-           print(rows)  # [[1]]
+           print(rows)
 
    asyncio.run(test())
+
+Output:
+
+.. code-block:: text
+
+   [[1]]
 
 If this runs without errors, rapsqlite is installed correctly!

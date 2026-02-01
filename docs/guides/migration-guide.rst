@@ -105,7 +105,9 @@ Basic Connection
        await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
        await db.execute("INSERT INTO test (value) VALUES ('hello')")
        rows = await db.fetch_all("SELECT * FROM test")
-       print(rows)  # [[1, 'hello']]
+       print(rows)
+
+Output: ``[[1, 'hello']]``
 
 Parameterized Queries
 ~~~~~~~~~~~~~~~~~~~~~
@@ -146,24 +148,47 @@ Transactions
 Differences and Limitations
 ---------------------------
 
-For a detailed compatibility analysis based on running the aiosqlite test suite, see :doc:`compatibility`.
+For a detailed compatibility analysis based on running the aiosqlite test suite, see :doc:`compatibility`. For per-test results when running the aiosqlite suite against rapsqlite, see ``docs/AIOSQLITE_TEST_RESULTS.md``.
+
+If you see test failures when running the aiosqlite test suite against rapsqlite (e.g. via ``scripts/run_aiosqlite_tests.py``), see ``docs/AIOSQLITE_TEST_RESULTS.md`` for a per-test breakdown and failure categories (fix / document / environment). Known intentional differences are listed there and in :doc:`compatibility`.
+
+Migrating from aiosqlite: Common Patterns
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Connection lifecycle**: Always use ``async with connect(...)`` or ``await conn.close()``. Abandoning a connection without closing can cause issues during garbage collection.
+
+* **total_changes and in_transaction**: These are now sync properties in rapsqlite, matching aiosqlite behavior. Use ``db.total_changes`` and ``db.in_transaction`` (no await needed).
+
+* **Backup API**: rapsqlite supports backup to both rapsqlite and sqlite3 connections. Backup to sqlite3 requires a file-backed database (not ``:memory:``).
+
+* **Transaction queue**: aiosqlite queues transaction operations on a background thread. rapsqlite does not use a transaction queue; operations run directly on the connection. For most applications this is transparent.
 
 Known Differences
 ~~~~~~~~~~~~~~~~~
 
-1. **Connection Properties**: ``total_changes`` and ``in_transaction`` are async methods (not properties) in rapsqlite, but functionally equivalent:
+1. **Row Format**: rapsqlite returns rows as lists ``[[1, 'a']]`` by default; aiosqlite/sqlite3 return tuples ``[(1, 'a')]``. For drop-in compatibility (e.g. ``import rapsqlite as aiosqlite``) use ``aiosqlite_compat=True`` so rows are tuples by default. Otherwise set ``row_factory`` to the string ``"tuple"``:
 
    .. code-block:: python
 
-      # aiosqlite
-      changes = db.total_changes
-      in_tx = db.in_transaction
+      # Option A: Tuple rows by default (aiosqlite-compatible)
+      async with connect("example.db", aiosqlite_compat=True) as db:
+          rows = await db.fetch_all("SELECT id, name FROM users")
+          # rows = [(1, 'Alice'), (2, 'Bob')]
 
-      # rapsqlite
-      changes = await db.total_changes()
-      in_tx = await db.in_transaction()
+      # Option B: rapsqlite default (lists)
+      rows = await db.fetch_all("SELECT id, name FROM users")
+      # rows = [[1, 'Alice'], [2, 'Bob']]
 
-2. **``iterdump()`` Return Type**: rapsqlite supports both async iteration and await-to-list:
+      # Option C: Set row_factory on an existing connection
+      db.row_factory = "tuple"
+      rows = await db.fetch_all("SELECT id, name FROM users")
+      # rows = [(1, 'Alice'), (2, 'Bob')]
+
+2. **``set_progress_handler``**: rapsqlite accepts both ``(n, callback)`` and ``(callback, n)`` for sqlite3/aiosqlite compatibility.
+
+3. **Tuple parameters**: rapsqlite accepts tuple as a single parameter (converted to text representation for one placeholder).
+
+4. **``iterdump()`` Return Type**: rapsqlite supports both async iteration and await-to-list:
 
    .. code-block:: python
 
@@ -174,7 +199,16 @@ Known Differences
       # rapsqlite (backwards compatible)
       lines = await db.iterdump()  # Returns List[str]
 
-3. **``init_hook`` parameter**: This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
+5. **``init_hook`` parameter**: This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
+
+register_adapter and register_converter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+rapsqlite implements per-connection ``register_adapter(type, adapter)`` and
+``register_converter(typename, converter)`` (sqlite3-style). Use
+``conn.register_adapter(MyType, lambda x: ...)`` for parameter binding and
+``conn.register_converter("TYPENAME", lambda b: ...)`` for result column
+decoding. See :doc:`../reference/type-conversion` for details and examples.
 
 Advanced Features
 -----------------
@@ -263,6 +297,8 @@ Testing Your Migration
 2. **Use compatibility tests**: See ``tests/test_dropin_replacement.py`` for examples
 3. **Verify performance**: Use benchmarks to ensure performance meets expectations
 
+For best practices and common anti-patterns when using rapsqlite, see :doc:`advanced-usage`.
+
 Example: Complete Migration
 ---------------------------
 
@@ -303,5 +339,7 @@ Here's a complete example of migrating an application:
            print(rows)
 
    asyncio.run(main())
+
+Output (for one row: id=1, name="Alice"): ``[[1, 'Alice']]``
 
 The migration is complete! Your code now uses true async SQLite operations.

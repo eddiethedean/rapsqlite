@@ -37,6 +37,12 @@ Python GIL**, ensuring event loops never stall under load.
    :caption: Reference
 
    reference/roadmap
+   reference/type-conversion
+
+Integration Examples
+--------------------
+
+See the `examples/ <https://github.com/eddiethedean/rapsqlite/blob/master/examples/README.md>`_ directory for minimal **FastAPI** and **async** usage patterns.
 
 Features
 --------
@@ -51,7 +57,9 @@ Features
 * ✅ **Connection pooling** (configurable pool size and timeouts)
 * ✅ **Row factories** (dict, tuple, callable, and `rapsqlite.Row` class)
 * ✅ **Advanced SQLite features** (callbacks, extensions, schema introspection, backup, dump)
+* ✅ **Type adapters and converters, custom aggregates and collations** (register_adapter, register_converter, create_aggregate, create_collation; sqlite3-style)
 * ✅ **Database initialization hooks** (automatic schema setup)
+* ✅ **True Async DBAPI 2.0** (``rapsqlite.dbapi``) for SQLAlchemy-style async drivers
 
 Why ``rap*``?
 -------------
@@ -82,6 +90,12 @@ Quick Example
            print(rows)
 
    asyncio.run(main())
+
+Output:
+
+.. code-block:: text
+
+   [[1, 'hello']]
 
 Indices and tables
 ==================

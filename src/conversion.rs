@@ -2,7 +2,9 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
-use sqlx::{Column, Row};
+use sqlx::{Column, Row, TypeInfo};
+
+use crate::types::Converters;
 
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{sqlite3_context, sqlite3_value};
@@ -154,39 +156,79 @@ pub(crate) unsafe fn py_to_sqlite_c_result(
     Ok(())
 }
 
+/// Get column value as Python bytes for register_converter (callable receives bytes).
+fn get_column_bytes<'py>(
+    py: Python<'py>,
+    row: &sqlx::sqlite::SqliteRow,
+    col: usize,
+) -> PyResult<Option<Bound<'py, PyBytes>>> {
+    use sqlx::Row;
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(col) {
+        return Ok(Some(PyBytes::new(py, &v)));
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<String>, _>(col) {
+        return Ok(Some(PyBytes::new(py, v.as_bytes())));
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(col) {
+        let b = v.to_string().into_bytes();
+        return Ok(Some(PyBytes::new(py, &b)));
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(col) {
+        let b = v.to_string().into_bytes();
+        return Ok(Some(PyBytes::new(py, &b)));
+    }
+    Ok(None)
+}
+
 /// Convert a SQLite value from sqlx Row to Python object.
+/// If converters is set and has a converter for the column's declared type, that converter(bytes) is used.
 pub(crate) fn sqlite_value_to_py<'py>(
     py: Python<'py>,
     row: &sqlx::sqlite::SqliteRow,
     col: usize,
     text_factory: Option<&Py<PyAny>>,
+    converters: Option<&Converters>,
 ) -> PyResult<Py<PyAny>> {
     use sqlx::{Column, Row, TypeInfo};
+
+    let type_name = row.columns()[col].type_info().name().to_ascii_uppercase();
+
+    // register_converter: if we have a converter for this declared type, call it with bytes
+    if let Some(conv) = converters {
+        let callable = {
+            let guard = conv.lock().unwrap();
+            guard.get(&type_name).map(|c| c.clone_ref(py))
+        };
+        if let Some(callable) = callable {
+            let callable_bound = callable.bind(py);
+            let bytes_py = get_column_bytes(py, row, col)?;
+            return Ok(match bytes_py {
+                Some(b) => callable_bound.call1((b,))?.unbind(),
+                None => py.None(),
+            });
+        }
+    }
 
     // Apply `text_factory` only for declared TEXT columns (aiosqlite/sqlite3 semantics).
     if let Some(tf) = text_factory {
         let tf_bound = tf.bind(py);
-        if !tf_bound.is_none() {
-            let declared = row.columns()[col].type_info().name().to_ascii_uppercase();
-            if declared == "TEXT" {
-                // Prefer String decoding (sqlx already decodes TEXT as UTF-8).
-                // We pass bytes to the text_factory, matching sqlite3's callable(bytes)->Any behavior.
-                if let Ok(opt_val) = row.try_get::<Option<String>, _>(col) {
-                    return Ok(match opt_val {
-                        Some(val) => {
-                            let arg = PyBytes::new(py, val.as_bytes());
-                            tf_bound.call1((arg,))?.unbind()
-                        }
-                        None => py.None(),
-                    });
-                }
+        if !tf_bound.is_none() && type_name == "TEXT" {
+            // Prefer String decoding (sqlx already decodes TEXT as UTF-8).
+            // We pass bytes to the text_factory, matching sqlite3's callable(bytes)->Any behavior.
+            if let Ok(opt_val) = row.try_get::<Option<String>, _>(col) {
+                return Ok(match opt_val {
+                    Some(val) => {
+                        let arg = PyBytes::new(py, val.as_bytes());
+                        tf_bound.call1((arg,))?.unbind()
+                    }
+                    None => py.None(),
+                });
             }
         }
     }
 
     // Fallback path: use column type information to reduce redundant probes.
     // Check declared type first, then fall back to type probing for robustness.
-    let type_name = row.columns()[col].type_info().name().to_ascii_uppercase();
 
     // Try type-specific extraction based on declared type (more efficient)
     match type_name.as_str() {
@@ -257,15 +299,23 @@ pub(crate) fn sqlite_value_to_py<'py>(
     Ok(py.None())
 }
 
+/// Number of columns to iterate (avoids index-out-of-bounds when row metadata
+/// and actual row data disagree, e.g. with shared pool connection reuse).
+fn row_column_count(row: &sqlx::sqlite::SqliteRow) -> usize {
+    std::cmp::min(row.len(), row.columns().len())
+}
+
 /// Convert a SQLite row to Python list.
 pub(crate) fn row_to_py_list<'py>(
     py: Python<'py>,
     row: &sqlx::sqlite::SqliteRow,
     text_factory: Option<&Py<PyAny>>,
+    converters: Option<&Converters>,
 ) -> PyResult<Bound<'py, PyList>> {
     let list = PyList::empty(py);
-    for i in 0..row.len() {
-        let val = sqlite_value_to_py(py, row, i, text_factory)?;
+    let n = row_column_count(row);
+    for i in 0..n {
+        let val = sqlite_value_to_py(py, row, i, text_factory, converters)?;
         list.append(val)?;
     }
     Ok(list)
@@ -278,8 +328,9 @@ pub(crate) fn row_to_py_with_factory<'py>(
     row: &sqlx::sqlite::SqliteRow,
     factory: Option<&Py<PyAny>>,
     text_factory: Option<&Py<PyAny>>,
+    converters: Option<&Converters>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let default = || row_to_py_list(py, row, text_factory).map(|l| l.into_any());
+    let default = || row_to_py_list(py, row, text_factory, converters).map(|l| l.into_any());
     let Some(f) = factory else {
         return default();
     };
@@ -289,20 +340,21 @@ pub(crate) fn row_to_py_with_factory<'py>(
     }
     if let Ok(s) = f.cast::<PyString>() {
         let name = s.to_str()?;
+        let n = row_column_count(row);
         return match name {
             "dict" => {
                 let dict = PyDict::new(py);
-                for i in 0..row.len() {
+                for i in 0..n {
                     let col_name = row.columns()[i].name();
-                    let val = sqlite_value_to_py(py, row, i, text_factory)?;
+                    let val = sqlite_value_to_py(py, row, i, text_factory, converters)?;
                     dict.set_item(col_name, val)?;
                 }
                 Ok(dict.into_any())
             }
             "tuple" => {
                 let mut vals = Vec::new();
-                for i in 0..row.len() {
-                    vals.push(sqlite_value_to_py(py, row, i, text_factory)?);
+                for i in 0..n {
+                    vals.push(sqlite_value_to_py(py, row, i, text_factory, converters)?);
                 }
                 let tuple = PyTuple::new(py, vals)?;
                 Ok(tuple.into_any())
@@ -322,9 +374,10 @@ pub(crate) fn row_to_py_with_factory<'py>(
                 // Create RapRow with columns and values
                 let mut columns = Vec::new();
                 let mut values = Vec::new();
-                for i in 0..row.len() {
+                let n = row_column_count(row);
+                for i in 0..n {
                     columns.push(row.columns()[i].name().to_string());
-                    let val = sqlite_value_to_py(py, row, i, text_factory)?;
+                    let val = sqlite_value_to_py(py, row, i, text_factory, converters)?;
                     values.push(val);
                 }
                 let raprow = raprow_class.call1((columns, values))?;
@@ -334,7 +387,102 @@ pub(crate) fn row_to_py_with_factory<'py>(
     }
 
     // Fallback: treat as callable
-    let list = row_to_py_list(py, row, text_factory)?;
+    let list = row_to_py_list(py, row, text_factory, converters)?;
     let result = f.call1((list,))?;
     Ok(result)
+}
+
+/// Parse column names from a SELECT query (between SELECT and FROM) for 0-row description.
+/// Returns None for SELECT * or unparseable queries. Used so SQLAlchemy ORM can build keymap
+/// from cursor description when the first (or only) result has 0 rows.
+fn parse_select_column_names(query: &str) -> Option<Vec<String>> {
+    let q = query.trim();
+    // Normalize whitespace: replace all whitespace sequences with single space
+    // This handles newlines and tabs that SQLAlchemy may include in formatted SQL
+    let normalized: String = q
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let upper = normalized.to_uppercase();
+    if !upper.starts_with("SELECT") {
+        return None;
+    }
+    // Find " FROM " (with spaces) to avoid matching inside string literals or subqueries
+    let from_pos = upper.find(" FROM ")?;
+    let select_list = normalized[6..from_pos].trim(); // after "SELECT"
+    if select_list.is_empty() || select_list == "*" {
+        return None;
+    }
+    let mut names = Vec::new();
+    for part in select_list.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        // "table.col" or "t_xxx.id" -> use full identifier so SQLAlchemy keymap matches Column.
+        names.push(part.to_string());
+    }
+    if names.is_empty() {
+        return None;
+    }
+    Some(names)
+}
+
+/// Build a minimal cursor description when there are no rows (so SQLAlchemy still sees returns_rows=True).
+/// If query is a SELECT and column names can be parsed, use them so ORM keymap matches (e.g. session.get missing).
+/// Otherwise uses a single placeholder column.
+pub(crate) fn build_description_empty_result<'py>(
+    py: Python<'py>,
+    query: Option<&str>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let col_names: Vec<String> = if let Some(q) = query {
+        parse_select_column_names(q).unwrap_or_else(|| vec!["column_0".to_string()])
+    } else {
+        vec!["column_0".to_string()]
+    };
+    let mut col_tuples = Vec::with_capacity(col_names.len());
+    for name in &col_names {
+        let seven = PyTuple::new(
+            py,
+            [
+                PyString::new(py, name.as_str()).into(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+            ],
+        )?;
+        col_tuples.push(seven.into_any());
+    }
+    Ok(PyTuple::new(py, col_tuples)?.into_any())
+}
+
+/// Build a cursor description tuple from a SQLite row (aiosqlite/sqlite3 compatible).
+/// Returns a Python tuple of 7-tuples: (name, type_code, display_size, internal_size, precision, scale, null_ok).
+pub(crate) fn build_description_tuple<'py>(
+    py: Python<'py>,
+    row: &sqlx::sqlite::SqliteRow,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let n = row_column_count(row);
+    let mut col_tuples = Vec::with_capacity(n);
+    for i in 0..n {
+        let name = row.columns()[i].name().to_string();
+        let type_name = row.columns()[i].type_info().name().to_ascii_uppercase();
+        let seven = PyTuple::new(
+            py,
+            [
+                PyString::new(py, &name).into(),
+                PyString::new(py, &type_name).into(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+                py.None(),
+            ],
+        )?;
+        col_tuples.push(seven.into_any());
+    }
+    PyTuple::new(py, col_tuples)
 }

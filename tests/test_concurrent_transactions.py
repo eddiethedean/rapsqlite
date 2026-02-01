@@ -5,19 +5,21 @@ are properly serialized. In parallel test execution, only one transaction may
 succeed at a time, which is expected behavior.
 """
 
+import asyncio
 import pytest
 import rapsqlite
-import asyncio
+from rapsqlite import Error, OperationalError
 
 # Mark tests that verify concurrent behavior (may have different results in parallel)
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.concurrency]
 
 
 @pytest.mark.asyncio
-async def test_concurrent_begin_attempts(test_db):
+async def test_concurrent_begin_attempts(test_db, unique_table_prefix):
     """Test that concurrent begin() calls are properly serialized."""
+    tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
-        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        await db.execute(f"CREATE TABLE {tbl} (id INTEGER PRIMARY KEY)")
 
         started = asyncio.Event()
         release = asyncio.Event()
@@ -27,7 +29,7 @@ async def test_concurrent_begin_attempts(test_db):
             await db.begin()
             started.set()
             await release.wait()
-            await db.execute("INSERT INTO t DEFAULT VALUES")
+            await db.execute(f"INSERT INTO {tbl} DEFAULT VALUES")
             await db.commit()
 
         async def attempt_begin_while_active() -> bool:
@@ -37,12 +39,16 @@ async def test_concurrent_begin_attempts(test_db):
                 # If this succeeds, we must clean up to avoid leaking an open tx.
                 await db.rollback()
                 return True
-            except rapsqlite.Error as e:
+            except (Error, OperationalError) as e:
                 # Depending on timing/implementation, we may see:
-                # - rapsqlite.OperationalError: "already in progress"
+                # - OperationalError: "already in progress"
                 # - Database error: "cannot start a transaction within a transaction"
+                # OperationalError may not subclass Error on older builds.
                 msg = str(e).lower()
-                if "already in progress" in msg or "cannot start a transaction within a transaction" in msg:
+                if (
+                    "already in progress" in msg
+                    or "cannot start a transaction within a transaction" in msg
+                ):
                     return False
                 raise
 
@@ -55,21 +61,26 @@ async def test_concurrent_begin_attempts(test_db):
         await holder
 
         unexpected = [x for x in attempts if isinstance(x, Exception)]
-        assert not unexpected, f"Unexpected exceptions from begin attempts: {unexpected!r}"
+        assert not unexpected, (
+            f"Unexpected exceptions from begin attempts: {unexpected!r}"
+        )
 
         # All concurrent attempts should be rejected while the holder tx is active.
-        assert all(x is False for x in attempts), f"Expected all attempts to fail, got: {attempts!r}"
+        assert all(x is False for x in attempts), (
+            f"Expected all attempts to fail, got: {attempts!r}"
+        )
 
         # Verify the holder transaction committed exactly one insert.
-        rows = await db.fetch_all("SELECT COUNT(*) FROM t")
+        rows = await db.fetch_all(f"SELECT COUNT(*) FROM {tbl}")
         assert rows[0][0] == 1
 
 
 @pytest.mark.asyncio
-async def test_concurrent_transaction_context_managers(test_db):
+async def test_concurrent_transaction_context_managers(test_db, unique_table_prefix):
     """Test that concurrent transaction context managers are properly serialized."""
+    tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
-        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        await db.execute(f"CREATE TABLE {tbl} (id INTEGER PRIMARY KEY)")
 
         started = asyncio.Event()
         release = asyncio.Event()
@@ -78,7 +89,7 @@ async def test_concurrent_transaction_context_managers(test_db):
             async with db.transaction():
                 started.set()
                 await release.wait()
-                await db.execute("INSERT INTO t DEFAULT VALUES")
+                await db.execute(f"INSERT INTO {tbl} DEFAULT VALUES")
 
         async def attempt_transaction_while_active() -> bool:
             await started.wait()
@@ -86,7 +97,7 @@ async def test_concurrent_transaction_context_managers(test_db):
                 async with db.transaction():
                     # If this succeeds, insert is not expected; ensure we exit cleanly.
                     return True
-            except rapsqlite.Error as e:
+            except (Error, OperationalError) as e:
                 msg = str(e).lower()
                 if (
                     "already in progress" in msg
@@ -104,22 +115,27 @@ async def test_concurrent_transaction_context_managers(test_db):
         await holder
 
         unexpected = [x for x in attempts if isinstance(x, Exception)]
-        assert not unexpected, f"Unexpected exceptions from transaction attempts: {unexpected!r}"
-        assert all(x is False for x in attempts), f"Expected all attempts to fail, got: {attempts!r}"
+        assert not unexpected, (
+            f"Unexpected exceptions from transaction attempts: {unexpected!r}"
+        )
+        assert all(x is False for x in attempts), (
+            f"Expected all attempts to fail, got: {attempts!r}"
+        )
 
         # Verify the holder transaction committed exactly one insert.
-        rows = await db.fetch_all("SELECT COUNT(*) FROM t")
+        rows = await db.fetch_all(f"SELECT COUNT(*) FROM {tbl}")
         assert rows[0][0] == 1
 
 
 @pytest.mark.asyncio
-async def test_begin_while_transaction_active(test_db):
+async def test_begin_while_transaction_active(test_db, unique_table_prefix):
     """Test that begin() fails if transaction is already active."""
+    tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
-        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        await db.execute(f"CREATE TABLE {tbl} (id INTEGER PRIMARY KEY)")
 
         await db.begin()
-        await db.execute("INSERT INTO t DEFAULT VALUES")
+        await db.execute(f"INSERT INTO {tbl} DEFAULT VALUES")
 
         # Attempting to begin again should fail
         with pytest.raises(rapsqlite.OperationalError, match="already in progress"):
@@ -129,10 +145,11 @@ async def test_begin_while_transaction_active(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transaction_context_while_begin_active(test_db):
+async def test_transaction_context_while_begin_active(test_db, unique_table_prefix):
     """Test that transaction context manager fails if begin() is active."""
+    tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
-        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        await db.execute(f"CREATE TABLE {tbl} (id INTEGER PRIMARY KEY)")
 
         await db.begin()
 
@@ -145,52 +162,56 @@ async def test_transaction_context_while_begin_active(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transaction_state_consistency(test_db):
+async def test_transaction_state_consistency(test_db, unique_table_prefix):
     """Test that transaction state remains consistent under concurrent access."""
+    tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
-        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        await db.execute(f"CREATE TABLE {tbl} (id INTEGER PRIMARY KEY)")
 
         # Start a transaction
         await db.begin()
 
         # Verify we're in a transaction
-        in_tx = await db.in_transaction()
+        in_tx = db.in_transaction  # sync property
         assert in_tx is True
 
         # Try concurrent operations - they should use the transaction connection
         async def insert_value(val):
-            await db.execute("INSERT INTO t (id) VALUES (?)", [val])
+            await db.execute(f"INSERT INTO {tbl} (id) VALUES (?)", [val])
 
         # These should all use the same transaction connection
         await asyncio.gather(*[insert_value(i) for i in range(5)])
 
         # Verify all inserts are in the transaction
-        in_tx = await db.in_transaction()
+        in_tx = db.in_transaction  # sync property
         assert in_tx is True
 
         await db.commit()
 
         # Verify all inserts were committed
-        rows = await db.fetch_all("SELECT COUNT(*) FROM t")
+        rows = await db.fetch_all(f"SELECT COUNT(*) FROM {tbl}")
         assert rows[0][0] == 5
 
 
 @pytest.mark.asyncio
-async def test_transaction_rollback_on_error_preserves_state(test_db):
+async def test_transaction_rollback_on_error_preserves_state(
+    test_db, unique_table_prefix
+):
     """Test that transaction state is properly reset after rollback."""
+    tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
-        await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        await db.execute(f"CREATE TABLE {tbl} (id INTEGER PRIMARY KEY)")
 
         # Start and rollback a transaction
         await db.begin()
-        await db.execute("INSERT INTO t DEFAULT VALUES")
+        await db.execute(f"INSERT INTO {tbl} DEFAULT VALUES")
         await db.rollback()
 
         # State should be reset - we should be able to start a new transaction
         await db.begin()
-        await db.execute("INSERT INTO t DEFAULT VALUES")
+        await db.execute(f"INSERT INTO {tbl} DEFAULT VALUES")
         await db.commit()
 
         # Verify only the second insert is present
-        rows = await db.fetch_all("SELECT COUNT(*) FROM t")
+        rows = await db.fetch_all(f"SELECT COUNT(*) FROM {tbl}")
         assert rows[0][0] == 1

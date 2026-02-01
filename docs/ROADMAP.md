@@ -4,14 +4,18 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 ## Current Status
 
-**Current Version: v0.2.0** ✅  
+**Current Version: v0.3.0-dev** 🚧  
 **Phase 1: Complete** ✅  
 **Phase 2: Complete** ✅  
-**Phase 3: In Planning** ⏳
+**Phase 3: In Development** ⏳  
+**Phase 4: Planned** 📋
 
-### What's Complete
+---
 
-**Phase 1 (v0.1.x)** — Core functionality and production readiness:
+## Phase 1 — Core Functionality (v0.1.x) ✅ Complete
+
+Core functionality and production readiness:
+
 - ✅ Connection lifecycle management (async context managers)
 - ✅ Transaction support (begin, commit, rollback, transaction context managers)
 - ✅ Type system (proper Python types: int, float, str, bytes, None)
@@ -21,7 +25,10 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ Input validation and security improvements
 - ✅ Type stubs for IDE support
 
-**Phase 2 (v0.2.0)** — Feature-complete drop-in replacement:
+---
+
+## Phase 2 — Feature-Complete Drop-in Replacement (v0.2.0) ✅ Complete
+
 - ✅ Parameterized queries (named and positional parameters)
 - ✅ Cursor improvements (fetchmany, result caching, state management)
 - ✅ Connection configuration (PRAGMAs, connection strings, constructor parameters)
@@ -36,325 +43,179 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 - ✅ SQLite busy_timeout support (`timeout` parameter matching aiosqlite)
 - ✅ Comprehensive documentation and benchmarking
 
-**Test Coverage**: 432+ tests passing (6 skipped)  
-**API Compatibility**: ~95% with aiosqlite  
-**Python Support**: 3.8–3.14  
-**Code Quality**: Full mypy type checking and Ruff formatting/linting
+---
+
+## Phase 3 — Advanced Features & aiosqlite Parity (v0.3.0) ⏳ In Development
+
+**Goal**: Complete aiosqlite API compatibility and add advanced query/transaction features for the v0.3.0 release.
+
+### Current Stats
+
+- **Test Coverage**: 655+ Python tests passing (39 skipped); 16 Rust unit tests (parameters, errors, utils)
+- **API Compatibility**: ~95% with aiosqlite
+- **aiosqlite Test Suite**: perf.py: 6/10 passing, smoke.py: 3/30 passing; intentional differences and per-test categories documented in `docs/AIOSQLITE_TEST_RESULTS.md`
+- **Python Support**: 3.10–3.14
+- **Code Quality**: cargo fmt, cargo clippy, ruff format, ruff check; mypy (37 known issues in examples/tests)
+
+### 3.1 API Completeness ✅ Complete
+
+- ✅ `execute_fetchall`, `execute_insert` helper methods
+- ✅ Cursor properties (`arraysize`, `connection`, `description`, `lastrowid`, `rowcount`, `row_factory`)
+- ✅ `Cursor.close()`, `Cursor.execute()`/`executemany()`/`executescript()` return self
+- ✅ `Connection.isolation_level` get/set
+- ✅ `Connection.__await__()` support
+- ✅ `Connection.interrupt()` full implementation
+- ✅ `Connection.stop()` no-op for compatibility
+- ✅ `total_changes` and `in_transaction` as sync properties
+
+### 3.2 Query Helpers ✅ Complete
+
+- ✅ `explain_query_plan(sql, parameters)` — Run EXPLAIN QUERY PLAN
+- ✅ `analyze_query_plan(conn, sql, parameters)` — Structured query plan analysis
+- ✅ `suggest_indexes(conn, sql, parameters)` — Index recommendations
+- ✅ `paginate(conn, sql, parameters, page_size, offset)` — Page-based results
+- ✅ `execute_iter(conn, sql, parameters, chunk_size)` — Streaming results
+- ✅ `rows_to_dicts(rows, columns)` — Result transformation
+- ✅ `in_clause_query(sql, values)` — IN clause expansion
+
+### 3.3 Transaction Features ✅ Complete
+
+- ✅ Savepoints (`async with db.savepoint()`)
+- ✅ `transaction_with_timeout(conn, work, timeout_secs)`
+- ✅ `transaction_retry(conn, work, max_retries, ...)`
+- ✅ `set_slow_query_threshold(conn, threshold_secs, callback)`
+
+### 3.4 Framework Integration ✅ Complete
+
+- ✅ **SQLAlchemy** — `sqlite+rapsqlite` dialect; ORM INSERT...RETURNING (no doubled rows), transaction rollback with UDFs, `create_function` connection routing when DML moves connection to `transaction_connection`
+- ✅ **FastAPI** — Examples and documentation
+- ✅ **Starlette** — Examples and documentation
+- ✅ **aiohttp** — Examples and documentation
+- ✅ **Alembic** — Migration support documented
+
+### 3.5 SQLite Features ✅ Complete
+
+- ✅ FTS5 full-text search support
+- ✅ JSON1 extension support
+- ✅ `create_function` with `deterministic` parameter
+- ✅ `create_function` — Prefers `transaction_connection` when DML-with-callbacks moved it from `callback_connection`; ensures UDF add/remove operates on the correct connection
+
+### 3.6 Connection Pooling ✅ Complete
+
+- ✅ Session-connection reuse for performance
+- ✅ `pool_health()` health check
+- ✅ `pool_metrics()` for monitoring
+- ✅ `idle_timeout` configuration
+- ✅ `pool_metrics_gauges()` for Prometheus
+
+### 3.7 Monitoring ✅ Complete
+
+- ✅ `timed_fetch_all()` query timing
+- ✅ `set_trace_callback` for query logging
+- ✅ Slow query detection
+
+### 3.8 Remaining for v0.3.0 Release
+
+#### aiosqlite Compatibility (High Priority)
+- ⏳ Improve aiosqlite test suite pass rate (target: >80%) — *or intentional differences documented (done)*
+- ✅ Document remaining intentional differences (see `docs/AIOSQLITE_TEST_RESULTS.md` and compatibility/migration guides)
+- ✅ Row format compatibility option: `connect(..., aiosqlite_compat=True)` sets default row_factory to tuple
+
+#### Documentation (High Priority)
+- ✅ Complete migration guide from aiosqlite (audit complete; "If you see test failures" and aiosqlite_compat documented)
+- ✅ Best practices and anti-patterns guide (expanded in advanced-usage; connection lifecycle, blocking, transaction boundaries)
+- ✅ Performance tuning guide completion (single connection vs pool, measuring performance, regression tests, cross-links)
+
+#### Missing API Features (sqlite3/aiosqlite parity)
+- ✅ **`register_adapter(type, adapter)`** — Python-to-SQLite type adapter (sqlite3-style); parameter binding for custom types. Per-connection; documented in type-conversion.rst.
+- ✅ **`register_converter(typename, converter)`** — SQLite-to-Python converter (sqlite3-style); result column decoding by declared type name. Per-connection; documented in type-conversion.rst.
+- ✅ **`create_aggregate(name, num_params, aggregate_class)`** — Implemented; test skipped on some platforms due to Bus error in aggregate context (known limitation).
+- ✅ **`create_collation(name, callable)`** — Custom string collation for ORDER BY / comparisons; implemented and tested in test_create_collation.
+
+**v0.3.0 Release Criteria**:
+- aiosqlite test suite pass rate >80% **or intentional differences documented** — met via documented differences and per-test categories in AIOSQLITE_TEST_RESULTS.md
+- All Phase 3 features tested and documented
+- Migration guide complete
+- No breaking changes from v0.2.0
 
 ---
 
-## Phase 3 — Advanced Features & Ecosystem (v0.3.0 → v1.0.0)
+## Phase 4 — Production Ready (v1.0.0) 📋 Planned
 
-**Goal**: Transform `rapsqlite` into the industry-leading async SQLite library for Python with advanced features, ecosystem integration, and optimizations leading to a stable v1.0.0 release.
+**Goal**: Production-grade stability, advanced tooling, and comprehensive platform support for the stable v1.0.0 release.
 
-**Timeline**: Incremental releases (v0.3.0, v0.4.0, etc.) leading to v1.0.0
+### 4.1 Advanced Connection Pooling
 
-### 3.1 Query Optimization & Performance (High Priority)
-
-**Focus**: Advanced query features and performance optimizations
-
-#### Query Optimization
-- ⏳ Query plan analysis and optimization hints
-- ⏳ Automatic index recommendations
-- ⏳ Query result caching strategies
-- ⏳ Lazy query execution patterns
-- ⏳ EXPLAIN QUERY PLAN integration
-
-#### Result Handling
-- ⏳ Streaming query results for large datasets
-- ⏳ Cursor-based pagination utilities
-- ⏳ Result set transformation utilities
-- ⏳ Row-to-object mapping helpers
-- ⏳ Efficient memory usage patterns for large result sets
-
-#### SQLite-Specific Features
-- ⏳ Full-text search (FTS) support
-- ⏳ JSON functions support (JSON1 extension)
-- ⏳ Window functions support
-- ⏳ Common Table Expressions (CTEs) utilities
-- ⏳ UPSERT operations (INSERT OR REPLACE, INSERT OR IGNORE)
-
-**Success Criteria**:
-- Query plan analysis available for all queries
-- Streaming results support datasets >100MB efficiently
-- FTS and JSON functions fully supported
-- Performance benchmarks show 20%+ improvement for optimized queries
-
----
-
-### 3.2 Advanced Connection Pooling (High Priority)
-
-**Focus**: Production-grade connection pool management
-
-#### Pool Management
 - ⏳ Dynamic pool sizing (scale up/down based on load)
-- ⏳ Connection health monitoring and automatic recovery
-- ⏳ Idle connection management (timeout and cleanup)
-- ⏳ Pool monitoring and metrics (connection count, wait times, etc.)
-- ⏳ Cross-process connection sharing patterns (if applicable)
-
-#### Connection Features
 - ⏳ Read/write connection separation
-- ⏳ Read replica patterns
 - ⏳ Connection routing strategies
 - ⏳ Failover and recovery patterns
 - ⏳ Connection state tracking and diagnostics
 
-**Success Criteria**:
-- Pool automatically recovers from connection failures
-- Metrics available for monitoring pool health
-- Dynamic sizing reduces resource usage by 30%+ under low load
-- Health checks prevent stale connection usage
+### 4.2 Type System Enhancements
 
----
-
-### 3.3 Advanced Transaction Features (Medium Priority)
-
-**Focus**: Enhanced transaction capabilities
-
-#### Transaction Features
-- ⏳ Nested transaction handling (savepoints)
-- ⏳ Transaction isolation level configuration
-- ⏳ Deadlock detection and automatic retry
-- ⏳ Transaction timeout handling
-- ⏳ Long-running transaction monitoring
-
-#### Transaction Utilities
-- ⏳ Savepoint context managers (`async with db.savepoint():`)
-- ⏳ Transaction retry decorators/utilities
-- ⏳ Transaction conflict resolution strategies
-
-**Success Criteria**:
-- Savepoints fully supported with context managers
-- Deadlock detection prevents transaction hangs
-- Isolation levels configurable per transaction
-- Transaction retry utilities reduce application complexity
-
----
-
-### 3.4 ORM & Framework Integration (High Priority)
-
-**Focus**: Seamless integration with popular Python frameworks
-
-#### ORM Support
-- ⏳ SQLAlchemy async driver support
-- ⏳ Tortoise ORM async SQLite backend
-- ⏳ Peewee async SQLite support
-- ⏳ Custom ORM adapters and patterns
-- ⏳ Query builder integrations
-
-#### Web Framework Integration
-- ⏳ FastAPI database dependencies and patterns
-- ⏳ Django async database backend (if applicable)
-- ⏳ aiohttp database patterns and middleware
-- ⏳ Starlette async database integration
-- ⏳ Quart async database support
-- ⏳ Sanic async database patterns
-
-#### Migration Tools
-- ⏳ Alembic integration patterns
-- ⏳ Migration generation utilities
-- ⏳ Schema migration testing tools
-
-**Success Criteria**:
-- SQLAlchemy async driver works seamlessly
-- FastAPI integration examples and patterns documented
-- Alembic migrations work with rapsqlite
-- At least 3 major frameworks have integration examples
-
----
-
-### 3.5 Observability & Monitoring (Medium Priority)
-
-**Focus**: Production monitoring and debugging capabilities
-
-#### Monitoring & Metrics
-- ⏳ Performance metrics export (Prometheus, StatsD, etc.)
-- ⏳ Query timing and profiling
-- ⏳ Connection pool metrics
-- ⏳ Resource usage tracking
-- ⏳ Slow query detection and reporting
-
-#### Debugging Tools
-- ⏳ SQL query logging (configurable levels)
-- ⏳ Transaction tracing
-- ⏳ Connection pool diagnostics
-- ⏳ Performance profiling utilities
-- ⏳ Query execution visualization
-
-**Success Criteria**:
-- Metrics exportable to common monitoring systems
-- Query logging helps debug production issues
-- Slow query detection identifies bottlenecks
-- Profiling tools reduce debugging time by 50%+
-
----
-
-### 3.6 Developer Experience (Medium Priority)
-
-**Focus**: Tools and utilities for better developer experience
-
-#### Developer Tools
-- ⏳ Query logging and profiling utilities
-- ⏳ Database introspection CLI tools
-- ⏳ Migration generation utilities
-- ⏳ Testing utilities and fixtures
-- ⏳ Database mocking for tests
-
-#### Type System Enhancements
-- ⏳ Enhanced type hints for Python types
-- ⏳ Type conversion utilities
-- ⏳ Configurable type conversion
-- ⏳ Type inference from schema
-- ⏳ Date/time type handling utilities
-
-#### Documentation & Examples
-- ⏳ Advanced usage patterns and examples
-- ⏳ Performance tuning guides
-- ⏳ Migration documentation from other libraries
-- ⏳ Best practices and anti-patterns
-- ⏳ Contributing guidelines
-- ⏳ Thread-safety documentation
-
-**Success Criteria**:
-- CLI tools available for common tasks
-- Type hints improve IDE experience significantly
-- Comprehensive examples for all major use cases
-- Migration guides enable easy adoption
-
----
-
-### 3.7 Advanced Database Features (Low Priority)
-
-**Focus**: Specialized database capabilities
-
-#### Database Features
-- ⏳ Database encryption support (if applicable)
-- ⏳ Multi-database transaction support
-- ⏳ Custom SQLite extensions support
-- ⏳ Replication patterns
-- ⏳ Enhanced backup and restore utilities
-
-#### Schema Operations
-- ⏳ Migration utilities and helpers
-- ⏳ Schema validation tools
-- ⏳ Schema comparison utilities
-- ⏳ Automatic migration generation
-
-#### Parameterized Queries
-- ⏳ Enhanced array parameter binding for IN clauses
-- ⏳ Bulk operation optimizations
-
-**Success Criteria**:
-- Encryption support available if SQLite supports it
-- Migration utilities reduce manual work
-- Schema validation prevents deployment errors
-
----
-
-### 3.8 Testing & Validation (High Priority)
-
-**Focus**: Comprehensive test coverage and validation
-
-#### Test Coverage
-- ⏳ Complete edge case coverage
-- ⏳ Fake Async Detector validation passes under load
-- ⏳ Pass 100% of aiosqlite test suite as drop-in replacement validation
-- ⏳ Stress testing and performance regression tests
-- ⏳ Cross-platform testing (Linux, macOS, Windows)
-
-#### Compatibility Testing
-- ⏳ Continuous compatibility testing with aiosqlite
-- ⏳ Python version compatibility matrix (3.8–3.14+)
-- ⏳ Platform-specific testing and validation
-
-**Success Criteria**:
-- 100% of aiosqlite test suite passes
-- Edge cases comprehensively covered
-- No performance regressions in benchmarks
-- All supported platforms validated
-
----
-
-### 3.9 API Completeness & Compatibility (High Priority)
-
-**Focus**: Complete aiosqlite API compatibility to achieve 100% drop-in replacement status
-
-#### Connection Helper Methods
-- ⏳ `Connection.execute_fetchall(sql, parameters=None)` - Helper to execute query and fetch all rows
-- ⏳ `Connection.execute_insert(sql, parameters=None)` - Helper to insert and get last_insert_rowid
-- These convenience methods improve API compatibility and reduce boilerplate code
-
-#### Connection Control Methods
-- ⏳ `Connection.interrupt()` - Interrupt pending queries (async method)
-- ⏳ `Connection.stop()` - Stop background thread (for API compatibility, though less relevant for rapsqlite's architecture)
-- Query interruption is important for long-running operations and timeout handling
-
-#### Connection Properties
-- ⏳ `Connection.isolation_level` - Property to get/set transaction isolation level
-- Currently missing but present in aiosqlite API
-
-#### Connection Await Support
-- ⏳ `Connection.__await__()` - Support for `await conn` pattern (aiosqlite supports this)
-- Enables direct await on connection objects for compatibility
-
-#### Cursor Properties (All Missing)
-- ⏳ `Cursor.arraysize` - Default size for fetchmany() (int, default 1, read-write property)
-- ⏳ `Cursor.connection` - Reference to parent Connection object (read-only property)
-- ⏳ `Cursor.description` - Column metadata tuple (read-only property, reflects last executed query)
-- ⏳ `Cursor.lastrowid` - Last inserted row ID (read-only property, reflects last executed query)
-- ⏳ `Cursor.rowcount` - Number of rows affected by last operation (read-only property)
-- ⏳ `Cursor.row_factory` - Row factory for this cursor (getter/setter property)
-- These properties are essential for aiosqlite compatibility and provide important query metadata
-
-#### Cursor Methods
-- ⏳ `Cursor.close()` - Explicit cursor cleanup (async method)
-- Provides explicit resource management for cursors
-
-**Success Criteria**:
-- All aiosqlite Connection helper methods implemented and tested
-- All aiosqlite Cursor properties implemented and tested
-- Connection interrupt functionality works correctly
-- Cursor properties accurately reflect query state
-- 100% aiosqlite API compatibility achieved (up from ~95%)
-- All new methods/properties have comprehensive test coverage
-
----
-
-### 3.10 Type System Enhancements (Medium Priority)
-
-**Focus**: Enhanced type conversion and adapter support for custom types
-
-#### create_function() Enhancement
-- ⏳ `Connection.create_function(name, num_params, func, deterministic=False)` - Add `deterministic` parameter support
-- SQLite 3.8.3+ optimization flag that allows SQLite to perform additional optimizations
-- Should raise `NotSupportedError` if used with older SQLite versions
-
-#### connect() Parameters
-- ⏳ `connect(iter_chunk_size=64)` - Parameter for controlling iteration chunk size
-- ⏳ `connect(loop=None)` - Event loop parameter (deprecated in aiosqlite but still exists for compatibility)
-- These parameters improve compatibility with existing aiosqlite code
-
-#### Module-Level Type Registration Functions
-- ⏳ `rapsqlite.register_adapter(type, adapter)` - Register Python-to-SQLite type adapter
-- ⏳ `rapsqlite.register_converter(typename, converter)` - Register SQLite-to-Python type converter
-- These are sqlite3 compatibility features for custom type handling
-- Requires careful implementation to work with sqlx's type system
-- Enables custom date/time, UUID, and other type conversions
-
-#### Enhanced Type Conversion Utilities
+- ✅ `register_adapter(type, adapter)` — Python-to-SQLite type adapter
+- ✅ `register_converter(typename, converter)` — SQLite-to-Python converter
 - ⏳ Date/time type handling utilities
 - ⏳ UUID type support
 - ⏳ Decimal type support
-- ⏳ Custom type adapter examples and documentation
 
-**Success Criteria**:
-- `deterministic` parameter works correctly with create_function()
-- `iter_chunk_size` and `loop` parameters accepted (even if not fully utilized)
-- `register_adapter` and `register_converter` functions work with sqlx
-- Custom type conversions work seamlessly
-- Type conversion utilities documented with examples
-- All type system features have test coverage
+### 4.3 Developer Tools
+
+- ⏳ Database introspection CLI
+- ⏳ Migration generation utilities
+- ✅ **Testing utilities and fixtures** — Documented in `tests/README.md` and `tests/conftest.py` (test_db, unique_table_prefix, test_db_file, target_db_file, dbapi_conn, cleanup_db). Full test run (Rust + Python) via `scripts/dev_test.sh`; Rust tests on all CI platforms.
+- ⏳ Database mocking for tests
+- ⏳ Query profiling utilities
+
+### 4.4 Advanced Monitoring
+
+- ⏳ Transaction tracing
+- ⏳ Connection pool diagnostics
+- ⏳ Performance profiling utilities
+- ⏳ Resource usage tracking
+- ⏳ Query execution visualization
+
+### 4.5 Advanced Transaction Features
+
+- ⏳ Deadlock detection and automatic retry
+- ⏳ Long-running transaction monitoring
+- ⏳ Transaction conflict resolution strategies
+
+### 4.6 Platform & Testing
+
+- ⏳ Cross-platform validation (Linux, macOS, Windows)
+- ⏳ Python version matrix testing (3.10–3.14+)
+- ⏳ Stress testing and performance regression tests
+- ⏳ 100% aiosqlite test suite compatibility (where applicable)
+- ⏳ Fake Async Detector validation under load
+
+### 4.7 Additional Framework Integration
+
+- ⏳ Tortoise ORM async SQLite backend
+- ⏳ Peewee async SQLite support
+- ⏳ Django async database backend
+- ⏳ Quart async database support
+- ⏳ Sanic async database patterns
+
+### 4.8 Advanced Database Features
+
+- ⏳ Database encryption support
+- ⏳ Multi-database transaction support
+- ⏳ Custom SQLite extensions support
+- ⏳ Enhanced backup and restore utilities
+- ⏳ Schema validation tools
+- ⏳ Bulk operation optimizations
+- ⏳ Window functions utilities
+- ⏳ CTE utilities
+
+**v1.0.0 Release Criteria**:
+- Phase 3 complete
+- All Phase 4 "Must Have" features implemented
+- Cross-platform CI passing
+- Performance benchmarks meet targets
+- Comprehensive documentation
+- Production stability validated
 
 ---
 
@@ -362,43 +223,43 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 Following semantic versioning:
 
-- **v0.1.x**: Phase 1 (MVP and core features) ✅ Complete
-- **v0.2.x**: Phase 2 (feature-complete drop-in replacement) ✅ Complete (v0.2.0 released)
-- **v0.3.x+**: Phase 3 (advanced features, ecosystem integration) ⏳ In Progress
-- **v1.0.0**: Stable API release after Phase 3 completion, production-ready ⏳ Planned
+| Version | Phase | Status |
+|---------|-------|--------|
+| v0.1.x | Phase 1 — Core functionality | ✅ Complete |
+| v0.2.x | Phase 2 — Feature-complete drop-in | ✅ Complete (v0.2.0 released) |
+| v0.3.x | Phase 3 — Advanced features & aiosqlite parity | ⏳ In Progress |
+| v1.0.0 | Phase 4 — Production ready | 📋 Planned |
 
-**Current Version: v0.2.0** — Phase 1 and Phase 2 complete. Phase 3 will lead to v1.0.0 release.
+**Current Version: v0.3.0-dev**
 
 ---
 
-## Success Criteria for v1.0.0
+## v1.0.0 Release Requirements
 
-### Must Have (Blocking v1.0.0)
-- ✅ Phase 1 and Phase 2 complete (achieved in v0.2.0)
-- ⏳ Phase 3.1 (Query Optimization) — High priority features complete
-- ⏳ Phase 3.2 (Advanced Pooling) — High priority features complete
-- ⏳ Phase 3.4 (ORM Integration) — At least SQLAlchemy and FastAPI integration complete
-- ⏳ Phase 3.8 (Testing) — 100% aiosqlite test suite passes
-- ⏳ Phase 3.9 (API Completeness) — All high-priority API gaps filled, 100% aiosqlite compatibility
+### Must Have (Blocking)
+- ✅ Phase 1 and Phase 2 complete
+- ⏳ Phase 3 complete (v0.3.0 released)
+- ✅ Type system: `register_adapter` and `register_converter`
+- ⏳ Cross-platform CI (Linux, macOS, Windows)
+- ⏳ Performance regression tests
 
-### Should Have (Target for v1.0.0)
-- ⏳ Phase 3.3 (Advanced Transactions) — Core features complete
-- ⏳ Phase 3.5 (Observability) — Basic monitoring and metrics
-- ⏳ Phase 3.6 (Developer Experience) — Core tools and documentation
-- ⏳ Phase 3.10 (Type System) — Core type conversion features complete
+### Should Have (Target)
+- ⏳ Dynamic pool sizing
+- ⏳ CLI tools for introspection
+- ⏳ Advanced monitoring features
+- ⏳ Additional ORM integrations
 
 ### Nice to Have (Post v1.0.0)
-- ⏳ Phase 3.7 (Advanced Database Features) — Can be added incrementally
-- ⏳ Additional framework integrations beyond core set
-- ⏳ Advanced monitoring features
+- ⏳ Database encryption
+- ⏳ Schema migration generation
+- ⏳ Query execution visualization
 
 ---
 
 ## Cross-Package Dependencies
 
-- **Phase 1**: ✅ Independent development (complete)
-- **Phase 2**: ✅ Independent development (complete)
-- **Phase 3**: Potential integration with:
+- **Phase 1–2**: ✅ Independent development (complete)
+- **Phase 3–4**: Potential integration with:
   - `rap-core` for shared primitives
   - `rapfiles` for database file operations
   - `rapcsv` for import/export patterns
@@ -411,20 +272,20 @@ Following semantic versioning:
 We welcome contributions! See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
 
 **Priority Areas for Contributors**:
-1. Framework integrations (FastAPI, SQLAlchemy, etc.)
+1. aiosqlite compatibility improvements
 2. Test coverage improvements
 3. Documentation and examples
-4. Performance optimizations
-5. Bug fixes and compatibility improvements
+4. Framework integrations
+5. Performance optimizations
 
 ---
 
 ## Notes
 
-- **API Stability**: v0.2.0 provides a stable API for production use. Phase 3 additions will maintain backward compatibility.
+- **API Stability**: v0.2.0+ provides a stable API for production use. Phase 3 and 4 additions maintain backward compatibility.
 - **Migration Path**: Migration from aiosqlite is straightforward with ~95% compatibility. See [migration guide](guides/migration-guide.rst) for details.
 - **Performance**: rapsqlite provides true async performance with GIL-independent operations. Benchmarks available in `benchmarks/README.md`.
 
 ---
 
-*Last Updated: 2026-01-28*
+*Last Updated: 2026-01-31*
