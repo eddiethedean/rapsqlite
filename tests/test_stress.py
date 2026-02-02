@@ -15,7 +15,8 @@ from rapsqlite import Connection, connect
 @pytest.mark.asyncio
 async def test_high_concurrency_operations(test_db):
     """Test high concurrency scenarios (100+ concurrent operations)."""
-    async with connect(test_db) as db:
+    # Use pool_size so shared pool has enough connections for 100 concurrent workers
+    async with connect(test_db, pool_size=110) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
 
     async def operation_worker(worker_id: int):

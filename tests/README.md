@@ -115,7 +115,7 @@ A default per-test timeout (90s) is set in `pyproject.toml`; tests marked `@pyte
 
 **CI** uses pytest-timeout, `--timeout 90`, and `--dist loadgroup` for stable parallel runs.
 
-Known **Tokio context** / unraisable-exception warnings when running with many workers (e.g. `-n 10`) come from background connection cleanup after the event loop or Tokio runtime is shutting down. These are filtered in `pyproject.toml` (`filterwarnings`) so CI logs stay readable; see CONTRIBUTING or this README for details.
+Known unraisable-exception warnings when running with many workers (e.g. `-n 10`) come from background connection cleanup during shutdown. These are filtered in `pyproject.toml` (`filterwarnings`) so CI logs stay readable; see CONTRIBUTING or this README for details.
 
 Tests use unique table names per test (via the `unique_table_prefix` fixture) so parallel runs avoid table-name collisions. Use this fixture for any new tests that create tables.
 

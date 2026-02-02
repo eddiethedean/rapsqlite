@@ -33,7 +33,7 @@ _slow_query_state: dict[int, tuple[float, Callable[[float, str], None] | None]] 
 
 
 def _connection_del(self: Any) -> None:
-    """Best-effort: schedule close() on the running event loop to avoid Tokio panic during GC."""
+    """Best-effort: schedule close() on the running event loop to avoid cleanup issues during GC."""
     _cleanup_conn_state(self)
     try:
         loop = asyncio.get_running_loop()
