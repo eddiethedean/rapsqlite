@@ -138,12 +138,9 @@ jobs:
           cd "$TEMP" || cd "$TMP"
           # Ensure coverage XML directory exists
           mkdir -p "$WORKSPACE"
-          # Windows: Try limited parallelization (2 workers) with fallback to sequential
-          # With WindowsSelectorEventLoopPolicy set in conftest.py, each spawned worker
-          # process will have the correct event loop policy. Windows uses spawn (not fork)
-          # which is better for asyncio. If parallel execution fails, fallback to sequential.
-          # Using limited workers (2) instead of auto to reduce risk of event loop conflicts
-          python -m pytest "$WORKSPACE/tests/" -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" -n 2 --timeout 90 --dist loadgroup || python -m pytest "$WORKSPACE/tests/" -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" --timeout 90
+          # Windows: run tests sequentially (no -n) to avoid xdist flakiness (worker
+          # timeouts, event loop issues) that can cause intermittent exit code 1.
+          python -m pytest "$WORKSPACE/tests/" -v "${M_OPT[@]}" --cov=rapsqlite --cov-report=term-missing --cov-report=xml:"$WORKSPACE/coverage.xml" --timeout 90
         else
           cd /tmp
           # Ensure coverage XML directory exists and is writable
