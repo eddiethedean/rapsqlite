@@ -19,7 +19,10 @@ jobs:
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Allow Python 3.14 to fail without failing CI (ecosystem/tooling still catching up)
+    continue-on-error: ${{ matrix.python-version == '3.14' }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
@@ -72,7 +75,7 @@ jobs:
 
     - name: Install test dependencies
       shell: bash
-      run: pip install pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout hypothesis
+      run: pip install pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout hypothesis alembic
 
     - name: Test package import
       shell: bash
