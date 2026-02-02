@@ -239,16 +239,22 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
 
-    - name: Install maturin and build
+    - name: Create venv and install maturin and build
       run: |
+        python -m venv .venv
+        source .venv/bin/activate
         pip install maturin
         maturin develop --release
 
     - name: Install aiosqlite for comparison
-      run: pip install aiosqlite
+      run: |
+        source .venv/bin/activate
+        pip install aiosqlite
 
     - name: Run aiosqlite test suite against rapsqlite
-      run: python scripts/run_aiosqlite_tests.py
+      run: |
+        source .venv/bin/activate
+        python scripts/run_aiosqlite_tests.py
       continue-on-error: true
 
   build-wheels:
