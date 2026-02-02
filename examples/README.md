@@ -4,11 +4,21 @@ Optional examples for using rapsqlite.
 
 **Setup:** Install rapsqlite (`maturin develop` or `pip install -e .`). Run from project root.
 
+### Run all examples with real output
+
+```bash
+python scripts/verify_examples.py
+```
+
+Runs basic usage, connect(), transactions, cursors, concurrent operations, error handling, backup, schema operations, and init_hook — and prints the actual output from each.
+
 ### Basic async (no extra deps)
 
 ```bash
 python examples/async_basic.py
 ```
+
+**Output:** `rows: [[1, 'hello']]`
 
 ### FastAPI
 
