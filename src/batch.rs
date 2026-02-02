@@ -114,11 +114,12 @@ pub(crate) fn execute_many_raw_core(
                 SqliteParam::Text(s) => {
                     let bytes = s.as_bytes();
                     // SQLITE_STATIC: buffer valid until sqlite3_step() returns; no copy.
+                    // libsqlite3-sys bindings expect *const u8 for sqlite3_bind_text.
                     unsafe {
                         sqlite3_bind_text(
                             stmt,
                             idx,
-                            bytes.as_ptr() as *const i8,
+                            bytes.as_ptr(),
                             bytes.len() as c_int,
                             SQLITE_STATIC(),
                         )
