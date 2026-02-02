@@ -1,5 +1,7 @@
 # Tokio Panic Investigation
 
+**See also:** [tokio-panic-problem.md](tokio-panic-problem.md) for a user-facing problem statement, current status, and reproduction steps.
+
 ## Summary
 
 If a `Connection` is dropped without calling `close()` (e.g. abandoned or GC'd after a test timeout), Python's garbage collector can drop the Rust `Connection` and its sqlx pool/connection handles. sqlx's `PoolConnection::Drop` calls `crate::rt::spawn()`, which **requires a current Tokio runtime**. That runtime is only active while a Rust future is being polled (e.g. when Python awaits a rapsqlite method). During GC there is typically no Tokio context, so the spawn panics: **"this functionality requires a Tokio context"**.
@@ -46,13 +48,16 @@ impl<DB: Database> Drop for PoolConnection<DB> {
 
 ## Mitigation (Step 4)
 
-1. **Always close under Tokio (Option A)**  
+1. **PoolConnectionSlot (Rust fix)**  
+   All stored pool connections (`session_connection`, `transaction_connection`, `callback_connection`) are now held in a `PoolConnectionSlot` wrapper (in `src/pool.rs`). When a slot is dropped **outside** a Tokio runtime (e.g. during Python GC or interpreter shutdown), the wrapper forgets the inner `PoolConnection` instead of dropping it, so sqlx's `PoolConnection::Drop` (which calls `tokio::spawn`) never runs and the panic is avoided. Connections are still returned to the pool when `close()` is called under Tokio; only the "abandoned without close" path is affected (connection is leaked at process exit, which is acceptable).
+
+2. **Always close under Tokio (Option A)**  
    Use `async with connect(...) as conn:` or explicitly `await conn.close()` so that the pool is closed and connections are released from within async code, where Tokio is active. Do not rely on GC to clean up connections.
 
-2. **Document (Option D)**  
+3. **Document (Option D)**  
    Document that abandoning a connection without `close()` can cause a panic during GC. See the "Resource cleanup" section in the advanced usage guide.
 
-3. **Best-effort `__del__` (Option B)**  
+4. **Best-effort `__del__` (Option B)**  
    The Python wrapper provides a `__del__` that schedules `close()` on the running event loop if one exists. This is best-effort only (no guarantees about loop lifetime or finalizer order) but can prevent the panic when GC runs while the asyncio loop is still running (e.g. `repro_tokio_panic.py` no longer panics). Implemented in `rapsqlite/__init__.py`.
 
 ## References

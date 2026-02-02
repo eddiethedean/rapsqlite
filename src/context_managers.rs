@@ -5,9 +5,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
-use sqlx::pool::PoolConnection;
 use sqlx::Row;
-use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
@@ -25,6 +23,7 @@ use crate::conversion::{
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
     execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
+    PoolConnectionSlot, PoolSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{SqliteParam, TransactionState};
@@ -165,7 +164,7 @@ impl ExecuteContextManager {
 
                     let outcome = if in_transaction_after_hook {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         if use_fetch_for_returning {
@@ -198,7 +197,7 @@ impl ExecuteContextManager {
                         .await?;
 
                         let mut conn_guard = callback_connection.lock().await;
-                        let mut conn = conn_guard.take().ok_or_else(|| {
+                        let mut conn = conn_guard.0.take().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         let result =
@@ -210,7 +209,7 @@ impl ExecuteContextManager {
                         }
                         {
                             let mut g = transaction_connection.lock().await;
-                            *g = Some(conn);
+                            g.0 = Some(conn);
                         }
                         {
                             let mut ex_guard = explicit_transaction.lock().await;
@@ -236,7 +235,7 @@ impl ExecuteContextManager {
                         .await?;
 
                         let mut conn_guard = callback_connection.lock().await;
-                        let mut conn = conn_guard.take().ok_or_else(|| {
+                        let mut conn = conn_guard.0.take().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         sqlx::query("BEGIN")
@@ -249,10 +248,10 @@ impl ExecuteContextManager {
                         }
                         {
                             let mut g = transaction_connection.lock().await;
-                            *g = Some(conn);
+                            g.0 = Some(conn);
                         }
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         if use_fetch_for_returning {
@@ -283,7 +282,7 @@ impl ExecuteContextManager {
                         .await?;
 
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         if use_fetch_for_returning {
@@ -314,7 +313,7 @@ impl ExecuteContextManager {
                         )
                         .await?;
                         let mut conn_guard = session_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
                         if use_fetch_for_returning {
@@ -347,7 +346,7 @@ impl ExecuteContextManager {
                         )
                         .await?;
                         let mut conn_guard = session_connection.lock().await;
-                        let mut conn = conn_guard.take().ok_or_else(|| {
+                        let mut conn = conn_guard.0.take().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
                         let timeout_ms = {
@@ -394,7 +393,7 @@ impl ExecuteContextManager {
                         }
                         {
                             let mut g = transaction_connection.lock().await;
-                            *g = Some(conn);
+                            g.0 = Some(conn);
                         }
                         outcome
                     };
@@ -411,9 +410,9 @@ impl ExecuteContextManager {
                         }
                         if has_callbacks_flag {
                             let mut conn_guard = transaction_connection.lock().await;
-                            if let Some(conn) = conn_guard.take() {
+                            if let Some(conn) = conn_guard.0.take() {
                                 let mut cb_guard = callback_connection.lock().await;
-                                *cb_guard = Some(conn);
+                                cb_guard.0 = Some(conn);
                             }
                         }
                     }
@@ -547,7 +546,7 @@ impl ExecuteContextManager {
                     );
                     let rows = if in_transaction_after_hook {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
@@ -563,7 +562,7 @@ impl ExecuteContextManager {
                         )
                         .await?;
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
@@ -579,7 +578,7 @@ impl ExecuteContextManager {
                         )
                         .await?;
                         let mut conn_guard = session_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
@@ -667,14 +666,14 @@ impl ExecuteContextManager {
 #[pyclass]
 pub(crate) struct TransactionContextManager {
     pub(crate) path: String,
-    pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
-    pub(crate) session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) pool: Arc<Mutex<PoolSlot>>,
+    pub(crate) session_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
-    pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) connection: Py<Connection>,
     pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
     pub(crate) init_hook_called: Arc<StdMutex<bool>>,       // Track if init_hook has been executed
@@ -712,7 +711,7 @@ impl TransactionContextManager {
                     drop(ex_guard);
                     if implicit_only {
                         let mut conn_guard = transaction_connection.lock().await;
-                        if let Some(mut conn) = conn_guard.take() {
+                        if let Some(mut conn) = conn_guard.0.take() {
                             drop(trans_guard);
                             let _ = sqlx::query("COMMIT").execute(&mut *conn).await;
                             let timeout_ms = {
@@ -732,7 +731,7 @@ impl TransactionContextManager {
                                 .execute(&mut *conn)
                                 .await
                                 .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
-                            *conn_guard = Some(conn);
+                            conn_guard.0 = Some(conn);
                             let mut trans_guard = transaction_state.lock().await;
                             *trans_guard = TransactionState::Active;
                             drop(trans_guard);
@@ -810,7 +809,7 @@ impl TransactionContextManager {
                         .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
                     {
                         let mut conn_guard = transaction_connection.lock().await;
-                        *conn_guard = Some(conn);
+                        conn_guard.0 = Some(conn);
                     }
                     // Re-acquire lock to set transaction state and mark explicit
                     {
@@ -837,7 +836,7 @@ impl TransactionContextManager {
                     let mut ex_guard = explicit_transaction.lock().await;
                     *ex_guard = false;
                     let mut conn_guard = transaction_connection.lock().await;
-                    conn_guard.take();
+                    let _ = conn_guard.0.take();
                 }
 
                 result
@@ -866,7 +865,7 @@ impl TransactionContextManager {
                     return Ok(());
                 }
                 let mut conn_guard = transaction_connection.lock().await;
-                let mut conn = conn_guard.take().ok_or_else(|| {
+                let mut conn = conn_guard.0.take().ok_or_else(|| {
                     OperationalError::new_err("Transaction connection not available")
                 })?;
                 let query = if rollback { "ROLLBACK" } else { "COMMIT" };
@@ -891,7 +890,7 @@ impl TransactionContextManager {
 #[pyclass]
 pub(crate) struct SavepointContextManager {
     pub(crate) path: String,
-    pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
     pub(crate) name: String,
 }
@@ -915,7 +914,7 @@ impl SavepointContextManager {
                     }
                 }
                 let mut conn_guard = transaction_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Transaction connection not available")
                 })?;
                 let save_sql = format!("SAVEPOINT {name}");
@@ -943,7 +942,7 @@ impl SavepointContextManager {
             let name = slf.borrow(py).name.clone();
             let future = async move {
                 let mut conn_guard = transaction_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Transaction connection not available")
                 })?;
                 let sql = if rollback {

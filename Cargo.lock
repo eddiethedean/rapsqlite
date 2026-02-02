@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "rapsqlite"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "libsqlite3-sys",
  "pyo3",
