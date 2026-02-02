@@ -14,7 +14,6 @@ from typing import AsyncGenerator
 import pytest
 
 pytest.importorskip("sqlalchemy")
-import rapsqlite.sqlalchemy  # noqa: F401 -- register dialect before create_async_engine
 from sqlalchemy import MetaData, Table, Column, Integer, String, text
 from sqlalchemy import insert, select
 from sqlalchemy.sql.expression import false

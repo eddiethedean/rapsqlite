@@ -56,6 +56,8 @@ Core functionality and production readiness:
 - **aiosqlite Test Suite**: perf.py: 6/10 passing, smoke.py: 3/30 passing; intentional differences and per-test categories documented in `docs/AIOSQLITE_TEST_RESULTS.md`
 - **Python Support**: 3.10–3.14
 - **Code Quality**: cargo fmt, cargo clippy, ruff format, ruff check; mypy (37 known issues in examples/tests)
+- **CI (Windows)**: Pytest runs sequentially on Windows (`-n 0`); cancellation test robust across platforms; Python 3.14 `asyncio.WindowsSelectorEventLoopPolicy` deprecation warnings filtered in `pyproject.toml`.
+- **Packaging**: SQLAlchemy dialect auto-discovery via `[project.entry-points."sqlalchemy.dialects"]`; optional `rapsqlite.sqlalchemy` import in `__init__.py`; project-local `CARGO_HOME` in `scripts/dev_test.sh` for reproducible builds when system Cargo cache is unavailable.
 
 ### 3.1 API Completeness ✅ Complete
 
@@ -88,10 +90,10 @@ Core functionality and production readiness:
 ### 3.4 Framework Integration ✅ Complete
 
 - ✅ **SQLAlchemy** — `sqlite+rapsqlite` dialect; ORM INSERT...RETURNING (no doubled rows), transaction rollback with UDFs, `create_function` connection routing when DML moves connection to `transaction_connection`
+- ✅ **Alembic** — Full support for async migrations: `alembic init -t async`, `sqlite+rapsqlite:///...` URL; upgrade head, downgrade base, and stepwise revisions all work. Dialect `has_table()` override fixes version-table check with async adapters. Tests in `tests/test_alembic.py` (parametrized with aiosqlite first, then rapsqlite; multiple revisions, upgrade-to-revision, downgrade steps). Documented in README, docs index, and `docs/guides/compatibility.rst` (Alembic with rapsqlite).
 - ✅ **FastAPI** — Examples and documentation
 - ✅ **Starlette** — Examples and documentation
 - ✅ **aiohttp** — Examples and documentation
-- ✅ **Alembic** — Migration support documented
 
 ### 3.5 SQLite Features ✅ Complete
 

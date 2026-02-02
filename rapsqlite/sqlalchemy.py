@@ -129,6 +129,29 @@ class SQLiteDialect_rapsqlite(SQLiteDialect_pysqlite):
             return pool.AsyncAdaptedQueuePool
         return pool.StaticPool
 
+    def has_table(self, connection: Any, table_name: str, schema: str | None = None, **kw: Any) -> bool:
+        """Override to use sqlite_master SELECT instead of PRAGMA table_info.
+
+        The base implementation uses _get_table_pragma and skips fetchall() when
+        cursor._soft_closed is True, which can happen with async adapters and
+        causes has_table to return False for existing tables (e.g. alembic_version
+        during downgrade base). Using a direct SELECT avoids that and fixes
+        Alembic downgrade with sqlite+rapsqlite.
+        """
+        self._ensure_has_table_connection(connection)
+        if schema is not None and schema not in self.get_schema_names(connection, **kw):
+            return False
+        if schema is not None:
+            qschema = self.identifier_preparer.quote_identifier(schema)
+            stmt = f"SELECT 1 FROM {qschema}.sqlite_master WHERE type='table' AND name=?"
+        else:
+            stmt = (
+                "SELECT 1 FROM (SELECT name FROM sqlite_master UNION ALL SELECT name FROM sqlite_temp_master) WHERE name=?"
+            )
+        result = connection.exec_driver_sql(stmt, (table_name,))
+        row = result.fetchone()
+        return row is not None
+
     def on_connect(self) -> Any:
         """Register regexp and floor on each new connection (DBAPI create_function)."""
 

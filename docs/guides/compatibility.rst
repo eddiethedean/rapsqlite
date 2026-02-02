@@ -1,7 +1,9 @@
 aiosqlite Compatibility Analysis
 ================================
 
-This document analyzes compatibility between rapsqlite and aiosqlite based on running the aiosqlite test suite.
+This guide covers **aiosqlite** compatibility, **SQLAlchemy** async (``sqlite+rapsqlite`` dialect),
+and **Alembic** migrations. It analyzes compatibility between rapsqlite and aiosqlite based on
+running the aiosqlite test suite.
 
 Test Execution
 --------------
@@ -160,8 +162,13 @@ See ``docs/true_async_dbapi_spec.md`` for the full async DBAPI contract.
 
 Alembic with rapsqlite
 ~~~~~~~~~~~~~~~~~~~~~~
+.. _alembic-with-rapsqlite:
 
-You can run Alembic migrations using the ``sqlite+rapsqlite`` dialect.
+**Alembic** is fully supported with the ``sqlite+rapsqlite`` dialect. Use the async template
+(``alembic init -t async``) and point your engine URL to ``sqlite+rapsqlite:///...`` for true async
+migrations. Upgrade and downgrade (including ``downgrade base``) work correctly.
+
+You can run Alembic migrations using the ``sqlite+rapsqlite`` dialect as follows.
 
 1. Install dependencies: ``pip install rapsqlite sqlalchemy alembic``
    (or ``pip install rapsqlite[sqlalchemy] alembic`` to install rapsqlite and SQLAlchemy together).

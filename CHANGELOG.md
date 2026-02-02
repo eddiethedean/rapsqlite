@@ -49,6 +49,13 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 
 ## [0.3.0-dev] - Unreleased
 
+### Added - Alembic support and documentation (2026-02-01)
+
+- **Alembic** — Full support for async migrations with ``sqlite+rapsqlite``. Use ``alembic init -t async`` and ``sqlite+rapsqlite:///...``; upgrade and downgrade (including ``downgrade base``) work correctly. Dialect override for ``has_table()`` fixes Alembic version-table check with async adapters (base implementation skipped ``fetchall()`` when ``cursor._soft_closed``, causing false "table already exists" on downgrade).
+- **Alembic tests** — ``tests/test_alembic.py``: upgrade head, upgrade-then-downgrade base (parametrized with aiosqlite first, then rapsqlite), multiple revisions (three steps) with stepwise upgrade/downgrade, and upgrade-to-revision-then-head-then-downgrade. Alembic added to optional test dependencies (``pip install rapsqlite[test]``).
+- **README** — Top Features: SQLAlchemy 2.0+ and Alembic bullets; Quick Start subsection renamed to "SQLAlchemy & Alembic", Alembic install and link to Compatibility Guide (Alembic section).
+- **Docs** — ``docs/index.rst``: Features list includes SQLAlchemy 2.0+ and Alembic with link to compatibility guide. ``docs/guides/compatibility.rst``: intro highlights aiosqlite, SQLAlchemy, and Alembic; Alembic section has ref ``alembic-with-rapsqlite`` and short highlight (async template, upgrade/downgrade base).
+
 ### Fixed - Bug fixes (2026-02-01)
 
 - **Connection `__del__`** — Replaced invalid `asyncio.create_task()` (fails from sync context) with `asyncio.ensure_future()` for proper event-loop scheduling. Added `_cleanup_conn_state(self)` at start of `__del__` to prevent memory leak when connections are GC'd without `close()`.
@@ -64,6 +71,14 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 
 - **`tests/test_bug_fixes.py`** — New test module: `test_transaction_retry_max_retries_zero_raises`, `test_transaction_retry_max_retries_one_succeeds`, `test_connection_state_cleanup_on_close`, `test_concurrent_total_changes_in_transaction_access`, `test_connection_gc_cleanup_does_not_leak`.
 - **`src/errors.rs`** — New Rust tests: `test_sanitize_query_keyword_equals_at_end_no_panic`, `test_sanitize_query_token_equals_at_end_no_panic`.
+
+### Changed - CI, packaging, and docs (2026-02-01)
+
+- **CI (Windows)** — Pytest runs with `-n 0` on Windows to avoid flakiness; `test_cancellation_interrupts_and_connection_usable` accepts either `CancelledError` or normal completion so the test is robust across platforms; `filterwarnings` in `pyproject.toml` ignores `asyncio.WindowsSelectorEventLoopPolicy` deprecation warnings on Python 3.14 so pytest does not treat them as errors.
+- **SQLAlchemy dialect discovery** — Added `[project.entry-points."sqlalchemy.dialects"]` with `sqlite.rapsqlite` so `create_async_engine("sqlite+rapsqlite:///...")` works without an explicit `import rapsqlite.sqlalchemy`; `rapsqlite/__init__.py` optionally imports the dialect after the public API so the dialect is registered when the package is used.
+- **README** — "Features" shortened to "Top Features" with link to full docs; "Building from Source" replaced with a link to `docs/installation.rst`; added a short SQLAlchemy & Alembic example for the `sqlite+rapsqlite` dialect.
+- **Build and tooling** — `pyproject.toml`: `dependencies` moved under `[project]`, entry point key `sqlite.rapsqlite` quoted for maturin; `scripts/dev_test.sh` and `.gitignore` use a project-local `CARGO_HOME` (e.g. `.cargo_home`) by default for reproducible builds when the system Cargo cache is corrupted or unavailable.
+- **Doc examples** — README examples use sync `total_changes`/`in_transaction`; `scripts/run_doc_examples.py` updated to validate all README code samples.
 
 ### Fixed - SQLAlchemy and create_function (2026-01-31)
 

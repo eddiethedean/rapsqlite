@@ -31,6 +31,7 @@ posts/
 # Cargo.lock
 target/
 .cargo/
+.cargo_home/
 .cargo_cache/
 **/*.rs.bk
 *.pdb

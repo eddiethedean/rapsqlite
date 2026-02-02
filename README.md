@@ -20,29 +20,17 @@ Packages prefixed with **`rap`** stand for **Real Async Python**. Unlike many li
 
 See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philosophy and guarantees.
 
-## Features
+## Top Features
 
-- ⚡ **True async** SQLite operations (all operations execute outside Python GIL)
-- 🦀 **Native Rust-backed** execution (Tokio + sqlx)
-- 🚫 **Zero Python thread pools** (no fake async)
-- 🔄 **Event-loop-safe** concurrency under load
-- 🧵 **GIL-independent** database operations
-- 🔌 **Async-safe** SQLite bindings
-- ✔️ **Verified** by Fake Async Detector
-- 🔗 **Connection lifecycle management** (async context managers)
-- 📦 **Transaction support** (begin, commit, rollback, transaction context managers)
-- 🏷️ **Type system improvements** (proper Python types: int, float, str, bytes, None)
-- 📋 **Cursor API** (execute, executemany, fetchone, fetchall, fetchmany, executescript)
-- 🛡️ **Enhanced error handling** (custom exception classes matching aiosqlite)
-- 🔄 **aiosqlite-compatible API** (~95% compatibility, drop-in replacement)
-- 🚀 **Prepared statement caching** (automatic via sqlx, 2-5x faster for repeated queries)
-- 🏊 **Connection pooling** (configurable pool size and timeouts)
-- 📊 **Row factories** (dict, tuple, callable, and `rapsqlite.Row` class)
-- 🔧 **Advanced SQLite features** (callbacks, extensions, schema introspection, backup, dump)
-- 🔀 **Type adapters and converters** (register_adapter, register_converter; per-connection, sqlite3-style)
-- 📐 **Custom aggregates and collations** (create_aggregate, create_collation; sqlite3-style)
-- 🪝 **Database initialization hooks** (automatic schema setup)
-- 🐍 **True Async DBAPI 2.0** (`rapsqlite.dbapi`) for SQLAlchemy-style async drivers
+- ⚡ **True async** — All SQLite I/O runs outside the Python GIL (Rust + Tokio + sqlx)
+- 🚫 **No fake async** — Zero thread pools; event-loop-safe concurrency
+- 🔄 **aiosqlite-compatible** — ~95% API parity, drop-in replacement
+- 🏊 **Connection pooling** — Configurable size and timeouts
+- 🚀 **Prepared statement caching** — Automatic (2–5x faster repeated queries)
+- 🐍 **SQLAlchemy 2.0+** — `sqlite+rapsqlite` dialect for async Core and ORM
+- 📦 **Alembic** — Full support for async migrations (`alembic init -t async`)
+
+See the [documentation](https://rapsqlite.readthedocs.io/en/latest/) for the full feature list (transactions, cursors, row factories, backup, callbacks, type adapters, and more).
 
 ## Requirements
 
@@ -56,25 +44,7 @@ See the [rap-manifesto](https://github.com/eddiethedean/rap-manifesto) for philo
 pip install rapsqlite
 ```
 
-To verify: run the [installation example](https://rapsqlite.readthedocs.io/en/latest/installation.html#verifying-installation) in the docs (it prints `[[1]]`).
-
-### Building from Source
-
-**Prerequisites:**
-- Python 3.10+ with development headers installed
-- Rust 1.70+ and Cargo
-
-**Installation:**
-```bash
-git clone https://github.com/eddiethedean/rapsqlite.git
-cd rapsqlite
-python -m pip install maturin
-python -m maturin develop
-```
-
-When developing or running tests, use the **same** Python for both build and test (e.g. `python -m pytest tests/`). Using a different interpreter can cause version mismatches. See [CONTRIBUTING.md](CONTRIBUTING.md) and [tests/README.md](tests/README.md).
-
-**Note**: Python development headers are required for building. They're typically included with Python installations, but on some Linux distributions you may need to install `python3-dev` or `python3-devel` package. Use `maturin develop` instead of `cargo build` for development, as maturin automatically handles Python library linking.
+To verify: run the [installation example](https://rapsqlite.readthedocs.io/en/latest/installation.html#verifying-installation) in the docs (it prints `[[1]]`). For **building from source**, see [Installation](https://rapsqlite.readthedocs.io/en/latest/installation.html#building-from-source).
 
 ## Documentation
 
@@ -100,7 +70,28 @@ asyncio.run(main())
 
 **Output:** `[[1, 'Alice']]`
 
-For more (transactions, cursors, row factories, SQLAlchemy `sqlite+rapsqlite`), see the [Quickstart Guide](https://rapsqlite.readthedocs.io/en/latest/quickstart.html) and [API Reference](https://rapsqlite.readthedocs.io/en/latest/api-reference/index.html). Code examples in the docs are tested and show real output.
+### SQLAlchemy & Alembic (0.3.0)
+
+Use the `sqlite+rapsqlite` dialect with SQLAlchemy 2.0+ for true async ORM and Core. **Alembic migrations** are fully supported with the async template (`alembic init -t async`).
+
+```python
+import asyncio
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+async def main():
+    engine = create_async_engine("sqlite+rapsqlite:///app.db")
+    async with engine.connect() as conn:
+        result = await conn.execute(text("SELECT 1"))
+        print(result.scalar())  # 1
+    await engine.dispose()
+
+asyncio.run(main())
+```
+
+Install with `pip install rapsqlite[sqlalchemy]` (or `pip install rapsqlite sqlalchemy`). For **Alembic**, use `pip install rapsqlite[sqlalchemy] alembic`. See the [Compatibility Guide](https://rapsqlite.readthedocs.io/en/latest/guides/compatibility.html#alembic-with-rapsqlite) for AsyncSession, ORM, and step-by-step Alembic setup.
+
+For more (transactions, cursors, row factories), see the [Quickstart Guide](https://rapsqlite.readthedocs.io/en/latest/quickstart.html) and [API Reference](https://rapsqlite.readthedocs.io/en/latest/api-reference/index.html). Code examples in the docs are tested and show real output.
 
 ## API Reference
 
@@ -152,16 +143,12 @@ For most applications, this is all you need! All core aiosqlite APIs are support
 
 **Practical compatibility notes:**
 
-- **`total_changes` / `in_transaction`**: these are properties in `aiosqlite` and async methods in `rapsqlite`:
+- **`total_changes` / `in_transaction`**: both `aiosqlite` and `rapsqlite` expose these as **properties** (same API):
 
   ```python
-  # aiosqlite
+  # aiosqlite and rapsqlite
   changes = db.total_changes
   in_tx = db.in_transaction
-
-  # rapsqlite
-  changes = await db.total_changes()
-  in_tx = await db.in_transaction()
   ```
 
 - **`iterdump()`**: `rapsqlite` supports both async iteration (aiosqlite-style) and await-to-list:
