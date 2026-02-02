@@ -5,8 +5,6 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyString, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
-use sqlx::pool::PoolConnection;
-use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
@@ -15,6 +13,7 @@ use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, get_or_create_pool, has_callbacks,
+    PoolConnectionSlot, PoolSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{
@@ -36,7 +35,7 @@ pub(crate) struct Cursor {
     pub(crate) processed_query: Option<String>,
     pub(crate) processed_params: Option<Vec<SqliteParam>>,
     pub(crate) connection_path: String, // Store path for direct pool access
-    pub(crate) connection_pool: Arc<Mutex<Option<SqlitePool>>>, // Reference to connection's pool
+    pub(crate) connection_pool: Arc<Mutex<PoolSlot>>, // Reference to connection's pool
     pub(crate) connection_pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Reference to connection's pragmas
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
@@ -45,8 +44,8 @@ pub(crate) struct Cursor {
     pub(crate) text_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's text_factory
     // Transaction and callback state for proper connection priority
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
-    pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-    pub(crate) callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
+    pub(crate) callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
     pub(crate) user_functions: UserFunctions,
     pub(crate) user_aggregates: UserAggregates,
@@ -316,7 +315,7 @@ impl Cursor {
 
                     let rows = if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(
@@ -341,7 +340,7 @@ impl Cursor {
 
                         // Use callback connection
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(
@@ -652,6 +651,7 @@ impl Cursor {
                             // Use transaction connection - it's already acquired and holds the transaction
                             let mut conn_guard = transaction_connection.lock().await;
                             let conn = conn_guard
+                                .0
                                 .as_mut()
                                 .ok_or_else(|| OperationalError::new_err(
                                     "Transaction is active but transaction_connection is None. This indicates a bug in transaction management.".to_string()
@@ -678,7 +678,7 @@ impl Cursor {
 
                             // Use callback connection
                             let mut conn_guard = callback_connection.lock().await;
-                            let conn = conn_guard.as_mut().ok_or_else(|| {
+                            let conn = conn_guard.0.as_mut().ok_or_else(|| {
                                 OperationalError::new_err("Callback connection not available")
                             })?;
                             bind_and_fetch_all_on_connection(
@@ -946,7 +946,7 @@ impl Cursor {
 
                     let rows = if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(
@@ -971,7 +971,7 @@ impl Cursor {
 
                         // Use callback connection
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(
@@ -1234,7 +1234,7 @@ impl Cursor {
                 for statement in statements {
                     if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         bind_and_execute_on_connection(&statement, &[], conn, &path).await?;
@@ -1251,7 +1251,7 @@ impl Cursor {
                         .await?;
 
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         bind_and_execute_on_connection(&statement, &[], conn, &path).await?;

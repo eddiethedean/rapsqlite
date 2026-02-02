@@ -17,13 +17,46 @@ use tokio::sync::Mutex;
 use crate::types::{ProgressHandler, UserAggregates, UserCollations, UserFunctions};
 use crate::OperationalError;
 
+/// Wrapper around `Option<PoolConnection>` that, when dropped outside a Tokio context,
+/// forgets the connection instead of dropping it. This prevents sqlx's `PoolConnection::Drop`
+/// from calling `tokio::spawn` without a runtime (which panics during Python GC/shutdown).
+#[derive(Default)]
+pub(crate) struct PoolConnectionSlot(pub(crate) Option<PoolConnection<sqlx::Sqlite>>);
+
+impl Drop for PoolConnectionSlot {
+    fn drop(&mut self) {
+        if let Some(pc) = self.0.take() {
+            if tokio::runtime::Handle::try_current().is_err() {
+                std::mem::forget(pc);
+            }
+        }
+    }
+}
+
+/// Wrapper around `Option<SqlitePool>` that, when dropped outside a Tokio context,
+/// forgets the pool instead of dropping it. This prevents sqlx pool shutdown from
+/// dropping connections (PoolConnection) without a runtime (which panics during Python GC/shutdown).
+#[derive(Default)]
+pub(crate) struct PoolSlot(pub(crate) Option<SqlitePool>);
+
+impl Drop for PoolSlot {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            if tokio::runtime::Handle::try_current().is_err() {
+                std::mem::forget(p);
+            }
+        }
+    }
+}
+
 /// Minimum pool size when creating a shared pool so many concurrent
 /// Connection objects to the same path can acquire connections.
 const SHARED_POOL_MIN_CONNECTIONS: u32 = 25;
 
-/// Global registry: path -> SqlitePool. Connections to the same path share one pool.
-fn global_registry() -> &'static StdMutex<HashMap<String, SqlitePool>> {
-    static REGISTRY: OnceLock<StdMutex<HashMap<String, SqlitePool>>> = OnceLock::new();
+/// Global registry: path -> PoolSlot. Connections to the same path share one pool.
+/// PoolSlot forgets the pool when dropped without Tokio (avoids panic at process exit).
+fn global_registry() -> &'static StdMutex<HashMap<String, PoolSlot>> {
+    static REGISTRY: OnceLock<StdMutex<HashMap<String, PoolSlot>>> = OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
@@ -102,7 +135,7 @@ pub(crate) async fn acquire_with_pragmas(
 /// Uses a global path-based registry so connections to the same path share one pool.
 pub(crate) async fn get_or_create_pool(
     path: &str,
-    pool: &Arc<Mutex<Option<SqlitePool>>>,
+    pool: &Arc<Mutex<PoolSlot>>,
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: &Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
@@ -111,7 +144,7 @@ pub(crate) async fn get_or_create_pool(
     // Fast path: this connection already has a pool (from registry or prior creation).
     {
         let pool_guard = pool.lock().await;
-        if let Some(ref p) = *pool_guard {
+        if let Some(ref p) = pool_guard.0 {
             return Ok(p.clone());
         }
     }
@@ -121,11 +154,11 @@ pub(crate) async fn get_or_create_pool(
     // Check global registry for an existing pool for this path.
     let from_registry = {
         let reg = registry.lock().unwrap();
-        reg.get(path).cloned()
+        reg.get(path).and_then(|s| s.0.clone())
     };
     if let Some(shared_clone) = from_registry {
         let mut pool_guard = pool.lock().await;
-        *pool_guard = Some(shared_clone.clone());
+        pool_guard.0 = Some(shared_clone.clone());
         return Ok(shared_clone);
     }
 
@@ -168,22 +201,22 @@ pub(crate) async fn get_or_create_pool(
 
     let to_use = {
         let mut reg = registry.lock().unwrap();
-        if let Some(existing) = reg.get(path) {
-            Some(existing.clone())
+        if let Some(existing) = reg.get(path).and_then(|s| s.0.clone()) {
+            Some(existing)
         } else {
-            reg.insert(path.to_string(), new_pool.clone());
+            reg.insert(path.to_string(), PoolSlot(Some(new_pool.clone())));
             None
         }
     };
     match to_use {
         Some(existing) => {
             let mut pool_guard = pool.lock().await;
-            *pool_guard = Some(existing.clone());
+            pool_guard.0 = Some(existing.clone());
             Ok(existing)
         }
         None => {
             let mut pool_guard = pool.lock().await;
-            *pool_guard = Some(new_pool.clone());
+            pool_guard.0 = Some(new_pool.clone());
             Ok(new_pool)
         }
     }
@@ -196,15 +229,15 @@ pub(crate) async fn get_or_create_pool(
 /// into sqlx 0.8's API. This is a known limitation that needs to be resolved.
 pub(crate) async fn ensure_callback_connection(
     path: &str,
-    pool: &Arc<Mutex<Option<SqlitePool>>>,
-    callback_connection: &Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pool: &Arc<Mutex<PoolSlot>>,
+    callback_connection: &Arc<Mutex<PoolConnectionSlot>>,
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: &Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
     idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
 ) -> Result<(), PyErr> {
     let mut callback_guard = callback_connection.lock().await;
-    if callback_guard.is_none() {
+    if callback_guard.0.is_none() {
         // Get or create pool first
         let pool_clone = get_or_create_pool(
             path,
@@ -228,7 +261,7 @@ pub(crate) async fn ensure_callback_connection(
         let pool_conn =
             acquire_with_pragmas(&pool_clone, pragmas, path, pool_size_val, timeout_val).await?;
 
-        *callback_guard = Some(pool_conn);
+        callback_guard.0 = Some(pool_conn);
     }
     Ok(())
 }
@@ -301,15 +334,15 @@ pub(crate) async fn execute_init_hook_if_needed(
 /// and not using callbacks, matching aiosqlite behavior and improving concurrent-read performance.
 pub(crate) async fn ensure_session_connection(
     path: &str,
-    pool: &Arc<Mutex<Option<SqlitePool>>>,
-    session_connection: &Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pool: &Arc<Mutex<PoolSlot>>,
+    session_connection: &Arc<Mutex<PoolConnectionSlot>>,
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: &Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
     idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
 ) -> Result<(), PyErr> {
     let mut guard = session_connection.lock().await;
-    if guard.is_none() {
+    if guard.0.is_none() {
         let pool_clone = get_or_create_pool(
             path,
             pool,
@@ -323,17 +356,17 @@ pub(crate) async fn ensure_session_connection(
         let timeout_val = *connection_timeout_secs.lock().unwrap();
         let conn =
             acquire_with_pragmas(&pool_clone, pragmas, path, pool_size_val, timeout_val).await?;
-        *guard = Some(conn);
+        guard.0 = Some(conn);
     }
     Ok(())
 }
 
 /// Release the session connection (return to pool). Call on close() and when starting a transaction.
 pub(crate) async fn release_session_connection(
-    session_connection: &Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    session_connection: &Arc<Mutex<PoolConnectionSlot>>,
 ) {
     let mut guard = session_connection.lock().await;
-    let _ = guard.take();
+    let _ = guard.0.take();
 }
 
 /// Check if any callbacks are currently set.

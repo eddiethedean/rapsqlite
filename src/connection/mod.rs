@@ -9,7 +9,7 @@ use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqliteConnection;
-use sqlx::{Column, Row, SqlitePool};
+use sqlx::{Column, Row};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -34,6 +34,7 @@ use crate::parameters::{
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
     execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
+    PoolConnectionSlot, PoolSlot,
 };
 use crate::query::{
     bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
@@ -57,11 +58,11 @@ use crate::{InterfaceError, OperationalError};
 #[pyclass]
 pub(crate) struct Connection {
     path: String,
-    pool: Arc<Mutex<Option<SqlitePool>>>,
+    pool: Arc<Mutex<PoolSlot>>,
     transaction_state: Arc<Mutex<TransactionState>>,
     // Store the connection used for active transaction
     // All operations within a transaction must use this same connection
-    transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     last_rowid: Arc<Mutex<i64>>,
     last_changes: Arc<Mutex<u64>>,
     pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Store PRAGMA settings
@@ -80,13 +81,13 @@ pub(crate) struct Connection {
     // caching and reuse for performance.
     query_cache: Arc<StdMutex<HashMap<String, u64>>>, // normalized_query -> usage_count
     // Callback infrastructure (Phase 2.7)
-    callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>, // Dedicated connection for callbacks
-    load_extension_enabled: Arc<StdMutex<bool>>, // Track load_extension state
-    user_functions: UserFunctions,               // name -> (nargs, callback)
-    user_aggregates: UserAggregates,             // name -> (num_params, user_data ptr for cleanup)
-    user_collations: UserCollations,             // name -> user_data ptr for cleanup on remove
-    adapters: Adapters,                          // (type, callable) for register_adapter
-    converters: Converters, // typename -> callable(bytes)->Any for register_converter
+    callback_connection: Arc<Mutex<PoolConnectionSlot>>, // Dedicated connection for callbacks
+    load_extension_enabled: Arc<StdMutex<bool>>,         // Track load_extension state
+    user_functions: UserFunctions,                       // name -> (nargs, callback)
+    user_aggregates: UserAggregates, // name -> (num_params, user_data ptr for cleanup)
+    user_collations: UserCollations, // name -> user_data ptr for cleanup on remove
+    adapters: Adapters,              // (type, callable) for register_adapter
+    converters: Converters,          // typename -> callable(bytes)->Any for register_converter
     trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Trace callback
     authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Authorizer callback
     progress_handler: ProgressHandler, // (n, callback)
@@ -105,7 +106,7 @@ pub(crate) struct Connection {
     closed: Arc<StdMutex<bool>>,
     /// Reused connection for non-transaction, non-callback operations (session-scoped).
     /// Released on close() and when starting a transaction to match aiosqlite and improve concurrent reads.
-    session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    session_connection: Arc<Mutex<PoolConnectionSlot>>,
 }
 
 // Note: We do not implement Drop for Connection because:
@@ -115,7 +116,7 @@ pub(crate) struct Connection {
 //
 // Resource cleanup behavior:
 // - Arc references will be automatically dropped when Connection is dropped
-// - Pool connections will be returned to pool when Arc<Mutex<Option<PoolConnection>>> is dropped
+// - Pool connections are in PoolConnectionSlot; dropped outside Tokio context are forgotten to avoid panic
 // - However, active transactions will NOT be rolled back automatically
 // - Callback connections will be returned to pool when Arc is dropped
 //
@@ -128,15 +129,15 @@ pub(crate) struct Connection {
 #[derive(Clone)]
 pub(crate) struct ConnectionExecutionState {
     pub(crate) path: String,
-    pub(crate) pool: Arc<Mutex<Option<SqlitePool>>>,
-    pub(crate) session_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) pool: Arc<Mutex<PoolSlot>>,
+    pub(crate) session_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
-    pub(crate) transaction_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-    pub(crate) callback_connection: Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
+    pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
+    pub(crate) callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
     pub(crate) user_functions: UserFunctions,
     pub(crate) user_aggregates: UserAggregates,
@@ -265,9 +266,9 @@ impl Connection {
 
         Ok(Connection {
             path: db_path,
-            pool: Arc::new(Mutex::new(None)),
+            pool: Arc::new(Mutex::new(PoolSlot::default())),
             transaction_state: Arc::new(Mutex::new(TransactionState::None)),
-            transaction_connection: Arc::new(Mutex::new(None)),
+            transaction_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
             last_rowid: Arc::new(Mutex::new(0)),
             last_changes: Arc::new(Mutex::new(0)),
             pragmas: Arc::new(StdMutex::new(all_pragmas)),
@@ -281,7 +282,7 @@ impl Connection {
             // Prepared statement cache tracking (Phase 2.13)
             query_cache: Arc::new(StdMutex::new(HashMap::new())),
             // Callback infrastructure (Phase 2.7)
-            callback_connection: Arc::new(Mutex::new(None)),
+            callback_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
             load_extension_enabled: Arc::new(StdMutex::new(false)),
             user_functions: Arc::new(StdMutex::new(HashMap::new())),
             user_aggregates: Arc::new(StdMutex::new(HashMap::new())),
@@ -297,7 +298,7 @@ impl Connection {
             iter_chunk_size: Arc::new(StdMutex::new(iter_chunk_size)), // Phase 3.10: aiosqlite compat
             explicit_transaction: Arc::new(Mutex::new(false)),
             closed: Arc::new(StdMutex::new(false)),
-            session_connection: Arc::new(Mutex::new(None)),
+            session_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
         })
     }
 
@@ -382,7 +383,7 @@ impl Connection {
                 let raw_db = if in_transaction {
                     // Use transaction connection
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     let sqlite_conn: &mut SqliteConnection = &mut *conn;
@@ -416,7 +417,7 @@ impl Connection {
                         .await?;
 
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         let sqlite_conn: &mut SqliteConnection = &mut *conn;
@@ -437,7 +438,7 @@ impl Connection {
                         )
                         .await?;
                         let mut conn_guard = session_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
                         let sqlite_conn: &mut SqliteConnection = &mut *conn;
@@ -571,6 +572,7 @@ impl Connection {
                 .await?;
                 let guard = pool.lock().await;
                 let p = guard
+                    .0
                     .as_ref()
                     .ok_or_else(|| OperationalError::new_err("Pool not available"))?;
                 let size = p.size();
@@ -814,7 +816,7 @@ impl Connection {
                 // Clear callback connection (callbacks are cleared, connection returns to pool)
                 {
                     let mut callback_guard = callback_connection.lock().await;
-                    callback_guard.take();
+                    callback_guard.0.take();
                 }
 
                 // Commit or rollback any open transaction.
@@ -828,7 +830,7 @@ impl Connection {
                     };
                     drop(trans_guard);
                     let mut conn_guard = transaction_connection.lock().await;
-                    if let Some(mut conn) = conn_guard.take() {
+                    if let Some(mut conn) = conn_guard.0.take() {
                         let sql = if is_explicit {
                             "ROLLBACK"
                         } else if commit_on_exit {
@@ -847,7 +849,7 @@ impl Connection {
 
                 // Release our reference to the pool (do not close: pool is shared via global registry).
                 let mut pool_guard = pool.lock().await;
-                let _ = pool_guard.take();
+                let _ = pool_guard.0.take();
 
                 Ok(())
             };
@@ -893,7 +895,7 @@ impl Connection {
                 }
                 {
                     let mut callback_guard = callback_connection.lock().await;
-                    callback_guard.take();
+                    callback_guard.0.take();
                 }
 
                 // Rollback any open transaction using the stored connection
@@ -901,7 +903,7 @@ impl Connection {
                 if *trans_guard == TransactionState::Active {
                     drop(trans_guard);
                     let mut conn_guard = transaction_connection.lock().await;
-                    if let Some(mut conn) = conn_guard.take() {
+                    if let Some(mut conn) = conn_guard.0.take() {
                         // Rollback the transaction on the same connection
                         let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
                         // Connection is automatically returned to pool when dropped
@@ -915,7 +917,7 @@ impl Connection {
 
                 // Release our reference to the pool (do not close: pool is shared via global registry).
                 let mut pool_guard = pool.lock().await;
-                let _ = pool_guard.take();
+                let _ = pool_guard.0.take();
 
                 *closed.lock().unwrap() = true;
                 Ok(())
@@ -968,7 +970,7 @@ impl Connection {
                     drop(ex_guard);
                     if implicit_only {
                         let mut conn_guard = transaction_connection.lock().await;
-                        if let Some(mut conn) = conn_guard.take() {
+                        if let Some(mut conn) = conn_guard.0.take() {
                             drop(trans_guard);
                             let _ = sqlx::query("COMMIT").execute(&mut *conn).await;
                             let timeout_ms = {
@@ -988,7 +990,7 @@ impl Connection {
                                 .execute(&mut *conn)
                                 .await
                                 .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
-                            *conn_guard = Some(conn);
+                            conn_guard.0 = Some(conn);
                             let mut tguard = transaction_state.lock().await;
                             *tguard = TransactionState::Active;
                             drop(tguard);
@@ -1002,7 +1004,7 @@ impl Connection {
                 } // Lock released
 
                 let mut from_callback = false;
-                let mut pending_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
+                let mut pending_conn = PoolConnectionSlot::default();
 
                 // Release session connection so we don't hold session + transaction
                 release_session_connection(&session_connection).await;
@@ -1054,10 +1056,10 @@ impl Connection {
                         )
                         .await?;
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.take().ok_or_else(|| {
+                        let conn = conn_guard.0.take().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
-                        pending_conn = Some(conn);
+                        pending_conn.0 = Some(conn);
                     } else {
                         let pool_size_val = {
                             let g = pool_size.lock().unwrap();
@@ -1075,10 +1077,11 @@ impl Connection {
                             timeout_val,
                         )
                         .await?;
-                        pending_conn = Some(conn);
+                        pending_conn.0 = Some(conn);
                     }
 
                     let conn = pending_conn
+                        .0
                         .as_mut()
                         .expect("pending_conn must be set before BEGIN");
 
@@ -1108,7 +1111,7 @@ impl Connection {
                     // Store the connection for reuse in all transaction operations
                     {
                         let mut conn_guard = transaction_connection.lock().await;
-                        *conn_guard = pending_conn.take();
+                        conn_guard.0 = pending_conn.0.take();
                     }
 
                     // Re-acquire lock to set transaction state and mark explicit
@@ -1137,12 +1140,12 @@ impl Connection {
 
                     // If we had already stored something into transaction_connection, take it back.
                     let mut trans_conn_guard = transaction_connection.lock().await;
-                    let mut conn = trans_conn_guard.take().or_else(|| pending_conn.take());
+                    let mut conn = trans_conn_guard.0.take().or_else(|| pending_conn.0.take());
 
                     if from_callback {
                         if let Some(c) = conn.take() {
                             let mut cb_guard = callback_connection.lock().await;
-                            *cb_guard = Some(c);
+                            cb_guard.0 = Some(c);
                         }
                     } else {
                         drop(conn);
@@ -1191,7 +1194,7 @@ impl Connection {
 
                 // Retrieve the stored transaction connection; if missing, treat as no-op (DBAPI compat)
                 let mut conn_guard = transaction_connection.lock().await;
-                let mut conn = match conn_guard.take() {
+                let mut conn = match conn_guard.0.take() {
                     Some(c) => c,
                     None => {
                         *trans_guard = TransactionState::None;
@@ -1211,7 +1214,7 @@ impl Connection {
                 // If callbacks are set, return connection to callback_connection; otherwise it goes back to pool
                 if has_callbacks_flag {
                     let mut callback_guard = callback_connection.lock().await;
-                    *callback_guard = Some(conn);
+                    callback_guard.0 = Some(conn);
                 } else {
                     // Connection is automatically returned to pool when dropped
                     drop(conn);
@@ -1263,7 +1266,7 @@ impl Connection {
 
                 // Retrieve the stored transaction connection; if missing, treat as no-op (DBAPI compat)
                 let mut conn_guard = transaction_connection.lock().await;
-                let mut conn = match conn_guard.take() {
+                let mut conn = match conn_guard.0.take() {
                     Some(c) => c,
                     None => {
                         *trans_guard = TransactionState::None;
@@ -1283,7 +1286,7 @@ impl Connection {
                 // If callbacks are set, return connection to callback_connection; otherwise it goes back to pool
                 if has_callbacks_flag {
                     let mut callback_guard = callback_connection.lock().await;
-                    *callback_guard = Some(conn);
+                    callback_guard.0 = Some(conn);
                 } else {
                     // Connection is automatically returned to pool when dropped
                     drop(conn);
@@ -1666,7 +1669,7 @@ impl Connection {
                     // to match the execute-in-loop pattern (lock -> use -> release).
                     for param_values in processed_params.iter() {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         let result =
@@ -1692,7 +1695,7 @@ impl Connection {
                     // Use callback connection for each iteration
                     for param_values in processed_params.iter() {
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         let result =
@@ -1905,7 +1908,7 @@ impl Connection {
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
@@ -1925,7 +1928,7 @@ impl Connection {
 
                     // Use callback connection
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
@@ -1942,7 +1945,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = session_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Session connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
@@ -2098,7 +2101,7 @@ impl Connection {
 
                 let row = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path)
@@ -2118,7 +2121,7 @@ impl Connection {
 
                     // Use callback connection
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path)
@@ -2306,7 +2309,7 @@ impl Connection {
 
                 let opt = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_optional_on_connection(
@@ -2331,7 +2334,7 @@ impl Connection {
 
                     // Use callback connection
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_optional_on_connection(
@@ -2490,7 +2493,7 @@ impl Connection {
                         )
                         .await?;
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
@@ -2531,7 +2534,7 @@ impl Connection {
                     }
                 } else {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
@@ -2817,7 +2820,7 @@ impl Connection {
                 // so subsequent operations on this Connection see the new value (e.g. fetch_all after set_pragma).
                 {
                     let mut conn_guard = transaction_connection.lock().await;
-                    if let Some(ref mut conn) = *conn_guard {
+                    if let Some(ref mut conn) = conn_guard.0 {
                         sqlx::query(&pragma_query)
                             .execute(&mut **conn)
                             .await
@@ -2827,7 +2830,7 @@ impl Connection {
                 }
                 {
                     let mut conn_guard = session_connection.lock().await;
-                    if let Some(ref mut conn) = *conn_guard {
+                    if let Some(ref mut conn) = conn_guard.0 {
                         sqlx::query(&pragma_query)
                             .execute(&mut **conn)
                             .await
@@ -2914,7 +2917,7 @@ impl Connection {
                 )
                 .await?;
                 let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
                 let sqlite_conn: &mut SqliteConnection = conn;
@@ -2958,7 +2961,7 @@ impl Connection {
 
                 // Get the callback connection and access raw handle
                 let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
 
@@ -3039,7 +3042,7 @@ impl Connection {
 
                 // Get the callback connection and access raw handle
                 let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
 
@@ -3285,12 +3288,12 @@ impl Connection {
                 // may have moved it from callback_connection). Otherwise use callback_connection.
                 let trans_has_conn = {
                     let g = transaction_connection.lock().await;
-                    g.is_some()
+                    g.0.is_some()
                 };
 
                 if trans_has_conn {
                     let mut trans_guard = transaction_connection.lock().await;
-                    let conn = trans_guard.as_mut().ok_or_else(|| {
+                    let conn = trans_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     let sqlite_conn: &mut SqliteConnection = conn;
@@ -3438,7 +3441,7 @@ impl Connection {
                 .await?;
 
                 let mut cb_guard = callback_connection.lock().await;
-                let conn = cb_guard.as_mut().ok_or_else(|| {
+                let conn = cb_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
 
@@ -3490,7 +3493,7 @@ impl Connection {
                         drop(handle);
                         drop(cb_guard);
                         let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.take();
+                        callback_guard.0.take();
                         return Ok(());
                     }
                 } else {
@@ -3600,7 +3603,7 @@ impl Connection {
                 .await?;
 
                 let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
 
@@ -3659,7 +3662,7 @@ impl Connection {
                         drop(handle);
                         drop(conn_guard);
                         let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.take();
+                        callback_guard.0.take();
                     }
                     return Ok(());
                 }
@@ -3928,7 +3931,7 @@ impl Connection {
                 .await?;
 
                 let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
 
@@ -3983,7 +3986,7 @@ impl Connection {
                         drop(handle);
                         drop(conn_guard);
                         let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.take();
+                        callback_guard.0.take();
                     }
                     return Ok(());
                 }
@@ -4178,7 +4181,7 @@ impl Connection {
 
                 // Get the callback connection and access raw handle
                 let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
 
@@ -4308,7 +4311,7 @@ impl Connection {
                         drop(handle);
                         drop(conn_guard);
                         let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.take();
+                        callback_guard.0.take();
                         return Ok(());
                     }
                 }
@@ -4365,7 +4368,7 @@ impl Connection {
                     if all_cleared {
                         // Release the callback connection
                         let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.take();
+                        callback_guard.0.take();
                         // Clear the authorizer on SQLite side (already cleared in state)
                         return Ok(());
                     }
@@ -4385,7 +4388,7 @@ impl Connection {
 
                 // Get the callback connection and access raw handle
                 let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
 
@@ -4536,7 +4539,7 @@ impl Connection {
                         drop(handle);
                         drop(conn_guard);
                         let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.take();
+                        callback_guard.0.take();
                         return Ok(());
                     }
                 }
@@ -4593,7 +4596,7 @@ impl Connection {
                     if all_cleared {
                         // Release the callback connection
                         let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.take();
+                        callback_guard.0.take();
                         // Clear the progress handler on SQLite side (already cleared in state)
                         return Ok(());
                     }
@@ -4613,7 +4616,7 @@ impl Connection {
 
                 // Get the callback connection and access raw handle
                 let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.as_mut().ok_or_else(|| {
+                let conn = conn_guard.0.as_mut().ok_or_else(|| {
                     OperationalError::new_err("Callback connection not available")
                 })?;
 
@@ -4720,7 +4723,7 @@ impl Connection {
                         drop(handle);
                         drop(conn_guard);
                         let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.take();
+                        callback_guard.0.take();
                         return Ok(());
                     }
                 }
@@ -4785,7 +4788,7 @@ impl Connection {
                 // Query sqlite_master - use appropriate connection
                 let schema_rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
@@ -4804,7 +4807,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
@@ -4913,7 +4916,7 @@ impl Connection {
                     let query = format!("SELECT * FROM {quoted_table}");
                     let rows = if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         sqlx::query(&query)
@@ -4922,7 +4925,7 @@ impl Connection {
                             .map_err(|e| map_sqlx_error(e, &path, &query))?
                     } else if has_callbacks_flag {
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         sqlx::query(&query)
@@ -5065,7 +5068,7 @@ impl Connection {
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -5081,7 +5084,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -5204,7 +5207,7 @@ impl Connection {
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -5220,7 +5223,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -5385,7 +5388,7 @@ impl Connection {
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -5401,7 +5404,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -5550,7 +5553,7 @@ impl Connection {
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -5566,7 +5569,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -5709,7 +5712,7 @@ impl Connection {
 
                 let tables_rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&tables_query, &[], conn, &path).await?
@@ -5725,7 +5728,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&tables_query, &[], conn, &path).await?
@@ -5774,13 +5777,13 @@ impl Connection {
                         format!("PRAGMA table_info('{}')", tbl_name.replace("'", "''"));
                     let info_rows = if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(&info_query, &[], conn, &path).await?
                     } else if has_callbacks_flag {
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(&info_query, &[], conn, &path).await?
@@ -5817,13 +5820,13 @@ impl Connection {
                     let indexes_query = format!("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name = '{}' AND name NOT LIKE 'sqlite_%' ORDER BY name", tbl_name.replace("'", "''"));
                     let indexes_rows = if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(&indexes_query, &[], conn, &path).await?
                     } else if has_callbacks_flag {
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(&indexes_query, &[], conn, &path).await?
@@ -5862,13 +5865,13 @@ impl Connection {
                         format!("PRAGMA foreign_key_list('{}')", tbl_name.replace("'", "''"));
                     let fk_rows = if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(&fk_query, &[], conn, &path).await?
                     } else if has_callbacks_flag {
                         let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.as_mut().ok_or_else(|| {
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         bind_and_fetch_all_on_connection(&fk_query, &[], conn, &path).await?
@@ -6104,7 +6107,7 @@ impl Connection {
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -6120,7 +6123,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -6239,7 +6242,7 @@ impl Connection {
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -6255,7 +6258,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -6402,7 +6405,7 @@ impl Connection {
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -6418,7 +6421,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -6554,7 +6557,7 @@ impl Connection {
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -6570,7 +6573,7 @@ impl Connection {
                     )
                     .await?;
                     let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.as_mut().ok_or_else(|| {
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
                     bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
@@ -6757,10 +6760,8 @@ impl Connection {
             let future = async move {
                 ensure_not_closed(&closed)?;
                 // Type alias for connection taken from slot (slot reference + connection)
-                type TakenConnection = (
-                    Arc<Mutex<Option<PoolConnection<sqlx::Sqlite>>>>,
-                    PoolConnection<sqlx::Sqlite>,
-                );
+                type TakenConnection =
+                    (Arc<Mutex<PoolConnectionSlot>>, PoolConnection<sqlx::Sqlite>);
 
                 // Keep any borrowed/shared connections exclusively held for the duration of the
                 // backup to avoid concurrent sqlx usage on the same sqlite3* handle.
@@ -6788,10 +6789,11 @@ impl Connection {
                     );
 
                     // Acquire an exclusive source PoolConnection.
-                    let mut source_pool_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
+                    let mut source_pool_conn = PoolConnectionSlot::default();
                     if in_transaction {
                         let mut guard = transaction_connection.lock().await;
                         let conn = guard
+                            .0
                             .take()
                             .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
                         source_taken = Some((Arc::clone(&transaction_connection), conn));
@@ -6808,6 +6810,7 @@ impl Connection {
                         .await?;
                         let mut guard = callback_connection.lock().await;
                         let conn = guard
+                            .0
                             .take()
                             .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
                         source_taken = Some((Arc::clone(&callback_connection), conn));
@@ -6829,7 +6832,7 @@ impl Connection {
                             let g = connection_timeout_secs.lock().unwrap();
                             *g
                         };
-                        source_pool_conn = Some(
+                        source_pool_conn.0 = Some(
                             acquire_with_pragmas(
                                 &pool_clone,
                                 &pragmas,
@@ -6845,11 +6848,11 @@ impl Connection {
                     let source_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some((_, ref mut conn)) = source_taken {
                         conn
                     } else {
-                        source_pool_conn.as_mut().expect("source_pool_conn must exist")
+                        source_pool_conn.0.as_mut().expect("source_pool_conn must exist")
                     };
 
                     // Acquire an exclusive target handle.
-                    let mut target_pool_conn: Option<PoolConnection<sqlx::Sqlite>> = None;
+                    let mut target_pool_conn = PoolConnectionSlot::default();
                     let target_handle: backup::SendPtr<sqlite3>;
                     if target_is_rapsqlite {
                         // These are guaranteed to be Some when target_is_rapsqlite is true,
@@ -6857,7 +6860,7 @@ impl Connection {
                         let target_path: String = target_path_opt.clone().ok_or_else(|| {
                             OperationalError::new_err("Internal error: target path not available")
                         })?;
-                        let target_pool: Arc<Mutex<Option<SqlitePool>>> =
+                        let target_pool: Arc<Mutex<PoolSlot>> =
                             target_pool_opt.clone().ok_or_else(|| {
                                 OperationalError::new_err("Internal error: target pool not available")
                             })?;
@@ -6888,14 +6891,14 @@ impl Connection {
                                 )
                             })?;
                         let target_transaction_connection: Arc<
-                            Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
+                            Mutex<PoolConnectionSlot>,
                         > = target_transaction_connection_opt.clone().ok_or_else(|| {
                             OperationalError::new_err(
                                 "Internal error: target transaction_connection not available",
                             )
                         })?;
                         let target_callback_connection: Arc<
-                            Mutex<Option<PoolConnection<sqlx::Sqlite>>>,
+                            Mutex<PoolConnectionSlot>,
                         > = target_callback_connection_opt.clone().ok_or_else(|| {
                             OperationalError::new_err(
                                 "Internal error: target callback_connection not available",
@@ -6961,7 +6964,7 @@ impl Connection {
 
                         if target_in_transaction {
                             let mut guard = target_transaction_connection.lock().await;
-                            let conn = guard.take().ok_or_else(|| {
+                            let conn = guard.0.take().ok_or_else(|| {
                                 OperationalError::new_err("Target transaction connection not available")
                             })?;
                             target_taken = Some((Arc::clone(&target_transaction_connection), conn));
@@ -6977,7 +6980,7 @@ impl Connection {
                             )
                             .await?;
                             let mut guard = target_callback_connection.lock().await;
-                            let conn = guard.take().ok_or_else(|| {
+                            let conn = guard.0.take().ok_or_else(|| {
                                 OperationalError::new_err("Target callback connection not available")
                             })?;
                             target_taken = Some((Arc::clone(&target_callback_connection), conn));
@@ -6999,7 +7002,7 @@ impl Connection {
                                 let g = target_connection_timeout_secs.lock().unwrap();
                                 *g
                             };
-                            target_pool_conn = Some(
+                            target_pool_conn.0 = Some(
                                 acquire_with_pragmas(
                                     &target_pool_clone,
                                     &target_pragmas,
@@ -7014,7 +7017,7 @@ impl Connection {
                         let target_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some((_, ref mut conn)) = target_taken {
                             conn
                         } else {
-                            target_pool_conn.as_mut().expect("target_pool_conn must exist")
+                            target_pool_conn.0.as_mut().expect("target_pool_conn must exist")
                         };
 
                         let sqlite_conn: &mut SqliteConnection = &mut *target_conn;
@@ -7138,11 +7141,11 @@ impl Connection {
                 // Restore any taken connections back to their slots.
                 if let Some((slot, conn)) = source_taken {
                     let mut g = slot.lock().await;
-                    *g = Some(conn);
+                    g.0 = Some(conn);
                 }
                 if let Some((slot, conn)) = target_taken {
                     let mut g = slot.lock().await;
-                    *g = Some(conn);
+                    g.0 = Some(conn);
                 }
 
                 result
