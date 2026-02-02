@@ -8,6 +8,7 @@ import os
 
 import pytest
 
+from conftest import unlink_with_retry
 from rapsqlite import connect, DatabaseError, OperationalError
 
 
@@ -924,8 +925,7 @@ async def test_backup_basic(test_db_file):
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
 
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -939,8 +939,7 @@ async def test_backup_basic(test_db_file):
         assert rows[1][1] == "test2"
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -956,8 +955,7 @@ async def test_backup_target_in_transaction_raises(test_db_file):
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
     target_path = test_db_file + ".backup_txn"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -973,8 +971,7 @@ async def test_backup_target_in_transaction_raises(test_db_file):
         except Exception:
             pass
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -985,8 +982,7 @@ async def test_backup_empty_database(test_db_file):
 
     # No tables created; source is empty
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1000,8 +996,7 @@ async def test_backup_empty_database(test_db_file):
         assert len(tables) == 0
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -1020,8 +1015,7 @@ async def test_backup_progress_callback(test_db_file):
             )
 
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1040,8 +1034,7 @@ async def test_backup_progress_callback(test_db_file):
         assert rows[0][0] == 10
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -1060,8 +1053,7 @@ async def test_backup_with_pages_parameter(test_db_file):
             )
 
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1073,8 +1065,7 @@ async def test_backup_with_pages_parameter(test_db_file):
         assert rows[0][0] == 5
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -1090,8 +1081,7 @@ async def test_backup_with_custom_name(test_db_file):
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1103,8 +1093,7 @@ async def test_backup_with_custom_name(test_db_file):
         assert len(rows) == 1
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -1124,8 +1113,7 @@ async def test_backup_multiple_tables(test_db_file):
         await source_conn.execute("INSERT INTO table2 (value) VALUES (?)", [42])
 
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1141,8 +1129,7 @@ async def test_backup_multiple_tables(test_db_file):
         assert rows2[0][1] == 42
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -1159,8 +1146,7 @@ async def test_backup_with_indexes(test_db_file):
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1174,8 +1160,7 @@ async def test_backup_with_indexes(test_db_file):
         assert len(indexes) == 1
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -1191,8 +1176,7 @@ async def test_backup_progress_callback_exception(test_db_file):
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test1"])
 
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1209,5 +1193,4 @@ async def test_backup_progress_callback_exception(test_db_file):
         assert len(rows) == 1
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)

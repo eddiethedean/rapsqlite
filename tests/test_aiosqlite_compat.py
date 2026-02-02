@@ -18,6 +18,7 @@ from conftest import (
     skip_if_no_create_function_deterministic,
     skip_if_no_register_adapter,
     skip_if_no_register_converter,
+    unlink_with_retry,
 )
 from rapsqlite import Connection, connect, Error, InterfaceError, OperationalError
 
@@ -1315,8 +1316,7 @@ async def test_backup_aiosqlite(test_db_file):
         await source_conn.execute("INSERT INTO test (name) VALUES (?)", ["test2"])
 
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1330,8 +1330,7 @@ async def test_backup_aiosqlite(test_db_file):
         assert rows[1][1] == "test2"
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -1352,8 +1351,7 @@ async def test_backup_with_pages_and_progress(test_db_file):
             )
 
     target_path = test_db_file + ".backup_pages"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1370,8 +1368,7 @@ async def test_backup_with_pages_and_progress(test_db_file):
         assert rows[0][0] == 10
     finally:
         await target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
     # We expect progress to have been reported at least once for a paged backup
     assert len(progress_calls) >= 1
@@ -1380,8 +1377,7 @@ async def test_backup_with_pages_and_progress(test_db_file):
     # Using a new path avoids SQLITE_READONLY_DBMOVED (1032) when the shared pool
     # may still hold a connection to the previous target path after we overwrote it.
     target_path2 = test_db_file + ".backup_pages2"
-    if os.path.exists(target_path2):
-        os.remove(target_path2)
+    unlink_with_retry(target_path2)
     with open(target_path2, "w"):
         pass
 
@@ -1397,8 +1393,7 @@ async def test_backup_with_pages_and_progress(test_db_file):
         await target_conn2.close()
 
     for p in (target_path, target_path2):
-        if os.path.exists(p):
-            os.remove(p)
+        unlink_with_retry(p)
 
 
 @pytest.mark.asyncio
@@ -1411,8 +1406,7 @@ async def test_backup_sqlite(test_db_file):
     import rapsqlite
 
     target_path = test_db_file + ".backup"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
 
     # Create empty target database file first
     with open(target_path, "w"):
@@ -1441,8 +1435,7 @@ async def test_backup_sqlite(test_db_file):
         assert rows[1][1] == "test2"
     finally:
         target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
 
 @pytest.mark.asyncio
@@ -1480,8 +1473,7 @@ async def test_backup_sqlite_connection_state_validation(test_db_file):
 
     # Test 1: Target with active transaction should fail (sqlite3 in_transaction=True)
     target_path = test_db_file + ".backup_tx"
-    if os.path.exists(target_path):
-        os.remove(target_path)
+    unlink_with_retry(target_path)
     with open(target_path, "w"):
         pass
 
@@ -1496,8 +1488,7 @@ async def test_backup_sqlite_connection_state_validation(test_db_file):
     finally:
         target_conn.rollback()
         target_conn.close()
-        if os.path.exists(target_path):
-            os.remove(target_path)
+        unlink_with_retry(target_path)
 
     await source_conn.close()
 

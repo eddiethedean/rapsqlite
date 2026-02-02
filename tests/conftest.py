@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import pytest
 from typing import Any, AsyncGenerator, Generator
 
@@ -48,6 +49,25 @@ if sys.platform == "win32":
     import asyncio
 
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+def unlink_with_retry(path: str, retries: int = 5, delay: float = 0.1) -> None:
+    """Unlink path; on Windows retry with delay if file is in use (WinError 32)."""
+    if not os.path.exists(path):
+        return
+    for _ in range(retries):
+        try:
+            os.unlink(path)
+            return
+        except PermissionError:
+            if sys.platform == "win32":
+                time.sleep(delay)
+            else:
+                raise
+    try:
+        os.unlink(path)
+    except OSError:
+        pass  # best-effort cleanup
 
 
 def cleanup_db(test_db: str) -> None:
