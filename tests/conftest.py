@@ -43,11 +43,10 @@ def _ensure_extension_built() -> None:
 # Windows-specific asyncio event loop policy fix
 # Windows uses ProactorEventLoop by default, which has known issues with pytest-asyncio
 # Setting SelectorEventLoopPolicy prevents event loop closure errors and hangs
+# (Deprecated in Python 3.14, removal in 3.16; filtered in pyproject.toml so CI does not fail)
 if sys.platform == "win32":
     import asyncio
 
-    # Use SelectorEventLoop on Windows instead of ProactorEventLoop
-    # This prevents "Event loop is closed" errors and test hangs
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 

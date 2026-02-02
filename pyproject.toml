@@ -77,6 +77,9 @@ addopts = "-v --tb=short"
 filterwarnings = [
     "ignore:Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
     "ignore:.*[Tt]okio.*:pytest.PytestUnraisableExceptionWarning",
+    # Python 3.14+ deprecates WindowsSelectorEventLoopPolicy / set_event_loop_policy (removal 3.16)
+    "ignore:.*WindowsSelectorEventLoopPolicy.*:DeprecationWarning",
+    "ignore:.*set_event_loop_policy.*:DeprecationWarning",
 ]
 
 [tool.coverage.run]
