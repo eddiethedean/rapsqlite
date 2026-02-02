@@ -127,13 +127,7 @@ pub(crate) fn execute_many_raw_core(
                         }
                     };
                     unsafe {
-                        sqlite3_bind_text(
-                            stmt,
-                            idx,
-                            ptr,
-                            bytes.len() as c_int,
-                            SQLITE_STATIC(),
-                        )
+                        sqlite3_bind_text(stmt, idx, ptr, bytes.len() as c_int, SQLITE_STATIC())
                     }
                 }
                 SqliteParam::Blob(b) => unsafe {
