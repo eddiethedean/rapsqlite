@@ -143,7 +143,7 @@ Use ``set_trace_callback`` to log every SQL statement executed on the connection
 
 For slow-query detection, measure elapsed time around your own execute calls (e.g. with a small helper or middleware) and log when a threshold is exceeded; the trace callback alone does not provide timing. This gives a clear path to observe queries without implementing a full metrics pipeline.
 
-Slow query threshold (Phase 3.5)
+Slow query threshold (Phase 3.5 — implemented)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Use **``Connection.set_slow_query_threshold(threshold_secs, callback=None)``** to automatically detect and report slow queries. When ``fetch_all()`` takes longer than ``threshold_secs``, the optional callback is invoked with ``callback(duration_secs, sql)``. Set ``threshold_secs`` to 0 to disable.

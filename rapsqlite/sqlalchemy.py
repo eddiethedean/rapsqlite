@@ -8,7 +8,8 @@ Use with create_async_engine:
     engine = create_async_engine("sqlite+rapsqlite:///path.db")
     # or sqlite+rapsqlite:///:memory:
 
-Requires ``pip install rapsqlite[sqlalchemy]`` (adds sqlalchemy dependency).
+Requires SQLAlchemy to be installed (e.g. ``pip install sqlalchemy``).
+You can also install both in one step: ``pip install rapsqlite[sqlalchemy]``.
 """
 
 import math
@@ -28,8 +29,9 @@ try:
     )
 except ImportError as e:
     raise ImportError(
-        "rapsqlite sqlite+rapsqlite dialect requires sqlalchemy. "
-        "Install with: pip install 'rapsqlite[sqlalchemy]'"
+        "The sqlite+rapsqlite dialect requires SQLAlchemy to be installed. "
+        "Install it with: pip install sqlalchemy "
+        "(or pip install rapsqlite[sqlalchemy] to install both in one step)."
     ) from e
 
 from . import dbapi as _dbapi

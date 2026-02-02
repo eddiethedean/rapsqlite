@@ -4,10 +4,10 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 ## Current Status
 
-**Current Version: v0.3.0-dev** 🚧  
+**Current Version: v0.3.0** ✅  
 **Phase 1: Complete** ✅  
 **Phase 2: Complete** ✅  
-**Phase 3: In Development** ⏳  
+**Phase 3: Complete** ✅  
 **Phase 4: Planned** 📋
 
 ---
@@ -45,7 +45,7 @@ Core functionality and production readiness:
 
 ---
 
-## Phase 3 — Advanced Features & aiosqlite Parity (v0.3.0) ⏳ In Development
+## Phase 3 — Advanced Features & aiosqlite Parity (v0.3.0) ✅ Complete
 
 **Goal**: Complete aiosqlite API compatibility and add advanced query/transaction features for the v0.3.0 release.
 
@@ -210,7 +210,7 @@ Core functionality and production readiness:
 - ⏳ CTE utilities
 
 **v1.0.0 Release Criteria**:
-- Phase 3 complete
+- ✅ Phase 3 complete (v0.3.0 released)
 - All Phase 4 "Must Have" features implemented
 - Cross-platform CI passing
 - Performance benchmarks meet targets
@@ -227,10 +227,10 @@ Following semantic versioning:
 |---------|-------|--------|
 | v0.1.x | Phase 1 — Core functionality | ✅ Complete |
 | v0.2.x | Phase 2 — Feature-complete drop-in | ✅ Complete (v0.2.0 released) |
-| v0.3.x | Phase 3 — Advanced features & aiosqlite parity | ⏳ In Progress |
+| v0.3.x | Phase 3 — Advanced features & aiosqlite parity | ✅ Complete (v0.3.0 released) |
 | v1.0.0 | Phase 4 — Production ready | 📋 Planned |
 
-**Current Version: v0.3.0-dev**
+**Current Version: v0.3.0**
 
 ---
 
@@ -238,7 +238,7 @@ Following semantic versioning:
 
 ### Must Have (Blocking)
 - ✅ Phase 1 and Phase 2 complete
-- ⏳ Phase 3 complete (v0.3.0 released)
+- ✅ Phase 3 complete (v0.3.0 released)
 - ✅ Type system: `register_adapter` and `register_converter`
 - ⏳ Cross-platform CI (Linux, macOS, Windows)
 - ⏳ Performance regression tests
@@ -288,4 +288,4 @@ We welcome contributions! See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelin
 
 ---
 
-*Last Updated: 2026-01-31*
+*Last Updated: 2026-02-01*

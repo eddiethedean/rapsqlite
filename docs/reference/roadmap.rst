@@ -6,7 +6,7 @@ This roadmap outlines the development plan for ``rapsqlite``.
 Current Status
 --------------
 
-**Current Version (v0.3.0-dev)** — Phase 1 Complete, Phase 2 Complete, Phase 3 In Progress:
+**Current Version (v0.3.0)** — Phase 1 Complete, Phase 2 Complete, Phase 3 Complete:
 
 **Phase 1 Complete:**
 * ✅ Connection lifecycle management (async context managers)
@@ -36,7 +36,7 @@ Current Status
 * ✅ Drop-in replacement validation (aiosqlite compatibility features)
 * ✅ Documentation & benchmarking
 
-**Phase 3 (v0.3.0-dev) In Progress:**
+**Phase 3 Complete (v0.3.0):**
 * ✅ API completeness (execute_fetchall, execute_insert, Cursor properties, savepoints, Connection.stop(), Cursor.execute/executemany/executescript return self)
 * ✅ init_hook fixes (run after transaction active; use transaction connection during init_hook)
 * ✅ True Async DBAPI (rapsqlite.dbapi), SQLAlchemy dialect (sqlite+rapsqlite)
@@ -52,8 +52,8 @@ Goal
 
 Achieve drop-in replacement compatibility with ``aiosqlite`` to enable seamless migration with true async performance.
 
-Phase 3 (Remaining) / Future Enhancements
------------------------------------------
+Future Enhancements
+-------------------
 
 Future enhancements may include:
 
