@@ -167,6 +167,7 @@ jobs:
     name: Rust unit tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: true
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
@@ -254,6 +255,7 @@ jobs:
     name: Build wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: true
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
