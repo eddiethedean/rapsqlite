@@ -59,6 +59,8 @@ Features
 * ✅ **Advanced SQLite features** (callbacks, extensions, schema introspection, backup, dump)
 * ✅ **Type adapters and converters, custom aggregates and collations** (register_adapter, register_converter, create_aggregate, create_collation; sqlite3-style)
 * ✅ **Database initialization hooks** (automatic schema setup)
+* ✅ **SQLAlchemy 2.0+** — ``sqlite+rapsqlite`` dialect for async Core and ORM
+* ✅ **Alembic** — Full support for async migrations (``alembic init -t async``); see :doc:`guides/compatibility` for setup
 * ✅ **True Async DBAPI 2.0** (``rapsqlite.dbapi``) for SQLAlchemy-style async drivers
 
 Why ``rap*``?

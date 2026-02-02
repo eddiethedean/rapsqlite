@@ -129,6 +129,70 @@ async def migration_basic_connection():
         _unlink_db(path)
 
 
+async def readme_quick_start():
+    """README Quick Start (lines 55-68): connect, execute, fetch_all, output [[1, 'Alice']]."""
+    path = _temp_db()
+    try:
+        async with connect(path) as conn:
+            await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+            await conn.execute("INSERT INTO users (name) VALUES ('Alice')")
+            rows = await conn.fetch_all("SELECT * FROM users")
+            assert rows == [[1, "Alice"]], f"Expected [[1, 'Alice']], got {rows}"
+    finally:
+        _unlink_db(path)
+
+
+async def readme_sqlalchemy():
+    """README SQLAlchemy (lines 76-91): create_async_engine sqlite+rapsqlite, text, scalar()."""
+    try:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+    except ImportError:
+        print("Skipping README SQLAlchemy example (sqlalchemy not installed)")
+        return
+    path = _temp_db()
+    try:
+        url = f"sqlite+rapsqlite:///{path}"
+        engine = create_async_engine(url)
+        try:
+            async with engine.connect() as conn:
+                result = await conn.execute(text("SELECT 1"))
+                val = result.scalar()
+                assert val == 1, f"Expected 1, got {val}"
+        finally:
+            await engine.dispose()
+    finally:
+        _unlink_db(path)
+
+
+async def readme_migration_total_changes():
+    """README Migration: total_changes and in_transaction properties (lines 144-152)."""
+    path = _temp_db()
+    try:
+        async with connect(path) as conn:
+            changes = conn.total_changes
+            in_tx = conn.in_transaction
+            assert isinstance(changes, int), f"total_changes should be int, got {type(changes)}"
+            assert isinstance(in_tx, bool), f"in_transaction should be bool, got {type(in_tx)}"
+    finally:
+        _unlink_db(path)
+
+
+async def readme_iterdump():
+    """README Migration: iterdump async iterator and await (lines 156-164)."""
+    path = _temp_db()
+    try:
+        async with connect(path) as conn:
+            await conn.execute("CREATE TABLE t (id INTEGER)")
+            await conn.execute("INSERT INTO t VALUES (1)")
+            lines_async = [line async for line in conn.iterdump()]
+            lines_await = await conn.iterdump()
+            assert isinstance(lines_async, list) and isinstance(lines_await, list)
+            assert "\n".join(lines_async) == "\n".join(lines_await)
+    finally:
+        _unlink_db(path)
+
+
 async def run_all():
     """Run all doc examples."""
     await quickstart_basic()
@@ -137,6 +201,10 @@ async def run_all():
     await quickstart_cursor_iteration()
     await row_api_example()
     await migration_basic_connection()
+    await readme_quick_start()
+    await readme_sqlalchemy()
+    await readme_migration_total_changes()
+    await readme_iterdump()
 
 
 def main():

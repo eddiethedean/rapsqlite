@@ -324,6 +324,15 @@ def connect(
     return cast(ConnectionT, conn)
 
 
+# Register sqlite+rapsqlite dialect so create_async_engine("sqlite+rapsqlite:///...") works
+# without a separate "import rapsqlite.sqlalchemy". (Entry point in pyproject.toml does the
+# same at install time; this covers editable installs and runtimes where entry points aren't used.)
+try:
+    import rapsqlite.sqlalchemy  # noqa: F401
+except ImportError:
+    pass
+
+
 async def pool_metrics_gauges(conn: ConnectionT) -> PoolMetricsGauges:
     """Return pool metrics as a dict of gauge names to values for Prometheus or custom metrics.
 

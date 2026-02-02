@@ -22,6 +22,9 @@ echo ""
 
 cd "$PROJECT_ROOT"
 
+# Use project-local Cargo home to avoid corrupted cache (e.g. atoi) in system cache
+export CARGO_HOME="${CARGO_HOME:-$PROJECT_ROOT/.cargo_home}"
+
 echo "Building for current Python..."
 # Build wheel for this interpreter (maturin develop can pick up a different Python on PATH).
 # Then install it so the extension matches the interpreter that runs pytest.

@@ -28,8 +28,11 @@ project-urls = [
     "Repository, https://github.com/eddiethedean/rapsqlite",
     "Documentation, https://github.com/eddiethedean/rapsqlite#readme",
 ]
-
 dependencies = []
+
+# Register sqlite+rapsqlite so SQLAlchemy discovers it without "import rapsqlite.sqlalchemy"
+[project.entry-points."sqlalchemy.dialects"]
+"sqlite.rapsqlite" = "rapsqlite.sqlalchemy:SQLiteDialect_rapsqlite"
 
 [project.optional-dependencies]
 sqlalchemy = ["sqlalchemy>=2.0"]
@@ -45,6 +48,7 @@ test = [
     "greenlet",
     "httpx",
     "aiohttp",
+    "alembic",
 ]
 
 [tool.maturin]
