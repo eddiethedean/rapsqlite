@@ -100,8 +100,8 @@ rapsqlite provides a ``sqlite+rapsqlite`` dialect for SQLAlchemy 2.0+. Full ORM 
 implemented: ``AsyncSession``, ``session.add``/``add_all``, ``session.commit``, ``session.get``,
 transaction rollback, and ``INSERT...RETURNING`` identity fetch all work correctly.
 
-**Requirements**: SQLAlchemy 2.0 or newer (``pip install 'rapsqlite[sqlalchemy]'`` installs
-``sqlalchemy>=2.0``).
+**Requirements**: SQLAlchemy 2.0 or newer. Install with ``pip install sqlalchemy``
+(or ``pip install rapsqlite[sqlalchemy]`` to install rapsqlite and SQLAlchemy in one step).
 
 **Core usage:**
 
@@ -163,7 +163,8 @@ Alembic with rapsqlite
 
 You can run Alembic migrations using the ``sqlite+rapsqlite`` dialect.
 
-1. Install dependencies: ``pip install 'rapsqlite[sqlalchemy]' alembic``
+1. Install dependencies: ``pip install rapsqlite sqlalchemy alembic``
+   (or ``pip install rapsqlite[sqlalchemy] alembic`` to install rapsqlite and SQLAlchemy together).
 2. Initialize Alembic with async support: ``alembic init -t async alembic``
 3. In ``alembic/env.py``, ensure the dialect is registered and the URL uses ``sqlite+rapsqlite``:
 

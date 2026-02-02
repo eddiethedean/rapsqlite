@@ -224,7 +224,7 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 ### Added - SQLAlchemy integration
 
 - **`rapsqlite.sqlalchemy`** — `sqlite+rapsqlite` dialect; use with `create_async_engine("sqlite+rapsqlite:///:memory:")`.
-- **Optional dependency** — `pip install 'rapsqlite[sqlalchemy]'` for SQLAlchemy support.
+- **SQLAlchemy** — Install SQLAlchemy (`pip install sqlalchemy`) to use the `sqlite+rapsqlite` dialect; the optional extra `rapsqlite[sqlalchemy]` installs both in one command.
 - **Compatibility docs** — `docs/guides/compatibility.rst` updated with SQLAlchemy usage.
 - **Alembic with rapsqlite** — Documented in `docs/guides/compatibility.rst` (env.py, async engine, `sqlite+rapsqlite` URL). Alembic-style DDL validated in `tests/test_sqlalchemy_rapsqlite.py::test_sqlalchemy_alembic_style_migration`.
 - **FastAPI patterns** — Documented in `docs/guides/compatibility.rst` (lifespan, connection dependency); `examples/fastapi_db.py` and `tests/test_fastapi_example.py` cover the recommended pattern.

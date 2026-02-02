@@ -18,7 +18,14 @@ extensions = [
     "sphinx.ext.napoleon",  # Google/NumPy style docstrings
     "sphinx.ext.viewcode",
     "sphinx.ext.autosummary",
+    "sphinx.ext.intersphinx",
+    "sphinx_copybutton",
 ]
+
+# Link to Python 3 and standard library docs
+intersphinx_mapping = {
+    "python": ("https://docs.python.org/3", None),
+}
 
 # Napoleon settings for Google-style docstrings
 napoleon_google_docstring = True
@@ -86,6 +93,8 @@ exclude_patterns = [
 # -- Options for HTML output -------------------------------------------------
 
 html_theme = "sphinx_rtd_theme"
+html_title = "rapsqlite"
+html_short_title = "rapsqlite"
 
 html_theme_options = {
     "collapse_navigation": False,
@@ -99,10 +108,12 @@ html_theme_options = {
 }
 
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
 
-html_css_files = [
-    "custom.css",
-]
+# Copy button: exclude prompts (e.g. >>> and ...) from copied code
+copybutton_prompt_text = r">>> |\.\.\. |\$ "
+copybutton_only_copy_prompt_lines = False
+copybutton_remove_prompts = True
 
 # -- Options for autosummary -------------------------------------------------
 autosummary_generate = True
