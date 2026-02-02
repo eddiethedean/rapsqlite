@@ -54,15 +54,10 @@ impl Drop for PoolSlot {
 /// instead forgets the connection if still held. Callers must explicitly restore
 /// on the success path via take_for_restore() and then put the connection back
 /// into the slot.
+#[derive(Default)]
 pub(crate) struct TakenConnectionGuard(
     Option<(Arc<Mutex<PoolConnectionSlot>>, PoolConnection<sqlx::Sqlite>)>,
 );
-
-impl Default for TakenConnectionGuard {
-    fn default() -> Self {
-        Self(None)
-    }
-}
 
 impl TakenConnectionGuard {
     pub(crate) fn new(
