@@ -119,7 +119,7 @@ async def example_cursors():
 
 
 async def example_concurrent():
-    """Run concurrent operations example."""
+    """Run concurrent operations example (bulk insert via execute_many to avoid DB lock)."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     try:
@@ -128,11 +128,8 @@ async def example_concurrent():
                 "CREATE TABLE data (id INTEGER PRIMARY KEY, value INTEGER)"
             )
 
-            tasks = [
-                conn.execute(f"INSERT INTO data (value) VALUES ({i})")
-                for i in range(100)
-            ]
-            await asyncio.gather(*tasks)
+            params = [[i] for i in range(100)]
+            await conn.execute_many("INSERT INTO data (value) VALUES (?)", params)
 
             rows = await conn.fetch_all("SELECT * FROM data")
             print(f"Inserted {len(rows)} rows")
@@ -170,6 +167,7 @@ async def example_backup():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         backup_path = f.name
     try:
+        # Setup source DB
         async with Connection(source_path) as source:
             await source.execute(
                 "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
@@ -177,11 +175,13 @@ async def example_backup():
             await source.execute("INSERT INTO test (name) VALUES ('Alice')")
             await source.execute("INSERT INTO test (name) VALUES ('Bob')")
 
-            async with Connection(backup_path) as target:
-                await source.backup(target)
-
-                rows = await target.fetch_all("SELECT * FROM test")
-                print("rows =", rows)
+        # Use fresh connections for backup (avoids busy/locked when nesting)
+        async with Connection(source_path) as src, Connection(backup_path) as target:
+            src.connection_timeout = 30
+            target.connection_timeout = 30
+            await src.backup(target)
+            rows = await target.fetch_all("SELECT * FROM test")
+            print("rows =", rows)
     finally:
         for path in [source_path, backup_path]:
             if os.path.exists(path):
