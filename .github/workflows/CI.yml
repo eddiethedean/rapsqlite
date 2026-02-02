@@ -75,7 +75,7 @@ jobs:
 
     - name: Install test dependencies
       shell: bash
-      run: pip install pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout hypothesis alembic
+      run: pip install pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout hypothesis alembic sqlalchemy greenlet
 
     - name: Test package import
       shell: bash
