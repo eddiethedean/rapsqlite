@@ -114,14 +114,14 @@ pub(crate) fn execute_many_raw_core(
                 SqliteParam::Text(s) => {
                     let bytes = s.as_bytes();
                     // SQLITE_STATIC: buffer valid until sqlite3_step() returns; no copy.
-                    // libsqlite3-sys bindings: aarch64 expects *const u8, others *const c_char (i8).
+                    // libsqlite3-sys bindings: Linux aarch64 (manylinux) expects *const u8; others *const c_char (i8).
                     let text_ptr = bytes.as_ptr();
                     let ptr = {
-                        #[cfg(target_arch = "aarch64")]
+                        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
                         {
                             text_ptr
                         }
-                        #[cfg(not(target_arch = "aarch64"))]
+                        #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
                         {
                             text_ptr as *const c_char
                         }
