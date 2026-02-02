@@ -73,7 +73,7 @@ markers = [
 ]
 addopts = "-v --tb=short"
 # Suppress known unraisable-exception warnings from background cleanup (e.g. connection
-# drop when Tokio runtime is shutting down). See tests/README.md.
+# drop when async runtime is shutting down). See tests/README.md.
 filterwarnings = [
     "ignore:Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
     "ignore:.*[Tt]okio.*:pytest.PytestUnraisableExceptionWarning",

@@ -183,7 +183,8 @@ async def test_database_locked_error(test_db_file):
 @pytest.mark.asyncio
 async def test_concurrent_fetch_operations(test_db):
     """Test concurrent fetch operations."""
-    async with connect(test_db) as db:
+    # Use pool_size so shared pool has enough connections for 50 concurrent workers
+    async with connect(test_db, pool_size=60) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
         for i in range(100):
             await db.execute("INSERT INTO t (value) VALUES (?)", [i])

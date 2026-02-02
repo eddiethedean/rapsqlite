@@ -34,7 +34,7 @@ use crate::parameters::{
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
     execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
-    PoolConnectionSlot, PoolSlot,
+    PoolConnectionSlot, PoolSlot, TakenConnectionGuard,
 };
 use crate::query::{
     bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
@@ -110,13 +110,13 @@ pub(crate) struct Connection {
 }
 
 // Note: We do not implement Drop for Connection because:
-// 1. PyO3 pyclass cleanup happens in Python's GC, which may not have Tokio context
+// 1. PyO3 pyclass cleanup happens in Python's GC, which may not have an async runtime
 // 2. Async cleanup (transaction rollback, connection release) requires async context
 // 3. The close() method handles all cleanup properly
 //
 // Resource cleanup behavior:
 // - Arc references will be automatically dropped when Connection is dropped
-// - Pool connections are in PoolConnectionSlot; dropped outside Tokio context are forgotten to avoid panic
+// - Pool connections are in PoolConnectionSlot; dropped outside runtime context are forgotten
 // - However, active transactions will NOT be rolled back automatically
 // - Callback connections will be returned to pool when Arc is dropped
 //
@@ -6759,18 +6759,11 @@ impl Connection {
 
             let future = async move {
                 ensure_not_closed(&closed)?;
-                // Type alias for connection taken from slot (slot reference + connection)
-                type TakenConnection =
-                    (Arc<Mutex<PoolConnectionSlot>>, PoolConnection<sqlx::Sqlite>);
-
-                // Keep any borrowed/shared connections exclusively held for the duration of the
-                // backup to avoid concurrent sqlx usage on the same sqlite3* handle.
-                //
-                // For pooled connections, holding the PoolConnection already provides exclusivity.
-                // For transaction/callback connections (stored in Arc<Mutex<Option<...>>>), we take
-                // the connection out of the slot and restore it afterwards.
-                let mut source_taken: Option<TakenConnection> = None;
-                let mut target_taken: Option<TakenConnection> = None;
+                // RAII guards for connections taken out of slots; on drop they forget the
+                // connection (never run sqlx PoolConnection::Drop) so cleanup is safe.
+                // Success path restores explicitly via take_for_restore().
+                let mut source_taken = TakenConnectionGuard::default();
+                let mut target_taken = TakenConnectionGuard::default();
 
                 let result: Result<(), PyErr> = async {
                     // Determine source connection kind.
@@ -6796,7 +6789,7 @@ impl Connection {
                             .0
                             .take()
                             .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
-                        source_taken = Some((Arc::clone(&transaction_connection), conn));
+                        source_taken = TakenConnectionGuard::new(Arc::clone(&transaction_connection), conn);
                     } else if has_callbacks_flag {
                         ensure_callback_connection(
                             &path,
@@ -6813,7 +6806,7 @@ impl Connection {
                             .0
                             .take()
                             .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-                        source_taken = Some((Arc::clone(&callback_connection), conn));
+                        source_taken = TakenConnectionGuard::new(Arc::clone(&callback_connection), conn);
                     } else {
                         let pool_clone = get_or_create_pool(
                             &path,
@@ -6845,7 +6838,7 @@ impl Connection {
                     }
 
                     // Get a mutable reference to the exclusive source connection.
-                    let source_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some((_, ref mut conn)) = source_taken {
+                    let source_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some(conn) = source_taken.as_mut() {
                         conn
                     } else {
                         source_pool_conn.0.as_mut().expect("source_pool_conn must exist")
@@ -6967,7 +6960,7 @@ impl Connection {
                             let conn = guard.0.take().ok_or_else(|| {
                                 OperationalError::new_err("Target transaction connection not available")
                             })?;
-                            target_taken = Some((Arc::clone(&target_transaction_connection), conn));
+                            target_taken = TakenConnectionGuard::new(Arc::clone(&target_transaction_connection), conn);
                         } else if target_has_callbacks_flag {
                             ensure_callback_connection(
                                 &target_path,
@@ -6983,7 +6976,7 @@ impl Connection {
                             let conn = guard.0.take().ok_or_else(|| {
                                 OperationalError::new_err("Target callback connection not available")
                             })?;
-                            target_taken = Some((Arc::clone(&target_callback_connection), conn));
+                            target_taken = TakenConnectionGuard::new(Arc::clone(&target_callback_connection), conn);
                         } else {
                             let target_pool_clone = get_or_create_pool(
                                 &target_path,
@@ -7014,7 +7007,7 @@ impl Connection {
                             );
                         }
 
-                        let target_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some((_, ref mut conn)) = target_taken {
+                        let target_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some(conn) = target_taken.as_mut() {
                             conn
                         } else {
                             target_pool_conn.0.as_mut().expect("target_pool_conn must exist")
@@ -7139,11 +7132,11 @@ impl Connection {
                 .await;
 
                 // Restore any taken connections back to their slots.
-                if let Some((slot, conn)) = source_taken {
+                if let Some((slot, conn)) = source_taken.take_for_restore() {
                     let mut g = slot.lock().await;
                     g.0 = Some(conn);
                 }
-                if let Some((slot, conn)) = target_taken {
+                if let Some((slot, conn)) = target_taken.take_for_restore() {
                     let mut g = slot.lock().await;
                     g.0 = Some(conn);
                 }

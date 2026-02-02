@@ -133,7 +133,7 @@ async def test_connection_pooling_pattern(test_db):
 
     Uses a single shared connection pool. Sequential inserts (no concurrent
     gather) avoid blocking/timeouts under CI where concurrent pool acquisition
-    can hang or hit Tokio context issues. Still verifies pool_size and
+    can hang or hit pool acquisition timeouts. Still verifies pool_size and
     connection_timeout are respected and multiple operations share the pool.
     """
     n_messages = 15

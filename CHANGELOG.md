@@ -94,7 +94,7 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 - **Rust unit tests** — `src/parameters.rs`: tests for `find_named_parameter_placeholders` (colon, at, dollar, multiple, underscore/numbers, none, colon-not-param). `src/errors.rs`: existing tests for `sanitize_query`. Total 16 Rust unit tests.
 - **Unified dev test run** — `scripts/dev_test.sh` now runs Rust unit tests first (via `scripts/run_rust_tests.sh` on macOS/Linux, or `cargo test` on Windows), then Python pytest. Single command for full test run.
 - **CI Rust tests** — Rust unit tests run on all platforms: `ubuntu-latest`, `macos-latest`, `windows-latest` (macOS uses `run_rust_tests.sh` for libpython).
-- **Python test noise** — `pyproject.toml` filterwarnings for Tokio/unraisable-exception warnings during parallel runs; `tests/README.md` documents full test run (Rust + Python), fixtures, and warning filter.
+- **Python test noise** — `pyproject.toml` filterwarnings for unraisable-exception warnings during parallel runs; `tests/README.md` documents full test run (Rust + Python), fixtures, and warning filter.
 
 ### Fixed - Error sanitization (2026-01-31)
 
@@ -117,7 +117,7 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 
 ### Fixed - Test improvements (2026-01-30)
 
-- **aiohttp test** — Refactored `tests/test_aiohttp_example.py` to avoid `TestServer`/`TestClient` which required network socket binding. Test now directly invokes handler function with mock request pattern. Added `filterwarnings` marker to suppress Tokio context cleanup warning (known PyO3 async limitation during GC).
+- **aiohttp test** — Refactored `tests/test_aiohttp_example.py` to avoid `TestServer`/`TestClient` which required network socket binding. Test now directly invokes handler function with mock request pattern. Added `filterwarnings` marker to suppress async cleanup warning during GC (known PyO3 limitation).
 
 ### Added - Phase 3 plan implementation (2026-01-30)
 
@@ -278,14 +278,7 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 
 - **init_hook timing** — init_hook now runs *after* the transaction connection is acquired and set to Active in both `begin()` and `transaction()` context manager, so tables created in init_hook are visible for the rest of the transaction.
 - **init_hook pool isolation** — When init_hook runs inside an active transaction and calls `conn.execute()`, the execute path now uses the transaction connection instead of acquiring from the pool (avoids "pool timed out" when pool size is 1).
-- **Slow tests** — `test_iterdump_quotes_identifiers`: skip `BEGIN TRANSACTION`/`COMMIT` when replaying iterdump to avoid "cannot start a transaction within a transaction". Backup tests in `test_callback_robustness.py`: use a fresh connection for backup after closing the write connection (avoids backup timeouts). `test_connection_pooling_pattern`: sequential inserts to avoid concurrent pool hang/timeout. `test_backup_aiosqlite`: complete test (run backup, close all connections) so teardown no longer triggers Tokio-context panic warning.
-
-### Added - Tokio panic investigation and mitigation
-
-- **`docs/reference/tokio-panic-investigation.md`** — Documents root cause (sqlx `PoolConnection::Drop` calls `crate::rt::spawn`; GC has no Tokio context), reproduction, and mitigation options.
-- **`scripts/repro_tokio_panic.py`** — Minimal repro: create Connection, use once, do not close, then `gc.collect()` to trigger panic.
-- **Resource cleanup docs** — Advanced usage guide and SECURITY.md note: always use `async with` or `await conn.close()`; abandoning a connection can cause "this functionality requires a Tokio context" during GC.
-- **Best-effort `Connection.__del__`** — Schedules `close()` on the running event loop when a connection is GC'd without close; best-effort only (no guarantees about loop lifetime or finalizer order).
+- **Slow tests** — `test_iterdump_quotes_identifiers`: skip `BEGIN TRANSACTION`/`COMMIT` when replaying iterdump to avoid "cannot start a transaction within a transaction". Backup tests in `test_callback_robustness.py`: use a fresh connection for backup after closing the write connection (avoids backup timeouts). `test_connection_pooling_pattern`: sequential inserts to avoid concurrent pool hang/timeout. `test_backup_aiosqlite`: complete test (run backup, close all connections) so teardown no longer triggers cleanup warnings.
 
 ### Changed
 

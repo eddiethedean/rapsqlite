@@ -202,6 +202,7 @@ def connect(
     idle_timeout: int | None = None,
     loop: Any = None,
     aiosqlite_compat: bool = False,
+    pool_size: int | None = None,
     **kwargs: Any,
 ) -> ConnectionT:
     """Connect to a SQLite database.
@@ -234,6 +235,9 @@ def connect(
             aiosqlite/sqlite3). Use for drop-in ``import rapsqlite as aiosqlite``
             without changing code that expects tuple rows. Default False (rows
             are lists).
+        pool_size: Optional max connections in the shared pool for this path.
+            Set before first use so the pool is created with this size (e.g. for
+            high-concurrency tests). Default None (pool uses internal minimum).
         **kwargs: Additional arguments (currently ignored, reserved for future use)
 
     Returns:
@@ -313,6 +317,8 @@ def connect(
             raise
     if idle_timeout is not None:
         conn.idle_timeout = idle_timeout
+    if pool_size is not None:
+        conn.pool_size = pool_size
     if aiosqlite_compat:
         conn.row_factory = "tuple"
     return cast(ConnectionT, conn)

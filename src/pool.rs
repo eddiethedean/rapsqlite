@@ -19,7 +19,7 @@ use crate::OperationalError;
 
 /// Wrapper around `Option<PoolConnection>` that, when dropped outside a Tokio context,
 /// forgets the connection instead of dropping it. This prevents sqlx's `PoolConnection::Drop`
-/// from calling `tokio::spawn` without a runtime (which panics during Python GC/shutdown).
+/// from running without a runtime (e.g. during Python GC/shutdown).
 #[derive(Default)]
 pub(crate) struct PoolConnectionSlot(pub(crate) Option<PoolConnection<sqlx::Sqlite>>);
 
@@ -35,7 +35,7 @@ impl Drop for PoolConnectionSlot {
 
 /// Wrapper around `Option<SqlitePool>` that, when dropped outside a Tokio context,
 /// forgets the pool instead of dropping it. This prevents sqlx pool shutdown from
-/// dropping connections (PoolConnection) without a runtime (which panics during Python GC/shutdown).
+/// dropping connections (PoolConnection) without a runtime (e.g. during Python GC/shutdown).
 #[derive(Default)]
 pub(crate) struct PoolSlot(pub(crate) Option<SqlitePool>);
 
@@ -49,12 +49,56 @@ impl Drop for PoolSlot {
     }
 }
 
+/// RAII guard for a PoolConnection taken out of a slot (e.g. during backup).
+/// When dropped, never runs sqlx's PoolConnection::Drop (which requires Tokio);
+/// instead forgets the connection if still held. Callers must explicitly restore
+/// on the success path via take_for_restore() and then put the connection back
+/// into the slot.
+pub(crate) struct TakenConnectionGuard(
+    Option<(Arc<Mutex<PoolConnectionSlot>>, PoolConnection<sqlx::Sqlite>)>,
+);
+
+impl Default for TakenConnectionGuard {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl TakenConnectionGuard {
+    pub(crate) fn new(
+        slot: Arc<Mutex<PoolConnectionSlot>>,
+        conn: PoolConnection<sqlx::Sqlite>,
+    ) -> Self {
+        Self(Some((slot, conn)))
+    }
+
+    /// Mutable reference to the held connection, if any.
+    pub(crate) fn as_mut(&mut self) -> Option<&mut PoolConnection<sqlx::Sqlite>> {
+        self.0.as_mut().map(|(_, c)| c)
+    }
+
+    /// Take the (slot, connection) for explicit restore. Leaves the guard empty so Drop is a no-op.
+    pub(crate) fn take_for_restore(
+        &mut self,
+    ) -> Option<(Arc<Mutex<PoolConnectionSlot>>, PoolConnection<sqlx::Sqlite>)> {
+        self.0.take()
+    }
+}
+
+impl Drop for TakenConnectionGuard {
+    fn drop(&mut self) {
+        if let Some((_, conn)) = self.0.take() {
+            std::mem::forget(conn);
+        }
+    }
+}
+
 /// Minimum pool size when creating a shared pool so many concurrent
 /// Connection objects to the same path can acquire connections.
 const SHARED_POOL_MIN_CONNECTIONS: u32 = 25;
 
 /// Global registry: path -> PoolSlot. Connections to the same path share one pool.
-/// PoolSlot forgets the pool when dropped without Tokio (avoids panic at process exit).
+/// PoolSlot forgets the pool when dropped without Tokio (safe at process exit).
 fn global_registry() -> &'static StdMutex<HashMap<String, PoolSlot>> {
     static REGISTRY: OnceLock<StdMutex<HashMap<String, PoolSlot>>> = OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
