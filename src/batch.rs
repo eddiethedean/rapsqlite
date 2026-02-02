@@ -8,7 +8,7 @@ use libsqlite3_sys::{
     SQLITE_STATIC,
 };
 use std::ffi::{CStr, CString};
-use std::os::raw::c_int;
+use std::os::raw::{c_char, c_int};
 
 use crate::types::SqliteParam;
 
@@ -114,12 +114,23 @@ pub(crate) fn execute_many_raw_core(
                 SqliteParam::Text(s) => {
                     let bytes = s.as_bytes();
                     // SQLITE_STATIC: buffer valid until sqlite3_step() returns; no copy.
-                    // libsqlite3-sys bindings expect *const u8 for sqlite3_bind_text.
+                    // libsqlite3-sys bindings: aarch64 expects *const u8, others *const c_char (i8).
+                    let text_ptr = bytes.as_ptr();
+                    let ptr = {
+                        #[cfg(target_arch = "aarch64")]
+                        {
+                            text_ptr
+                        }
+                        #[cfg(not(target_arch = "aarch64"))]
+                        {
+                            text_ptr as *const c_char
+                        }
+                    };
                     unsafe {
                         sqlite3_bind_text(
                             stmt,
                             idx,
-                            bytes.as_ptr(),
+                            ptr,
                             bytes.len() as c_int,
                             SQLITE_STATIC(),
                         )
