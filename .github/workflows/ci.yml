@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  python-lint:
+    name: Python (ruff, mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install ruff and mypy
+        run: pip install -r requirements-ci.txt
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Ruff check
+        run: ruff check .
+      - name: Mypy
+        run: mypy rapsqlite
+
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Check format
+        run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Audit
+        run: cargo audit
+
+  deny:
+    name: Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Deny
+        run: cargo deny check advisories bans sources
+
+  rust-tests:
+    name: Rust unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Set PYO3_PYTHON (macOS)
+        if: matrix.os == 'macos-latest'
+        run: echo "PYO3_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      - name: Run Rust tests (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          cargo test --no-default-features --lib
+      - name: Run Rust tests (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: ./scripts/run_rust_tests.sh
+      - name: Run Rust tests (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          cargo test --no-default-features --lib
+
+  python-tests:
+    name: Python tests - ${{ matrix.os }} py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.python-version == '3.14' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-py-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-py-
+      - name: Create venv
+        run: python -m venv .venv
+      - name: Set Python path
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "PY=.venv/Scripts/python" >> $GITHUB_ENV
+          else
+            echo "PY=.venv/bin/python" >> $GITHUB_ENV
+          fi
+      - name: Verify Python version
+        run: $PY --version
+      - name: Install maturin and test deps
+        run: $PY -m pip install maturin && $PY -m pip install -r requirements-test.txt alembic sqlalchemy greenlet
+      - name: Build and install extension
+        run: $PY -m maturin develop --release
+        env:
+          VIRTUAL_ENV: ${{ github.workspace }}/.venv
+      - name: Run Python tests
+        run: $PY -m pytest tests/ -v --tb=short -m "not slow and not stress and (not performance or perf_smoke)" --timeout 90
