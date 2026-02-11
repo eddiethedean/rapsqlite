@@ -47,7 +47,7 @@ All benchmarks use the **same structure for both packages** (no special-casing);
 **System**: macOS (Darwin arm64)  
 **Python Version**: 3.10+  
 **SQLite Version**: 3.51.0  
-**rapsqlite Version**: 0.3.0-dev
+**rapsqlite Version**: 0.3.1
 
 *Note: rapsqlite requires Python 3.10+. Actual benchmark results will vary based on system configuration, load, and SQLite version. Run the benchmarks on your system for accurate measurements.*
 
