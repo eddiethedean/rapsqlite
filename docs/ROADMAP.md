@@ -4,7 +4,7 @@ This roadmap outlines the development plan for `rapsqlite`, a true async SQLite 
 
 ## Current Status
 
-**Current Version: v0.3.0** ✅  
+**Current Version: v0.3.1** ✅  
 **Phase 1: Complete** ✅  
 **Phase 2: Complete** ✅  
 **Phase 3: Complete** ✅  
@@ -232,7 +232,7 @@ Following semantic versioning:
 | v0.3.x | Phase 3 — Advanced features & aiosqlite parity | ✅ Complete (v0.3.0 released) |
 | v1.0.0 | Phase 4 — Production ready | 📋 Planned |
 
-**Current Version: v0.3.0**
+**Current Version: v0.3.1**
 
 ---
 

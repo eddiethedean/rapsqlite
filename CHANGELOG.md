@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **v0.1.x**: Phase 1 — Core functionality (MVP and core features)
 - **v0.2.x**: Phase 2 — Feature-complete drop-in replacement
-- **v0.3.x**: Phase 3 — Advanced features & aiosqlite parity - **Current: v0.3.0-dev**
+- **v0.3.x**: Phase 3 — Advanced features & aiosqlite parity - **Current: v0.3.1**
 - **v1.0.0**: Phase 4 — Production ready (stable API release)
 
 ## [1.0.0] - TBA (Phase 4: Production Ready)
@@ -31,6 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Production stability validated
 
 _Note: v1.0.0 release details will be added after Phase 4 completion._
+
+## [0.3.1] - Unreleased
+
+### Changed - Structure and CI (2026-02-11)
+
+- **Python SRP refactor** — Split `rapsqlite/__init__.py` into `_transaction_helpers`, `_query_helpers`, `_metrics`; split `_compat` into composable patch modules (lifecycle, cursor_chain, commit_rollback, iterdump_backup, connection_conveniences, slow_query). Single entry point `apply_compat()` orchestrates applicators. No public API change.
+- **Rust SRP refactor** — Schema introspection in `src/connection/schema.rs`, UDF/callbacks in `src/connection/callbacks.rs`, backup flow in `src/connection/backup.rs`. Added `process_parameters()` in `src/parameters.rs`; removed duplicate parameter-processing blocks from `connection/mod.rs`.
+- **CI** — Workflows aligned with robin-sparkless: `ci.yml` (push/PR: python-lint, format, clippy, audit, deny, rust-tests, python-tests), `release.yml` (tags `v*`: checks then PyPI via messense/maturin-action), `python_publish_manual.yml`, `python_publish_failed.yml`. Added `requirements-ci.txt`, `deny.toml`. Removed legacy publish/security workflows.
+
+### Fixed
+
+- **mypy** — `rapsqlite/sqlalchemy.py`: `import_dbapi` return type `DBAPIModule` with cast; `get_pool_class` returns cast to `type[pool.Pool]` to satisfy no-any-return.
+- **Lint** — Removed unused `_is_no_tx_error_message` re-export from `_compat/__init__.py`; `dbapi` imports it from `_compat.commit_rollback`. Removed unused `Type` import from `_compat/slow_query.py`.
 
 ## [0.3.0] - TBA (Phase 3: Advanced Features & aiosqlite Parity)
 
