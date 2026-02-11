@@ -15,13 +15,14 @@ You can also install both in one step: ``pip install rapsqlite[sqlalchemy]``.
 import math
 import re
 import sqlite3
-from typing import Any
+from typing import Any, cast
 
 try:
     from sqlalchemy.dialects import registry
     from sqlalchemy.dialects.sqlite.pysqlite import SQLiteDialect_pysqlite
     from sqlalchemy import pool
     from sqlalchemy.engine import URL
+    from sqlalchemy.engine.interfaces import DBAPIModule
     from sqlalchemy.util.concurrency import await_fallback as _await
     from sqlalchemy.connectors.asyncio import (
         AsyncAdapt_dbapi_connection,
@@ -120,14 +121,14 @@ class SQLiteDialect_rapsqlite(SQLiteDialect_pysqlite):
     supports_server_side_cursors = False
 
     @classmethod
-    def import_dbapi(cls) -> _RapsqliteDialectModule:  # type: ignore[override]
-        return _RapsqliteDialectModule()
+    def import_dbapi(cls) -> DBAPIModule:
+        return cast(DBAPIModule, _RapsqliteDialectModule())
 
     @classmethod
     def get_pool_class(cls, url: URL) -> type[pool.Pool]:
         if cls._is_url_file_db(url):
-            return pool.AsyncAdaptedQueuePool
-        return pool.StaticPool
+            return cast(type[pool.Pool], pool.AsyncAdaptedQueuePool)
+        return cast(type[pool.Pool], pool.StaticPool)
 
     def has_table(
         self, connection: Any, table_name: str, schema: str | None = None, **kw: Any
