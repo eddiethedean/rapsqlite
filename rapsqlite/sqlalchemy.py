@@ -129,7 +129,9 @@ class SQLiteDialect_rapsqlite(SQLiteDialect_pysqlite):
             return pool.AsyncAdaptedQueuePool
         return pool.StaticPool
 
-    def has_table(self, connection: Any, table_name: str, schema: str | None = None, **kw: Any) -> bool:
+    def has_table(
+        self, connection: Any, table_name: str, schema: str | None = None, **kw: Any
+    ) -> bool:
         """Override to use sqlite_master SELECT instead of PRAGMA table_info.
 
         The base implementation uses _get_table_pragma and skips fetchall() when
@@ -143,11 +145,11 @@ class SQLiteDialect_rapsqlite(SQLiteDialect_pysqlite):
             return False
         if schema is not None:
             qschema = self.identifier_preparer.quote_identifier(schema)
-            stmt = f"SELECT 1 FROM {qschema}.sqlite_master WHERE type='table' AND name=?"
-        else:
             stmt = (
-                "SELECT 1 FROM (SELECT name FROM sqlite_master UNION ALL SELECT name FROM sqlite_temp_master) WHERE name=?"
+                f"SELECT 1 FROM {qschema}.sqlite_master WHERE type='table' AND name=?"
             )
+        else:
+            stmt = "SELECT 1 FROM (SELECT name FROM sqlite_master UNION ALL SELECT name FROM sqlite_temp_master) WHERE name=?"
         result = connection.exec_driver_sql(stmt, (table_name,))
         row = result.fetchone()
         return row is not None

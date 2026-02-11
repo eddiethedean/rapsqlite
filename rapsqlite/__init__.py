@@ -50,6 +50,7 @@ Example:
 """
 
 import asyncio
+import inspect
 import os
 import re
 import time
@@ -163,7 +164,7 @@ def _connection_execute_iter(
 
 Connection.execute_iter = _connection_execute_iter
 
-__version__: str = "0.3.0"
+__version__: str = "0.3.1"
 __all__: list[str] = [
     "Connection",
     "Cursor",
@@ -297,15 +298,33 @@ def connect(
     """
     # Accept pathlib.Path / os.PathLike for aiosqlite compatibility (e.g. aiosqlite smoke tests)
     path_str = os.fspath(path) if not isinstance(path, str) else path
+
+    # Prefer signature-based filtering of kwargs over brittle TypeError message parsing.
+    # Older wheels or non-standard builds may not expose a full signature; in that case
+    # we fall back to passing only the core arguments and let TypeError surface.
+    supports_iter_chunk = False
+    supports_loop_param = False
     try:
-        conn = Connection(
-            path_str,
-            pragmas=pragmas,
-            timeout=timeout,
-            iter_chunk_size=iter_chunk_size,
-            loop_param=loop,
-        )
+        sig = inspect.signature(Connection)
+    except (TypeError, ValueError):
+        sig = None
+    if sig is not None:
+        supports_iter_chunk = "iter_chunk_size" in sig.parameters
+        supports_loop_param = "loop_param" in sig.parameters
+
+    conn_kwargs: dict[str, Any] = {
+        "pragmas": pragmas,
+        "timeout": timeout,
+    }
+    if supports_iter_chunk:
+        conn_kwargs["iter_chunk_size"] = iter_chunk_size
+    if supports_loop_param:
+        conn_kwargs["loop_param"] = loop
+
+    try:
+        conn = Connection(path_str, **conn_kwargs)
     except TypeError as e:
+        # Fallback for older wheels where signature inspection is not reliable.
         err = str(e)
         if (
             "iter_chunk_size" in err

@@ -16,6 +16,7 @@ from . import (
     InterfaceError,
 )
 from . import connect as _connect
+from ._compat import _is_no_tx_error_message
 
 T = TypeVar("T")
 
@@ -378,13 +379,8 @@ class AsyncConnection:
         try:
             await self._conn.commit()
         except OperationalError as e:
-            # DBAPI compat: commit() is a no-op when not in a transaction
-            msg = str(e).lower()
-            if "transaction" in msg and (
-                "not available" in msg
-                or "in progress" in msg
-                or "no transaction" in msg
-            ):
+            # DBAPI compat: commit() is a no-op when not in a transaction.
+            if _is_no_tx_error_message(str(e)):
                 return
             raise
 
@@ -392,13 +388,8 @@ class AsyncConnection:
         try:
             await self._conn.rollback()
         except OperationalError as e:
-            # DBAPI compat: rollback() is a no-op when not in a transaction
-            msg = str(e).lower()
-            if "transaction" in msg and (
-                "not available" in msg
-                or "in progress" in msg
-                or "no transaction" in msg
-            ):
+            # DBAPI compat: rollback() is a no-op when not in a transaction.
+            if _is_no_tx_error_message(str(e)):
                 return
             raise
 
@@ -423,8 +414,9 @@ class AsyncConnection:
     async def close(self) -> None:
         if self._closed:
             return
-        await self._conn.close()
-        self._closed = True
+        # Route explicit close() through the same path as context manager exit
+        # so that the underlying connection's __aexit__ is always invoked once.
+        await self.__aexit__(None, None, None)
 
 
 # Re-export raw Cursor for type hints / consumers that need it

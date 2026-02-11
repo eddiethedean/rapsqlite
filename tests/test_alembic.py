@@ -155,7 +155,9 @@ def downgrade() -> None:
 '''
 
 
-def _run_alembic(cwd: str, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
+def _run_alembic(
+    cwd: str, *args: str, timeout: int = 30
+) -> subprocess.CompletedProcess:
     """Run alembic in cwd with given args. Returns CompletedProcess."""
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
@@ -235,6 +237,7 @@ def test_alembic_upgrade_head_with_rapsqlite(alembic_root, tmp_path):
             assert rows == [[1, "migrated"]]
 
     import asyncio
+
     asyncio.run(check())
 
     cleanup_db(str(db_path))
@@ -271,6 +274,7 @@ def test_alembic_upgrade_then_downgrade_base(alembic_root, tmp_path, dialect):
                 await conn.fetch_all("SELECT * FROM alembic_test")
 
     import asyncio
+
     asyncio.run(check())
     cleanup_db(str(db_path))
 
@@ -286,9 +290,7 @@ def _setup_three_revisions(root: object, db_url: str, db_path: object) -> None:
     (versions / "001_create_alembic_test.py").write_text(
         _revision_create_table(), encoding="utf-8"
     )
-    (versions / "002_add_email.py").write_text(
-        _revision_add_column(), encoding="utf-8"
-    )
+    (versions / "002_add_email.py").write_text(_revision_add_column(), encoding="utf-8")
     (versions / "003_alembic_extra.py").write_text(
         _revision_second_table(), encoding="utf-8"
     )
@@ -320,6 +322,7 @@ def test_alembic_multiple_revisions_upgrade_downgrade_stepwise(
             assert r2 == [[1, "extra"]]
 
     import asyncio
+
     asyncio.run(verify_head())
 
     r = _run_alembic(str(root), "downgrade", "-1")
@@ -386,6 +389,7 @@ def test_alembic_upgrade_to_revision_then_head_then_downgrade_steps(
                 await conn.fetch_all("SELECT * FROM alembic_extra")
 
     import asyncio
+
     asyncio.run(verify_002())
 
     r = _run_alembic(str(root), "upgrade", "head")
@@ -420,4 +424,3 @@ def test_alembic_upgrade_to_revision_then_head_then_downgrade_steps(
 
     asyncio.run(verify_base())
     cleanup_db(str(db_path))
-

@@ -19,6 +19,20 @@ from rapsqlite._connection_state import _cleanup_conn_state
 if TYPE_CHECKING:
     pass
 
+
+# Shared helper for detecting "no active transaction" commit/rollback errors
+def _is_no_tx_error_message(msg: str) -> bool:
+    """Return True if the error message indicates no active transaction.
+
+    This centralizes the logic for treating commit()/rollback() outside a
+    transaction as a no-op for DBAPI/aiosqlite compatibility.
+    """
+    msg = msg.lower()
+    if "transaction" not in msg:
+        return False
+    return "not available" in msg or "in progress" in msg or "no transaction" in msg
+
+
 # Module-level refs set in apply_compat
 _orig_set_progress_handler: Any = None
 _orig_cursor_execute: Any = None
@@ -78,10 +92,7 @@ async def _commit_noop_on_no_tx(
     try:
         await _orig_commit(self)
     except operational_error_type as e:
-        msg = str(e).lower()
-        if "transaction" in msg and (
-            "not available" in msg or "in progress" in msg or "no transaction" in msg
-        ):
+        if _is_no_tx_error_message(str(e)):
             return
         raise
 
@@ -92,10 +103,7 @@ async def _rollback_noop_on_no_tx(
     try:
         await _orig_rollback(self)
     except operational_error_type as e:
-        msg = str(e).lower()
-        if "transaction" in msg and (
-            "not available" in msg or "in progress" in msg or "no transaction" in msg
-        ):
+        if _is_no_tx_error_message(str(e)):
             return
         raise
 

@@ -52,7 +52,7 @@ use crate::{
     Cursor, ExecuteContextManager, NotSupportedError, ProgrammingError, SavepointContextManager,
     TransactionContextManager, ValueError,
 };
-use crate::{InterfaceError, OperationalError};
+use crate::{InterfaceError, InternalError, OperationalError};
 
 /// Async SQLite connection.
 #[pyclass]
@@ -158,9 +158,20 @@ pub(crate) struct ConnectionExecutionState {
     pub(crate) explicit_transaction: Arc<Mutex<bool>>,
 }
 
+/// Helper to turn a poisoned StdMutex into a Python InternalError instead of panicking.
+fn lock_or_internal_error<'a, T>(
+    mutex: &'a StdMutex<T>,
+    context: &str,
+) -> Result<std::sync::MutexGuard<'a, T>, PyErr> {
+    mutex
+        .lock()
+        .map_err(|_| InternalError::new_err(format!("internal error: mutex poisoned in {context}")))
+}
+
 /// Returns Ok(()) if the connection is not closed; otherwise returns InterfaceError.
 pub(crate) fn ensure_not_closed(closed: &Arc<StdMutex<bool>>) -> Result<(), PyErr> {
-    if *closed.lock().unwrap() {
+    let guard = lock_or_internal_error(closed, "Connection::ensure_not_closed")?;
+    if *guard {
         return Err(InterfaceError::new_err("connection is closed"));
     }
     Ok(())
@@ -1080,10 +1091,9 @@ impl Connection {
                         pending_conn.0 = Some(conn);
                     }
 
-                    let conn = pending_conn
-                        .0
-                        .as_mut()
-                        .expect("pending_conn must be set before BEGIN");
+                    let conn = pending_conn.0.as_mut().ok_or_else(|| {
+                        InternalError::new_err("internal error: pending_conn not set before BEGIN")
+                    })?;
 
                     // Set PRAGMA busy_timeout on this connection to handle lock contention
                     // Convert timeout from seconds (float) to milliseconds (integer) for SQLite
@@ -6838,11 +6848,16 @@ impl Connection {
                     }
 
                     // Get a mutable reference to the exclusive source connection.
-                    let source_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some(conn) = source_taken.as_mut() {
-                        conn
-                    } else {
-                        source_pool_conn.0.as_mut().expect("source_pool_conn must exist")
-                    };
+                    let source_conn: &mut PoolConnection<sqlx::Sqlite> =
+                        if let Some(conn) = source_taken.as_mut() {
+                            conn
+                        } else {
+                            source_pool_conn.0.as_mut().ok_or_else(|| {
+                                InternalError::new_err(
+                                    "internal error: source_pool_conn must exist",
+                                )
+                            })?
+                        };
 
                     // Acquire an exclusive target handle.
                     let mut target_pool_conn = PoolConnectionSlot::default();
@@ -7007,11 +7022,16 @@ impl Connection {
                             );
                         }
 
-                        let target_conn: &mut PoolConnection<sqlx::Sqlite> = if let Some(conn) = target_taken.as_mut() {
-                            conn
-                        } else {
-                            target_pool_conn.0.as_mut().expect("target_pool_conn must exist")
-                        };
+                        let target_conn: &mut PoolConnection<sqlx::Sqlite> =
+                            if let Some(conn) = target_taken.as_mut() {
+                                conn
+                            } else {
+                                target_pool_conn.0.as_mut().ok_or_else(|| {
+                                    InternalError::new_err(
+                                        "internal error: target_pool_conn must exist",
+                                    )
+                                })?
+                            };
 
                         let sqlite_conn: &mut SqliteConnection = &mut *target_conn;
                         let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
