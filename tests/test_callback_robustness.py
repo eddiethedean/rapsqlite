@@ -4,8 +4,6 @@ These tests cover edge cases, error scenarios, and complex usage patterns
 that might differ between rapsqlite and aiosqlite implementations.
 """
 
-import os
-
 import pytest
 
 from conftest import unlink_with_retry

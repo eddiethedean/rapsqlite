@@ -1,0 +1,16 @@
+# cargo-deny config (advisories, bans, sources). See https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+deny = []
+skip = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

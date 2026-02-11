@@ -3,11 +3,12 @@
 #![allow(non_local_definitions)] // False positive from pyo3 macros
 
 mod backup;
+mod callbacks;
+mod schema;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{PyDict, PyInt, PyList, PyString};
 use pyo3_async_runtimes::tokio::future_into_py;
-use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqliteConnection;
 use sqlx::{Column, Row};
 use std::collections::HashMap;
@@ -17,24 +18,18 @@ use tokio::sync::Mutex;
 
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{
-    sqlite3, sqlite3_aggregate_context, sqlite3_context, sqlite3_create_collation_v2,
-    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free,
-    sqlite3_get_autocommit, sqlite3_interrupt, sqlite3_libversion, sqlite3_libversion_number,
-    sqlite3_load_extension, sqlite3_progress_handler, sqlite3_result_null, sqlite3_set_authorizer,
-    sqlite3_total_changes, sqlite3_trace_v2, sqlite3_user_data, sqlite3_value, SQLITE_DENY,
-    SQLITE_DETERMINISTIC, SQLITE_OK, SQLITE_TRACE_STMT, SQLITE_UTF8,
+    sqlite3_enable_load_extension, sqlite3_free, sqlite3_interrupt, sqlite3_libversion_number,
+    sqlite3_load_extension, sqlite3_total_changes, SQLITE_OK,
 };
 
 use crate::context_managers::next_savepoint_name;
-use crate::conversion::{py_to_sqlite_c_result, row_to_py_with_factory, sqlite_c_value_to_py};
+use crate::conversion::row_to_py_with_factory;
 use crate::errors::map_sqlx_error;
-use crate::parameters::{
-    process_named_parameters, process_positional_parameters, process_positional_parameters_tuple,
-};
+use crate::parameters::process_parameters;
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
     execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
-    PoolConnectionSlot, PoolSlot, TakenConnectionGuard,
+    PoolConnectionSlot, PoolSlot,
 };
 use crate::query::{
     bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
@@ -175,6 +170,34 @@ pub(crate) fn ensure_not_closed(closed: &Arc<StdMutex<bool>>) -> Result<(), PyEr
         return Err(InterfaceError::new_err("connection is closed"));
     }
     Ok(())
+}
+
+impl Connection {
+    /// Build schema introspection context for delegation to schema module.
+    fn build_schema_context(self_: PyRef<Self>) -> schema::SchemaContext {
+        schema::SchemaContext {
+            path: self_.path.clone(),
+            pool: Arc::clone(&self_.pool),
+            pragmas: Arc::clone(&self_.pragmas),
+            pool_size: Arc::clone(&self_.pool_size),
+            connection_timeout_secs: Arc::clone(&self_.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self_.idle_timeout_secs),
+            transaction_state: Arc::clone(&self_.transaction_state),
+            transaction_connection: Arc::clone(&self_.transaction_connection),
+            callback_connection: Arc::clone(&self_.callback_connection),
+            load_extension_enabled: Arc::clone(&self_.load_extension_enabled),
+            user_functions: Arc::clone(&self_.user_functions),
+            user_aggregates: Arc::clone(&self_.user_aggregates),
+            user_collations: Arc::clone(&self_.user_collations),
+            trace_callback: Arc::clone(&self_.trace_callback),
+            authorizer_callback: Arc::clone(&self_.authorizer_callback),
+            progress_handler: Arc::clone(&self_.progress_handler),
+            init_hook: Arc::clone(&self_.init_hook),
+            init_hook_called: Arc::clone(&self_.init_hook_called),
+            closed: Arc::clone(&self_.closed),
+            connection_self: self_.into(),
+        }
+    }
 }
 
 #[pymethods]
@@ -1409,38 +1432,10 @@ impl Connection {
         // Clone query before processing (it may be moved)
         let original_query = query.clone();
 
-        // Process parameters
-        // Note: Python::with_gil is used here for sync parameter processing before async execution.
-        // The deprecation warning is acceptable as this is a sync context.
+        // Process parameters (sync; Python::with_gil acceptable here)
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
-            let Some(params) = parameters else {
-                return Ok((query, Vec::new()));
-            };
-
-            let params = params.as_borrowed();
-
-            // Check if it's a dict (named parameters)
-            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(py, &query, &dict, Some(&adapters));
-            }
-
-            // Check if it's a list or tuple (positional parameters)
-            if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-
-            // Check if it's a tuple (SQLAlchemy qmark style)
-            if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-
-            // Single value (treat as single positional parameter)
-            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
-            Ok((query, vec![param]))
-        })?;
+        let (processed_query, param_values) =
+            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         // Track query usage for prepared statement cache analytics (Phase 2.13)
         track_query_usage(&query_cache, &processed_query);
@@ -1844,38 +1839,10 @@ impl Connection {
         let converters = Arc::clone(&self_.converters);
         let connection_self = self_.into();
 
-        // Process parameters
-        // Note: Python::with_gil is used here for sync parameter processing before async execution.
-        // The deprecation warning is acceptable as this is a sync context.
+        // Process parameters (sync; Python::with_gil acceptable here)
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
-            let Some(params) = parameters else {
-                return Ok((query, Vec::new()));
-            };
-
-            let params = params.as_borrowed();
-
-            // Check if it's a dict (named parameters)
-            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(py, &query, &dict, Some(&adapters));
-            }
-
-            // Check if it's a list or tuple (positional parameters)
-            if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-
-            // Check if it's a tuple (SQLAlchemy qmark style)
-            if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-
-            // Single value (treat as single positional parameter)
-            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
-            Ok((query, vec![param]))
-        })?;
+        let (processed_query, param_values) =
+            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         // Track query usage for prepared statement cache analytics (Phase 2.13)
         track_query_usage(&query_cache, &processed_query);
@@ -2047,31 +2014,10 @@ impl Connection {
         let converters = Arc::clone(&self_.converters);
         let connection_self = self_.into();
 
-        // Process parameters
-        // Note: Python::with_gil is used here for sync parameter processing before async execution.
-        // The deprecation warning is acceptable as this is a sync context.
+        // Process parameters (sync; Python::with_gil acceptable here)
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
-            let Some(params) = parameters else {
-                return Ok((query, Vec::new()));
-            };
-
-            let params = params.as_borrowed();
-
-            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(py, &query, &dict, Some(&adapters));
-            }
-            if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-            if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
-            Ok((query, vec![param]))
-        })?;
+        let (processed_query, param_values) =
+            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         Python::attach(|py| {
             let future = async move {
@@ -2255,31 +2201,10 @@ impl Connection {
         let converters = Arc::clone(&self_.converters);
         let connection_self = self_.into();
 
-        // Process parameters
-        // Note: Python::with_gil is used here for sync parameter processing before async execution.
-        // The deprecation warning is acceptable as this is a sync context.
+        // Process parameters (sync; Python::with_gil acceptable here)
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
-            let Some(params) = parameters else {
-                return Ok((query, Vec::new()));
-            };
-
-            let params = params.as_borrowed();
-
-            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(py, &query, &dict, Some(&adapters));
-            }
-            if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-            if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
-            Ok((query, vec![param]))
-        })?;
+        let (processed_query, param_values) =
+            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         Python::attach(|py| {
             let future = async move {
@@ -2437,25 +2362,8 @@ impl Connection {
         let adapters = Arc::clone(&self_.adapters);
 
         #[allow(deprecated)]
-        let (processed_query, param_values) = Python::with_gil(|py| -> PyResult<_> {
-            let Some(params) = parameters else {
-                return Ok((query, Vec::new()));
-            };
-            let params = params.as_borrowed();
-            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                return process_named_parameters(py, &query, &dict, Some(&adapters));
-            }
-            if let Ok(list) = params.cast::<PyList>() {
-                let params_vec = process_positional_parameters(py, &list, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-            if let Ok(tup) = params.cast::<PyTuple>() {
-                let params_vec = process_positional_parameters_tuple(py, &tup, Some(&adapters))?;
-                return Ok((query, params_vec));
-            }
-            let param = SqliteParam::apply_adapters_then_from_py(py, &params, Some(&adapters))?;
-            Ok((query, vec![param]))
-        })?;
+        let (processed_query, param_values) =
+            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         if is_select_query(&processed_query) {
             return Err(ProgrammingError::new_err(
@@ -3125,14 +3033,12 @@ impl Connection {
         func: Option<Py<PyAny>>,
         deterministic: bool,
     ) -> PyResult<Py<PyAny>> {
-        // SQLite supports nargs in [-1, 127]. (-1 means "any number of args".)
         if !(-1..=127).contains(&nargs) {
             return Err(ProgrammingError::new_err(format!(
                 "Invalid nargs for create_function: {nargs}. Expected -1..=127."
             )));
         }
         if deterministic {
-            // SQLITE_DETERMINISTIC supported from SQLite 3.8.3 (3008003)
             let v = unsafe { sqlite3_libversion_number() };
             if v < 3008003 {
                 return Err(NotSupportedError::new_err(format!(
@@ -3144,423 +3050,32 @@ impl Connection {
             }
         }
 
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let transaction_connection = Arc::clone(&self.transaction_connection);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let user_functions = Arc::clone(&self.user_functions);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let user_collations = Arc::clone(&self.user_collations);
-        // Need all callback fields to check if all are cleared
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
-        let closed = Arc::clone(&self.closed);
+        let ctx = callbacks::CallbackContext {
+            closed: Arc::clone(&self.closed),
+            path: self.path.clone(),
+            pool: Arc::clone(&self.pool),
+            pragmas: Arc::clone(&self.pragmas),
+            pool_size: Arc::clone(&self.pool_size),
+            connection_timeout_secs: Arc::clone(&self.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
+            transaction_connection: Arc::clone(&self.transaction_connection),
+            callback_connection: Arc::clone(&self.callback_connection),
+            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            user_functions: Arc::clone(&self.user_functions),
+            user_aggregates: Arc::clone(&self.user_aggregates),
+            user_collations: Arc::clone(&self.user_collations),
+            trace_callback: Arc::clone(&self.trace_callback),
+            authorizer_callback: Arc::clone(&self.authorizer_callback),
+            progress_handler: Arc::clone(&self.progress_handler),
+        };
 
         Python::attach(|py| {
-            // Clone the callback with GIL to avoid Send issues
             let func_clone = func.as_ref().map(|f| f.clone_ref(py));
-
-            let future = async move {
-                ensure_not_closed(&closed)?;
-
-                // Trampoline and destructor for UDF registration (shared by both paths)
-                extern "C" fn udf_trampoline(
-                    ctx: *mut sqlite3_context,
-                    argc: std::ffi::c_int,
-                    argv: *mut *mut sqlite3_value,
-                ) {
-                    unsafe {
-                        let user_data = sqlite3_user_data(ctx);
-                        if user_data.is_null() {
-                            sqlite3_result_null(ctx);
-                            return;
-                        }
-                        let callback_ptr = user_data as *mut Py<PyAny>;
-                        #[allow(deprecated)]
-                        Python::with_gil(|py| {
-                            let callback = (*callback_ptr).clone_ref(py);
-                            let mut py_args: Vec<Py<PyAny>> = Vec::new();
-                            for i in 0..argc {
-                                let value_ptr = *argv.add(i as usize);
-                                match sqlite_c_value_to_py(py, value_ptr) {
-                                    Ok(py_val) => py_args.push(py_val),
-                                    Err(e) => {
-                                        let msg = format!("Error converting argument {i}: {e}");
-                                        libsqlite3_sys::sqlite3_result_error(
-                                            ctx,
-                                            msg.as_ptr() as *const std::ffi::c_char,
-                                            msg.len() as i32,
-                                        );
-                                        return;
-                                    }
-                                }
-                            }
-                            let result = match py_args.len() {
-                                0 => callback.bind(py).call0(),
-                                1 => callback.bind(py).call1((py_args[0].clone_ref(py),)),
-                                2 => callback
-                                    .bind(py)
-                                    .call1((py_args[0].clone_ref(py), py_args[1].clone_ref(py))),
-                                3 => callback.bind(py).call1((
-                                    py_args[0].clone_ref(py),
-                                    py_args[1].clone_ref(py),
-                                    py_args[2].clone_ref(py),
-                                )),
-                                4 => callback.bind(py).call1((
-                                    py_args[0].clone_ref(py),
-                                    py_args[1].clone_ref(py),
-                                    py_args[2].clone_ref(py),
-                                    py_args[3].clone_ref(py),
-                                )),
-                                5 => callback.bind(py).call1((
-                                    py_args[0].clone_ref(py),
-                                    py_args[1].clone_ref(py),
-                                    py_args[2].clone_ref(py),
-                                    py_args[3].clone_ref(py),
-                                    py_args[4].clone_ref(py),
-                                )),
-                                _ => {
-                                    let args_tuple = PyTuple::new(
-                                        py,
-                                        py_args.iter().map(|arg: &Py<PyAny>| arg.clone_ref(py)),
-                                    )
-                                    .map_err(|e| format!("Error creating tuple: {e}"));
-                                    match args_tuple {
-                                        Ok(t) => {
-                                            let code = py
-                                                .eval(
-                                                    std::ffi::CString::new(
-                                                        "lambda f, args: f(*args)",
-                                                    )
-                                                    .unwrap()
-                                                    .as_c_str(),
-                                                    None,
-                                                    None,
-                                                )
-                                                .map_err(|e| format!("Error: {e}"));
-                                            match code {
-                                                Ok(unpack_code) => {
-                                                    unpack_code.call1((callback.bind(py), t))
-                                                }
-                                                Err(e) => {
-                                                    let msg = format!("Error: {e}");
-                                                    libsqlite3_sys::sqlite3_result_error(
-                                                        ctx,
-                                                        msg.as_ptr() as *const std::ffi::c_char,
-                                                        msg.len() as i32,
-                                                    );
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            libsqlite3_sys::sqlite3_result_error(
-                                                ctx,
-                                                e.as_ptr() as *const std::ffi::c_char,
-                                                e.len() as i32,
-                                            );
-                                            return;
-                                        }
-                                    }
-                                }
-                            };
-                            match result {
-                                Ok(r) => {
-                                    let _ = py_to_sqlite_c_result(py, ctx, &r);
-                                }
-                                Err(e) => {
-                                    let msg = format!("Python function error: {e}");
-                                    libsqlite3_sys::sqlite3_result_error(
-                                        ctx,
-                                        msg.as_ptr() as *const std::ffi::c_char,
-                                        msg.len() as i32,
-                                    );
-                                }
-                            }
-                        });
-                    }
-                }
-                extern "C" fn udf_destructor(user_data: *mut std::ffi::c_void) {
-                    unsafe {
-                        if !user_data.is_null() {
-                            let _ = Box::from_raw(user_data as *mut Py<PyAny>);
-                        }
-                    }
-                }
-
-                // Prefer transaction_connection when it has a connection (DML-with-callbacks
-                // may have moved it from callback_connection). Otherwise use callback_connection.
-                let trans_has_conn = {
-                    let g = transaction_connection.lock().await;
-                    g.0.is_some()
-                };
-
-                if trans_has_conn {
-                    let mut trans_guard = transaction_connection.lock().await;
-                    let conn = trans_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    let sqlite_conn: &mut SqliteConnection = conn;
-                    let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                        OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                    })?;
-                    let raw_db = handle.as_raw_handle().as_ptr();
-
-                    if func_clone.is_none() {
-                        // Remove the function from user_functions
-                        {
-                            let mut funcs_guard = user_functions.lock().unwrap();
-                            funcs_guard.remove(&name);
-                        }
-
-                        // Remove from SQLite by calling sqlite3_create_function_v2 with NULL callback
-                        let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                            OperationalError::new_err(format!(
-                                "Function name contains null byte: {e}"
-                            ))
-                        })?;
-                        // Safety: raw_db is a valid sqlite3* pointer obtained from
-                        // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                        // for the lifetime of the handle lock. name_cstr is a valid CString.
-                        // We pass NULL for all callbacks to remove the function, which is safe.
-                        let result = unsafe {
-                            sqlite3_create_function_v2(
-                                raw_db,
-                                name_cstr.as_ptr(),
-                                nargs,
-                                SQLITE_UTF8,
-                                std::ptr::null_mut(), // pApp (user data)
-                                None,                 // xFunc (scalar function callback)
-                                None,                 // xStep (aggregate step callback)
-                                None,                 // xFinal (aggregate final callback)
-                                None,                 // xDestroy (destructor)
-                            )
-                        };
-
-                        if result != SQLITE_OK {
-                            return Err(OperationalError::new_err(format!(
-                                "Failed to remove function '{name}': SQLite error code {result}"
-                            )));
-                        }
-
-                        // After removing, check if all callbacks are now cleared
-                        let all_cleared = !has_callbacks(
-                            &load_extension_enabled,
-                            &user_functions,
-                            &user_aggregates,
-                            &user_collations,
-                            &trace_callback,
-                            &authorizer_callback,
-                            &progress_handler,
-                        );
-                        if all_cleared {
-                            // Used transaction_connection: do not release (we're in a transaction)
-                            drop(handle);
-                            return Ok(());
-                        }
-                    } else {
-                        let enc = if deterministic {
-                            SQLITE_UTF8 | SQLITE_DETERMINISTIC
-                        } else {
-                            SQLITE_UTF8
-                        };
-                        // Store the function - need to clone the callback with GIL
-                        // Note: Python::with_gil is used here for sync callback storage in async context.
-                        // The deprecation warning is acceptable as this is a sync operation within async.
-                        #[allow(deprecated)]
-                        let callback_for_storage =
-                            Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
-                        {
-                            let mut funcs_guard = user_functions.lock().unwrap();
-                            funcs_guard.insert(name.clone(), (nargs, callback_for_storage));
-                        }
-
-                        // Create a boxed callback pointer to pass as user data
-                        let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                            OperationalError::new_err(format!(
-                                "Function name contains null byte: {e}"
-                            ))
-                        })?;
-
-                        // Store the Python callback in a Box and pass it as user_data
-                        // Clone it with GIL
-                        // Note: Python::with_gil is used here for sync callback access in async context.
-                        // The deprecation warning is acceptable as this is a sync operation within async.
-                        #[allow(deprecated)]
-                        let callback =
-                            Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
-                        let callback_box: Box<Py<PyAny>> = Box::new(callback);
-                        let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
-
-                        // Safety: raw_db is a valid sqlite3* pointer obtained from
-                        // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                        // for the lifetime of the handle lock. name_cstr is a valid CString.
-                        // callback_ptr is a pointer to Box<Py<PyAny>> created with Box::into_raw.
-                        // The trampoline and destructor functions handle the callback safely.
-                        let result = unsafe {
-                            sqlite3_create_function_v2(
-                                raw_db,
-                                name_cstr.as_ptr(),
-                                nargs,
-                                enc,
-                                callback_ptr, // pApp (user data - the Python callback)
-                                Some(udf_trampoline), // xFunc (scalar function callback)
-                                None,         // xStep (aggregate step callback)
-                                None,         // xFinal (aggregate final callback)
-                                Some(udf_destructor), // xDestroy (destructor)
-                            )
-                        };
-
-                        if result != SQLITE_OK {
-                            // Clean up the callback pointer on error
-                            // Safety: callback_ptr was created with Box::into_raw, so we can
-                            // safely convert it back to Box and drop it. This is safe because
-                            // the function registration failed, so SQLite won't call the destructor.
-                            unsafe {
-                                let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
-                            }
-                            {
-                                let mut funcs_guard = user_functions.lock().unwrap();
-                                funcs_guard.remove(&name);
-                            }
-                            return Err(OperationalError::new_err(format!(
-                                "Failed to create function '{name}': SQLite error code {result}"
-                            )));
-                        }
-                    }
-
-                    return Ok(());
-                }
-
-                // Callback path: ensure and use callback_connection
-                ensure_callback_connection(
-                    &path,
-                    &pool,
-                    &callback_connection,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                    &idle_timeout_secs,
-                )
-                .await?;
-
-                let mut cb_guard = callback_connection.lock().await;
-                let conn = cb_guard.0.as_mut().ok_or_else(|| {
-                    OperationalError::new_err("Callback connection not available")
-                })?;
-
-                let sqlite_conn: &mut SqliteConnection = conn;
-                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                })?;
-                let raw_db = handle.as_raw_handle().as_ptr();
-
-                if func_clone.is_none() {
-                    {
-                        let mut funcs_guard = user_functions.lock().unwrap();
-                        funcs_guard.remove(&name);
-                    }
-
-                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                        OperationalError::new_err(format!("Function name contains null byte: {e}"))
-                    })?;
-                    let result = unsafe {
-                        sqlite3_create_function_v2(
-                            raw_db,
-                            name_cstr.as_ptr(),
-                            nargs,
-                            SQLITE_UTF8,
-                            std::ptr::null_mut(),
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    };
-
-                    if result != SQLITE_OK {
-                        return Err(OperationalError::new_err(format!(
-                            "Failed to remove function '{name}': SQLite error code {result}"
-                        )));
-                    }
-
-                    let all_cleared = !has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-                    if all_cleared {
-                        drop(handle);
-                        drop(cb_guard);
-                        let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.0.take();
-                        return Ok(());
-                    }
-                } else {
-                    let enc = if deterministic {
-                        SQLITE_UTF8 | SQLITE_DETERMINISTIC
-                    } else {
-                        SQLITE_UTF8
-                    };
-                    #[allow(deprecated)]
-                    let callback_for_storage =
-                        Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
-                    {
-                        let mut funcs_guard = user_functions.lock().unwrap();
-                        funcs_guard.insert(name.clone(), (nargs, callback_for_storage));
-                    }
-
-                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                        OperationalError::new_err(format!("Function name contains null byte: {e}"))
-                    })?;
-
-                    #[allow(deprecated)]
-                    let callback =
-                        Python::with_gil(|py| func_clone.as_ref().unwrap().clone_ref(py));
-                    let callback_box: Box<Py<PyAny>> = Box::new(callback);
-                    let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
-
-                    let result = unsafe {
-                        sqlite3_create_function_v2(
-                            raw_db,
-                            name_cstr.as_ptr(),
-                            nargs,
-                            enc,
-                            callback_ptr,
-                            Some(udf_trampoline),
-                            None,
-                            None,
-                            Some(udf_destructor),
-                        )
-                    };
-
-                    if result != SQLITE_OK {
-                        unsafe {
-                            let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
-                        }
-                        {
-                            let mut funcs_guard = user_functions.lock().unwrap();
-                            funcs_guard.remove(&name);
-                        }
-                        return Err(OperationalError::new_err(format!(
-                            "Failed to create function '{name}': SQLite error code {result}"
-                        )));
-                    }
-                }
-
-                Ok(())
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(
+                py,
+                callbacks::create_function_impl(ctx, name, nargs, func_clone, deterministic),
+            )
+            .map(|bound| bound.unbind())
         })
     }
 
@@ -3580,327 +3095,31 @@ impl Connection {
             )));
         }
 
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let user_collations = Arc::clone(&self.user_collations);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let user_functions = Arc::clone(&self.user_functions);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
-        let closed = Arc::clone(&self.closed);
+        let ctx = callbacks::CallbackContext {
+            closed: Arc::clone(&self.closed),
+            path: self.path.clone(),
+            pool: Arc::clone(&self.pool),
+            pragmas: Arc::clone(&self.pragmas),
+            pool_size: Arc::clone(&self.pool_size),
+            connection_timeout_secs: Arc::clone(&self.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
+            transaction_connection: Arc::clone(&self.transaction_connection),
+            callback_connection: Arc::clone(&self.callback_connection),
+            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            user_functions: Arc::clone(&self.user_functions),
+            user_aggregates: Arc::clone(&self.user_aggregates),
+            user_collations: Arc::clone(&self.user_collations),
+            trace_callback: Arc::clone(&self.trace_callback),
+            authorizer_callback: Arc::clone(&self.authorizer_callback),
+            progress_handler: Arc::clone(&self.progress_handler),
+        };
 
         Python::attach(|py| {
-            let class_clone = aggregate_class.as_ref().map(|c| c.clone_ref(py));
-
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                ensure_callback_connection(
-                    &path,
-                    &pool,
-                    &callback_connection,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                    &idle_timeout_secs,
-                )
-                .await?;
-
-                let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                    OperationalError::new_err("Callback connection not available")
-                })?;
-
-                let sqlite_conn: &mut SqliteConnection = conn;
-                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                })?;
-                let raw_db = handle.as_raw_handle().as_ptr();
-
-                if class_clone.is_none() {
-                    // Remove: free stored user_data pointer if any, then unregister from SQLite
-                    let old_ptr = {
-                        let mut guard = user_aggregates.lock().unwrap();
-                        guard.remove(&name).map(|(_, ptr)| ptr)
-                    };
-                    if let Some(ptr) = old_ptr {
-                        if ptr != 0 {
-                            unsafe {
-                                let _ = Box::from_raw(ptr as *mut Py<PyAny>);
-                            }
-                        }
-                    }
-
-                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                        OperationalError::new_err(format!("Aggregate name contains null byte: {e}"))
-                    })?;
-                    let result = unsafe {
-                        sqlite3_create_function_v2(
-                            raw_db,
-                            name_cstr.as_ptr(),
-                            num_params,
-                            SQLITE_UTF8,
-                            std::ptr::null_mut(),
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    };
-                    if result != SQLITE_OK {
-                        return Err(OperationalError::new_err(format!(
-                            "Failed to remove aggregate '{name}': SQLite error code {result}"
-                        )));
-                    }
-
-                    let all_cleared = !has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-                    if all_cleared {
-                        drop(handle);
-                        drop(conn_guard);
-                        let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.0.take();
-                    }
-                    return Ok(());
-                }
-
-                #[allow(deprecated)]
-                let class_for_storage =
-                    Python::with_gil(|py| class_clone.as_ref().unwrap().clone_ref(py));
-                let class_box: Box<Py<PyAny>> = Box::new(class_for_storage);
-                let class_ptr = Box::into_raw(class_box) as *mut std::ffi::c_void;
-                let class_ptr_usize = class_ptr as usize;
-
-                {
-                    let mut guard = user_aggregates.lock().unwrap();
-                    guard.insert(name.clone(), (num_params, class_ptr_usize));
-                }
-
-                // Request enough bytes for one pointer; use unaligned read/write so we don't
-                // require sqlite3_aggregate_context to return pointer-aligned memory (avoids Bus error).
-                const AGG_CTX_SIZE: i32 = 16;
-
-                extern "C" fn aggregate_step(
-                    ctx: *mut sqlite3_context,
-                    argc: std::ffi::c_int,
-                    argv: *mut *mut sqlite3_value,
-                ) {
-                    unsafe {
-                        let user_data = sqlite3_user_data(ctx);
-                        if user_data.is_null() {
-                            return;
-                        }
-                        let class_ptr = user_data as *mut Py<PyAny>;
-
-                        let ctx_buf = sqlite3_aggregate_context(ctx, AGG_CTX_SIZE);
-                        if ctx_buf.is_null() {
-                            return;
-                        }
-                        let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
-                        let mut instance_ptr: *mut Py<PyAny> =
-                            std::ptr::read_unaligned(instance_ptr_ptr);
-
-                        #[allow(deprecated)]
-                        Python::with_gil(|py| {
-                            if instance_ptr.is_null() {
-                                let class = (*class_ptr).clone_ref(py);
-                                let instance = match class.call0(py) {
-                                    Ok(inst) => inst,
-                                    Err(e) => {
-                                        let msg = format!("Python aggregate error: {e}");
-                                        libsqlite3_sys::sqlite3_result_error(
-                                            ctx,
-                                            msg.as_ptr() as *const std::ffi::c_char,
-                                            msg.len() as i32,
-                                        );
-                                        return;
-                                    }
-                                };
-                                let instance_box: Box<Py<PyAny>> = Box::new(instance);
-                                instance_ptr = Box::into_raw(instance_box);
-                                std::ptr::write_unaligned(instance_ptr_ptr, instance_ptr);
-                            }
-
-                            let instance = (*instance_ptr).clone_ref(py);
-                            let mut py_args: Vec<Py<PyAny>> = Vec::new();
-                            for i in 0..argc {
-                                let value_ptr = *argv.add(i as usize);
-                                match sqlite_c_value_to_py(py, value_ptr) {
-                                    Ok(py_val) => py_args.push(py_val),
-                                    Err(e) => {
-                                        let msg = format!("Error converting argument {i}: {e}");
-                                        libsqlite3_sys::sqlite3_result_error(
-                                            ctx,
-                                            msg.as_ptr() as *const std::ffi::c_char,
-                                            msg.len() as i32,
-                                        );
-                                        return;
-                                    }
-                                }
-                            }
-
-                            let step_result = match py_args.len() {
-                                0 => instance.bind(py).call_method0("step"),
-                                1 => instance
-                                    .bind(py)
-                                    .call_method1("step", (py_args[0].clone_ref(py),)),
-                                2 => instance.bind(py).call_method1(
-                                    "step",
-                                    (py_args[0].clone_ref(py), py_args[1].clone_ref(py)),
-                                ),
-                                3 => instance.bind(py).call_method1(
-                                    "step",
-                                    (
-                                        py_args[0].clone_ref(py),
-                                        py_args[1].clone_ref(py),
-                                        py_args[2].clone_ref(py),
-                                    ),
-                                ),
-                                4 => instance.bind(py).call_method1(
-                                    "step",
-                                    (
-                                        py_args[0].clone_ref(py),
-                                        py_args[1].clone_ref(py),
-                                        py_args[2].clone_ref(py),
-                                        py_args[3].clone_ref(py),
-                                    ),
-                                ),
-                                5 => instance.bind(py).call_method1(
-                                    "step",
-                                    (
-                                        py_args[0].clone_ref(py),
-                                        py_args[1].clone_ref(py),
-                                        py_args[2].clone_ref(py),
-                                        py_args[3].clone_ref(py),
-                                        py_args[4].clone_ref(py),
-                                    ),
-                                ),
-                                _ => {
-                                    let args_tuple =
-                                        PyTuple::new(py, py_args.iter().map(|a| a.clone_ref(py)));
-                                    match args_tuple {
-                                        Ok(t) => instance.bind(py).call_method1("step", (t,)),
-                                        Err(e) => {
-                                            let msg = format!("Error building step args: {e}");
-                                            libsqlite3_sys::sqlite3_result_error(
-                                                ctx,
-                                                msg.as_ptr() as *const std::ffi::c_char,
-                                                msg.len() as i32,
-                                            );
-                                            return;
-                                        }
-                                    }
-                                }
-                            };
-
-                            if let Err(e) = step_result {
-                                let msg = format!("Python aggregate step error: {e}");
-                                libsqlite3_sys::sqlite3_result_error(
-                                    ctx,
-                                    msg.as_ptr() as *const std::ffi::c_char,
-                                    msg.len() as i32,
-                                );
-                            }
-                        });
-                    }
-                }
-
-                extern "C" fn aggregate_final(ctx: *mut sqlite3_context) {
-                    unsafe {
-                        let ctx_buf = sqlite3_aggregate_context(ctx, AGG_CTX_SIZE);
-                        if ctx_buf.is_null() {
-                            sqlite3_result_null(ctx);
-                            return;
-                        }
-                        let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
-                        let instance_ptr: *mut Py<PyAny> =
-                            std::ptr::read_unaligned(instance_ptr_ptr);
-                        if instance_ptr.is_null() {
-                            sqlite3_result_null(ctx);
-                            return;
-                        }
-
-                        #[allow(deprecated)]
-                        Python::with_gil(|py| {
-                            let instance = Box::from_raw(instance_ptr);
-                            std::ptr::write_unaligned(
-                                instance_ptr_ptr,
-                                std::ptr::null_mut::<Py<PyAny>>(),
-                            );
-
-                            let result = instance.bind(py).call_method0("finalize");
-                            match result {
-                                Ok(r) => {
-                                    let _ = py_to_sqlite_c_result(py, ctx, &r);
-                                }
-                                Err(e) => {
-                                    let msg = format!("Python aggregate finalize error: {e}");
-                                    libsqlite3_sys::sqlite3_result_error(
-                                        ctx,
-                                        msg.as_ptr() as *const std::ffi::c_char,
-                                        msg.len() as i32,
-                                    );
-                                }
-                            }
-                        });
-                    }
-                }
-
-                extern "C" fn aggregate_destructor(user_data: *mut std::ffi::c_void) {
-                    unsafe {
-                        if !user_data.is_null() {
-                            let _ = Box::from_raw(user_data as *mut Py<PyAny>);
-                        }
-                    }
-                }
-
-                let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                    OperationalError::new_err(format!("Aggregate name contains null byte: {e}"))
-                })?;
-
-                let result = unsafe {
-                    sqlite3_create_function_v2(
-                        raw_db,
-                        name_cstr.as_ptr(),
-                        num_params,
-                        SQLITE_UTF8,
-                        class_ptr,
-                        None,                  // xFunc
-                        Some(aggregate_step),  // xStep
-                        Some(aggregate_final), // xFinal
-                        Some(aggregate_destructor),
-                    )
-                };
-
-                if result != SQLITE_OK {
-                    unsafe {
-                        let _ = Box::from_raw(class_ptr as *mut Py<PyAny>);
-                    }
-                    {
-                        let mut guard = user_aggregates.lock().unwrap();
-                        guard.remove(&name);
-                    }
-                    return Err(OperationalError::new_err(format!(
-                        "Failed to create aggregate '{name}': SQLite error code {result}"
-                    )));
-                }
-
-                Ok(())
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(
+                py,
+                callbacks::create_aggregate_impl(ctx, name, num_params, aggregate_class),
+            )
+            .map(|bound| bound.unbind())
         })
     }
 
@@ -3908,200 +3127,27 @@ impl Connection {
     /// If callable is None, the collation is removed.
     #[pyo3(signature = (name, callable))]
     fn create_collation(&self, name: String, callable: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let user_collations = Arc::clone(&self.user_collations);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let user_functions = Arc::clone(&self.user_functions);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
-        let closed = Arc::clone(&self.closed);
-
+        let ctx = callbacks::CallbackContext {
+            closed: Arc::clone(&self.closed),
+            path: self.path.clone(),
+            pool: Arc::clone(&self.pool),
+            pragmas: Arc::clone(&self.pragmas),
+            pool_size: Arc::clone(&self.pool_size),
+            connection_timeout_secs: Arc::clone(&self.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
+            transaction_connection: Arc::clone(&self.transaction_connection),
+            callback_connection: Arc::clone(&self.callback_connection),
+            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            user_functions: Arc::clone(&self.user_functions),
+            user_aggregates: Arc::clone(&self.user_aggregates),
+            user_collations: Arc::clone(&self.user_collations),
+            trace_callback: Arc::clone(&self.trace_callback),
+            authorizer_callback: Arc::clone(&self.authorizer_callback),
+            progress_handler: Arc::clone(&self.progress_handler),
+        };
         Python::attach(|py| {
-            let callable_clone = callable.as_ref().map(|c| c.clone_ref(py));
-
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                ensure_callback_connection(
-                    &path,
-                    &pool,
-                    &callback_connection,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                    &idle_timeout_secs,
-                )
-                .await?;
-
-                let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                    OperationalError::new_err("Callback connection not available")
-                })?;
-
-                let sqlite_conn: &mut SqliteConnection = conn;
-                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                })?;
-                let raw_db = handle.as_raw_handle().as_ptr();
-
-                if callable_clone.is_none() {
-                    let old_ptr = {
-                        let mut guard = user_collations.lock().unwrap();
-                        guard.remove(&name)
-                    };
-                    if let Some(ptr) = old_ptr {
-                        if ptr != 0 {
-                            unsafe {
-                                let _ = Box::from_raw(ptr as *mut Py<PyAny>);
-                            }
-                        }
-                    }
-
-                    let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                        OperationalError::new_err(format!("Collation name contains null byte: {e}"))
-                    })?;
-                    let result = unsafe {
-                        sqlite3_create_collation_v2(
-                            raw_db,
-                            name_cstr.as_ptr(),
-                            SQLITE_UTF8,
-                            std::ptr::null_mut(),
-                            None,
-                            None,
-                        )
-                    };
-                    if result != SQLITE_OK {
-                        return Err(OperationalError::new_err(format!(
-                            "Failed to remove collation '{name}': SQLite error code {result}"
-                        )));
-                    }
-
-                    let all_cleared = !has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-                    if all_cleared {
-                        drop(handle);
-                        drop(conn_guard);
-                        let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.0.take();
-                    }
-                    return Ok(());
-                }
-
-                #[allow(deprecated)]
-                let callback_for_storage =
-                    Python::with_gil(|py| callable_clone.as_ref().unwrap().clone_ref(py));
-                let callback_box: Box<Py<PyAny>> = Box::new(callback_for_storage);
-                let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
-                let callback_ptr_usize = callback_ptr as usize;
-
-                {
-                    let mut guard = user_collations.lock().unwrap();
-                    guard.insert(name.clone(), callback_ptr_usize);
-                }
-
-                extern "C" fn collation_trampoline(
-                    p_arg: *mut std::ffi::c_void,
-                    len1: std::ffi::c_int,
-                    ptr1: *const std::ffi::c_void,
-                    len2: std::ffi::c_int,
-                    ptr2: *const std::ffi::c_void,
-                ) -> std::ffi::c_int {
-                    unsafe {
-                        if p_arg.is_null() || ptr1.is_null() || ptr2.is_null() {
-                            return 0;
-                        }
-                        let len1 = len1 as usize;
-                        let len2 = len2 as usize;
-                        let s1 = if len1 == 0 {
-                            ""
-                        } else {
-                            let slice = std::slice::from_raw_parts(ptr1 as *const u8, len1);
-                            std::str::from_utf8(slice).unwrap_or("")
-                        };
-                        let s2 = if len2 == 0 {
-                            ""
-                        } else {
-                            let slice = std::slice::from_raw_parts(ptr2 as *const u8, len2);
-                            std::str::from_utf8(slice).unwrap_or("")
-                        };
-
-                        #[allow(deprecated)]
-                        let result = Python::with_gil(|py| {
-                            let callback_ptr = p_arg as *mut Py<PyAny>;
-                            let callback = (*callback_ptr).clone_ref(py);
-                            let s1_py = PyString::new(py, s1);
-                            let s2_py = PyString::new(py, s2);
-                            match callback.bind(py).call1((s1_py, s2_py)) {
-                                Ok(ret) => {
-                                    let cmp: i32 = ret.extract().unwrap_or(0);
-                                    if cmp < 0 {
-                                        -1
-                                    } else if cmp > 0 {
-                                        1
-                                    } else {
-                                        0
-                                    }
-                                }
-                                Err(_) => 0,
-                            }
-                        });
-                        result
-                    }
-                }
-
-                extern "C" fn collation_destructor(p_arg: *mut std::ffi::c_void) {
-                    unsafe {
-                        if !p_arg.is_null() {
-                            let _ = Box::from_raw(p_arg as *mut Py<PyAny>);
-                        }
-                    }
-                }
-
-                let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
-                    OperationalError::new_err(format!("Collation name contains null byte: {e}"))
-                })?;
-
-                let result = unsafe {
-                    sqlite3_create_collation_v2(
-                        raw_db,
-                        name_cstr.as_ptr(),
-                        SQLITE_UTF8,
-                        callback_ptr,
-                        Some(collation_trampoline),
-                        Some(collation_destructor),
-                    )
-                };
-
-                if result != SQLITE_OK {
-                    unsafe {
-                        let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
-                    }
-                    {
-                        let mut guard = user_collations.lock().unwrap();
-                        guard.remove(&name);
-                    }
-                    return Err(OperationalError::new_err(format!(
-                        "Failed to create collation '{name}': SQLite error code {result}"
-                    )));
-                }
-
-                Ok(())
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, callbacks::create_collation_impl(ctx, name, callable))
+                .map(|bound| bound.unbind())
         })
     }
 
@@ -4148,599 +3194,97 @@ impl Connection {
     /// Set or clear the trace callback.
     /// The callback receives SQL strings as they are executed.
     fn set_trace_callback(&self, callback: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        // Need all callback fields to check if all are cleared
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let user_functions = Arc::clone(&self.user_functions);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let user_collations = Arc::clone(&self.user_collations);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
-        let closed = Arc::clone(&self.closed);
+        let ctx = callbacks::CallbackContext {
+            closed: Arc::clone(&self.closed),
+            path: self.path.clone(),
+            pool: Arc::clone(&self.pool),
+            pragmas: Arc::clone(&self.pragmas),
+            pool_size: Arc::clone(&self.pool_size),
+            connection_timeout_secs: Arc::clone(&self.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
+            transaction_connection: Arc::clone(&self.transaction_connection),
+            callback_connection: Arc::clone(&self.callback_connection),
+            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            user_functions: Arc::clone(&self.user_functions),
+            user_aggregates: Arc::clone(&self.user_aggregates),
+            user_collations: Arc::clone(&self.user_collations),
+            trace_callback: Arc::clone(&self.trace_callback),
+            authorizer_callback: Arc::clone(&self.authorizer_callback),
+            progress_handler: Arc::clone(&self.progress_handler),
+        };
 
         Python::attach(|py| {
-            // Clone the callback with GIL
             let callback_clone = callback.as_ref().map(|c| c.clone_ref(py));
-
-            // Store the callback state
             {
-                let mut trace_guard = trace_callback.lock().unwrap();
+                let mut trace_guard = ctx.trace_callback.lock().unwrap();
                 *trace_guard = callback_clone;
             }
-
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                // Ensure callback connection exists (needed to clear callbacks on SQLite)
-                ensure_callback_connection(
-                    &path,
-                    &pool,
-                    &callback_connection,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                    &idle_timeout_secs,
-                )
-                .await?;
-
-                // Get the callback connection and access raw handle
-                let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                    OperationalError::new_err("Callback connection not available")
-                })?;
-
-                let sqlite_conn: &mut SqliteConnection = conn;
-                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                })?;
-                let raw_db = handle.as_raw_handle().as_ptr();
-
-                // Define the trace callback trampoline
-                extern "C" fn trace_trampoline(
-                    _trace_type: std::ffi::c_uint,
-                    ctx: *mut std::ffi::c_void,
-                    _p: *mut std::ffi::c_void,
-                    x: *mut std::ffi::c_void,
-                ) -> std::ffi::c_int {
-                    // Safety: ctx is a pointer to the Python callback (Box<Py<PyAny>>)
-                    // that was set when registering the trace callback. x is a pointer to
-                    // the SQL string provided by SQLite. We check for null before dereferencing.
-                    // The callback is called synchronously from SQLite's execution context.
-                    unsafe {
-                        // x is a pointer to the SQL string (for SQLITE_TRACE_STMT)
-                        if x.is_null() || ctx.is_null() {
-                            return 0;
-                        }
-
-                        // Extract the SQL string from x
-                        // For SQLITE_TRACE_STMT, x points to the SQL text
-                        let sql_ptr = x as *const std::ffi::c_char;
-                        let sql_str: String =
-                            cstr_from_c_char_ptr(sql_ptr).to_string_lossy().into_owned();
-
-                        // Get the Python callback from the context (pCtx)
-                        let callback_ptr = ctx as *mut Py<PyAny>;
-
-                        // Note: Python::with_gil is used here for sync operation in async context.
-                        // The deprecation warning is acceptable as this is a sync operation within async.
-                        #[allow(deprecated)]
-                        Python::with_gil(|py| {
-                            let callback = (*callback_ptr).clone_ref(py);
-                            if let Err(e) = callback.bind(py).call1((sql_str,)) {
-                                // Trace callbacks are informational - log errors but continue
-                                // The error is silently ignored to prevent trace callback failures
-                                // from affecting database operations. Applications should handle
-                                // exceptions within their trace callbacks if they need error handling.
-                                let _ = e; // Explicitly ignore for clarity
-                            }
-                        });
-                    }
-                    0
-                }
-
-                // Set up the callback pointer for the trampoline
-                let callback_for_trace = {
-                    let trace_guard = trace_callback.lock().unwrap();
-                    trace_guard.as_ref().map(|c| {
-                        // Clone with GIL
-                        // Note: Python::with_gil is used here for sync clone_ref in async context.
-                        // The deprecation warning is acceptable as this is a sync operation within async.
-                        #[allow(deprecated)]
-                        Python::with_gil(|py| c.clone_ref(py))
-                    })
-                };
-
-                let callback_ptr = if let Some(cb) = callback_for_trace {
-                    let callback_box: Box<Py<PyAny>> = Box::new(cb);
-                    Box::into_raw(callback_box) as *mut std::ffi::c_void
-                } else {
-                    std::ptr::null_mut()
-                };
-
-                // Set or clear the trace callback
-                // Safety: raw_db is a valid sqlite3* pointer obtained from
-                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                // for the lifetime of the handle lock. callback_ptr is either null or
-                // a pointer to Box<Py<PyAny>> created with Box::into_raw. The trampoline
-                // function handles the callback safely.
-                let result = unsafe {
-                    sqlite3_trace_v2(
-                        raw_db,
-                        if callback_ptr.is_null() {
-                            0
-                        } else {
-                            SQLITE_TRACE_STMT as u32
-                        }, // Trace mask
-                        if callback_ptr.is_null() {
-                            None
-                        } else {
-                            Some(trace_trampoline)
-                        },
-                        callback_ptr, // pCtx - the Python callback
-                    )
-                };
-
-                if result != SQLITE_OK {
-                    // Clean up callback pointer on error
-                    // Safety: callback_ptr was created with Box::into_raw, so we can
-                    // safely convert it back to Box and drop it. This is safe because
-                    // the trace callback registration failed, so SQLite won't call the destructor.
-                    if !callback_ptr.is_null() {
-                        unsafe {
-                            let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
-                        }
-                    }
-                    {
-                        let mut trace_guard = trace_callback.lock().unwrap();
-                        *trace_guard = None;
-                    }
-                    return Err(OperationalError::new_err(format!(
-                        "Failed to set trace callback: SQLite error code {result}"
-                    )));
-                }
-
-                // After clearing, check if all callbacks are now cleared
-                if callback.is_none() {
-                    let all_cleared = !has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-                    if all_cleared {
-                        // Release the callback connection
-                        drop(handle);
-                        drop(conn_guard);
-                        let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.0.take();
-                        return Ok(());
-                    }
-                }
-
-                Ok(())
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, callbacks::set_trace_callback_impl(ctx, callback))
+                .map(|bound| bound.unbind())
         })
     }
 
     /// Set or clear the authorizer callback.
     /// The callback receives (action, arg1, arg2, arg3, arg4) and returns an int (SQLITE_OK, SQLITE_DENY, etc.).
     fn set_authorizer(&self, callback: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        // Need all callback fields to check if all are cleared
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let user_functions = Arc::clone(&self.user_functions);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let user_collations = Arc::clone(&self.user_collations);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
-        let closed = Arc::clone(&self.closed);
-
+        let ctx = callbacks::CallbackContext {
+            closed: Arc::clone(&self.closed),
+            path: self.path.clone(),
+            pool: Arc::clone(&self.pool),
+            pragmas: Arc::clone(&self.pragmas),
+            pool_size: Arc::clone(&self.pool_size),
+            connection_timeout_secs: Arc::clone(&self.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
+            transaction_connection: Arc::clone(&self.transaction_connection),
+            callback_connection: Arc::clone(&self.callback_connection),
+            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            user_functions: Arc::clone(&self.user_functions),
+            user_aggregates: Arc::clone(&self.user_aggregates),
+            user_collations: Arc::clone(&self.user_collations),
+            trace_callback: Arc::clone(&self.trace_callback),
+            authorizer_callback: Arc::clone(&self.authorizer_callback),
+            progress_handler: Arc::clone(&self.progress_handler),
+        };
         Python::attach(|py| {
-            // Clone the callback with GIL
             let callback_clone = callback.as_ref().map(|c| c.clone_ref(py));
-
-            // Store the callback state
             {
-                let mut auth_guard = authorizer_callback.lock().unwrap();
+                let mut auth_guard = ctx.authorizer_callback.lock().unwrap();
                 *auth_guard = callback_clone;
             }
-
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                // If clearing the callback, check if all callbacks are now cleared
-                if callback.is_none() {
-                    let all_cleared = !has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-                    if all_cleared {
-                        // Release the callback connection
-                        let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.0.take();
-                        // Clear the authorizer on SQLite side (already cleared in state)
-                        return Ok(());
-                    }
-                }
-
-                // Ensure callback connection exists
-                ensure_callback_connection(
-                    &path,
-                    &pool,
-                    &callback_connection,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                    &idle_timeout_secs,
-                )
-                .await?;
-
-                // Get the callback connection and access raw handle
-                let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                    OperationalError::new_err("Callback connection not available")
-                })?;
-
-                let sqlite_conn: &mut SqliteConnection = conn;
-                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                })?;
-                let raw_db = handle.as_raw_handle().as_ptr();
-
-                // Define the authorizer callback trampoline
-                extern "C" fn authorizer_trampoline(
-                    ctx: *mut std::ffi::c_void,
-                    action: std::ffi::c_int,
-                    arg1: *const std::ffi::c_char,
-                    arg2: *const std::ffi::c_char,
-                    arg3: *const std::ffi::c_char,
-                    arg4: *const std::ffi::c_char,
-                ) -> std::ffi::c_int {
-                    // Safety: ctx is a pointer to the Python callback (Box<Py<PyAny>>)
-                    // that was set when registering the authorizer callback. The arg1-arg4
-                    // pointers are C strings provided by SQLite; we check for null and
-                    // safely convert them using cstr_from_c_char_ptr. The callback is called
-                    // synchronously from SQLite's execution context.
-                    unsafe {
-                        if ctx.is_null() {
-                            return SQLITE_OK;
-                        }
-
-                        // Convert C strings to Rust strings (or None)
-                        let arg1_str: Option<String> = if arg1.is_null() {
-                            None
-                        } else {
-                            Some(cstr_from_c_char_ptr(arg1).to_string_lossy().into_owned())
-                        };
-                        let arg2_str: Option<String> = if arg2.is_null() {
-                            None
-                        } else {
-                            Some(cstr_from_c_char_ptr(arg2).to_string_lossy().into_owned())
-                        };
-                        let arg3_str: Option<String> = if arg3.is_null() {
-                            None
-                        } else {
-                            Some(cstr_from_c_char_ptr(arg3).to_string_lossy().into_owned())
-                        };
-                        let arg4_str: Option<String> = if arg4.is_null() {
-                            None
-                        } else {
-                            Some(cstr_from_c_char_ptr(arg4).to_string_lossy().into_owned())
-                        };
-
-                        // Get the Python callback from the context
-                        let callback_ptr = ctx as *mut Py<PyAny>;
-
-                        // Note: Python::with_gil is used here for sync operation in async context.
-                        // The deprecation warning is acceptable as this is a sync operation within async.
-                        #[allow(deprecated)]
-                        Python::with_gil(|py| {
-                            let callback = (*callback_ptr).clone_ref(py);
-
-                            // Convert None strings to None in Python, otherwise pass the string
-                            let py_arg1: Py<PyAny> = match arg1_str {
-                                Some(ref s) => PyString::new(py, s).into_any().unbind(),
-                                None => py.None(),
-                            };
-                            let py_arg2: Py<PyAny> = match arg2_str {
-                                Some(ref s) => PyString::new(py, s).into_any().unbind(),
-                                None => py.None(),
-                            };
-                            let py_arg3: Py<PyAny> = match arg3_str {
-                                Some(ref s) => PyString::new(py, s).into_any().unbind(),
-                                None => py.None(),
-                            };
-                            let py_arg4: Py<PyAny> = match arg4_str {
-                                Some(ref s) => PyString::new(py, s).into_any().unbind(),
-                                None => py.None(),
-                            };
-
-                            match callback
-                                .bind(py)
-                                .call1((action, py_arg1, py_arg2, py_arg3, py_arg4))
-                            {
-                                Ok(result) => {
-                                    // Convert Python result to SQLite auth code
-                                    result.extract::<i32>().unwrap_or(SQLITE_DENY)
-                                    // Default to DENY if conversion fails (fail-secure)
-                                }
-                                Err(_e) => {
-                                    // On Python exception in authorizer callback, default to DENY
-                                    // This is a security-critical callback - fail-secure behavior
-                                    // Logging the error would require additional infrastructure,
-                                    // but denying access is the safe default
-                                    SQLITE_DENY
-                                }
-                            }
-                        })
-                    }
-                }
-
-                // Set up the callback pointer for the trampoline
-                let callback_for_auth = {
-                    let auth_guard = authorizer_callback.lock().unwrap();
-                    auth_guard.as_ref().map(|c| {
-                        // Note: Python::with_gil is used here for sync clone_ref in async context.
-                        // The deprecation warning is acceptable as this is a sync operation within async.
-                        #[allow(deprecated)]
-                        Python::with_gil(|py| c.clone_ref(py))
-                    })
-                };
-
-                let callback_ptr = if let Some(cb) = callback_for_auth {
-                    let callback_box: Box<Py<PyAny>> = Box::new(cb);
-                    Box::into_raw(callback_box) as *mut std::ffi::c_void
-                } else {
-                    std::ptr::null_mut()
-                };
-
-                // Set or clear the authorizer callback
-                // Safety: raw_db is a valid sqlite3* pointer obtained from
-                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                // for the lifetime of the handle lock. callback_ptr is either null or
-                // a pointer to Box<Py<PyAny>> created with Box::into_raw. The trampoline
-                // function handles the callback safely.
-                unsafe {
-                    sqlite3_set_authorizer(
-                        raw_db,
-                        if callback_ptr.is_null() {
-                            None
-                        } else {
-                            Some(authorizer_trampoline)
-                        },
-                        callback_ptr, // pUserData - the Python callback
-                    );
-                }
-
-                // After clearing, check if all callbacks are now cleared
-                if callback.is_none() {
-                    let all_cleared = !has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-                    if all_cleared {
-                        // Release the callback connection
-                        drop(handle);
-                        drop(conn_guard);
-                        let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.0.take();
-                        return Ok(());
-                    }
-                }
-
-                Ok(())
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, callbacks::set_authorizer_impl(ctx, callback))
+                .map(|bound| bound.unbind())
         })
     }
 
     /// Set or clear the progress handler callback.
     /// The callback is called every N VDBE operations and returns True to continue, False to abort.
     fn set_progress_handler(&self, n: i32, callback: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let progress_handler = Arc::clone(&self.progress_handler);
-        // Need all callback fields to check if all are cleared
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let user_functions = Arc::clone(&self.user_functions);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let user_collations = Arc::clone(&self.user_collations);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let closed = Arc::clone(&self.closed);
-
+        let ctx = callbacks::CallbackContext {
+            closed: Arc::clone(&self.closed),
+            path: self.path.clone(),
+            pool: Arc::clone(&self.pool),
+            pragmas: Arc::clone(&self.pragmas),
+            pool_size: Arc::clone(&self.pool_size),
+            connection_timeout_secs: Arc::clone(&self.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
+            transaction_connection: Arc::clone(&self.transaction_connection),
+            callback_connection: Arc::clone(&self.callback_connection),
+            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            user_functions: Arc::clone(&self.user_functions),
+            user_aggregates: Arc::clone(&self.user_aggregates),
+            user_collations: Arc::clone(&self.user_collations),
+            trace_callback: Arc::clone(&self.trace_callback),
+            authorizer_callback: Arc::clone(&self.authorizer_callback),
+            progress_handler: Arc::clone(&self.progress_handler),
+        };
         Python::attach(|py| {
-            // Clone the callback with GIL
             let callback_clone = callback.as_ref().map(|c| c.clone_ref(py));
-
-            // Store the progress handler state
             {
-                let mut progress_guard = progress_handler.lock().unwrap();
+                let mut progress_guard = ctx.progress_handler.lock().unwrap();
                 *progress_guard = callback_clone.map(|c| (n, c));
             }
-
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                // If clearing the callback, check if all callbacks are now cleared
-                if callback.is_none() {
-                    let all_cleared = !has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-                    if all_cleared {
-                        // Release the callback connection
-                        let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.0.take();
-                        // Clear the progress handler on SQLite side (already cleared in state)
-                        return Ok(());
-                    }
-                }
-
-                // Ensure callback connection exists
-                ensure_callback_connection(
-                    &path,
-                    &pool,
-                    &callback_connection,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                    &idle_timeout_secs,
-                )
-                .await?;
-
-                // Get the callback connection and access raw handle
-                let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                    OperationalError::new_err("Callback connection not available")
-                })?;
-
-                let sqlite_conn: &mut SqliteConnection = conn;
-                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                })?;
-                let raw_db = handle.as_raw_handle().as_ptr();
-
-                // Define the progress handler callback trampoline
-                extern "C" fn progress_trampoline(ctx: *mut std::ffi::c_void) -> std::ffi::c_int {
-                    // Safety: ctx is a pointer to the Python callback (Box<Py<PyAny>>)
-                    // that was set when registering the progress handler. We check for
-                    // null before dereferencing. The callback is called synchronously
-                    // from SQLite's execution context during long-running operations.
-                    unsafe {
-                        if ctx.is_null() {
-                            return 0; // Continue
-                        }
-
-                        // Get the Python callback from the context
-                        let callback_ptr = ctx as *mut Py<PyAny>;
-
-                        // Note: Python::with_gil is used here for sync operation in async context.
-                        // The deprecation warning is acceptable as this is a sync operation within async.
-                        #[allow(deprecated)]
-                        Python::with_gil(|py| {
-                            let callback = (*callback_ptr).clone_ref(py);
-
-                            match callback.bind(py).call0() {
-                                Ok(result) => {
-                                    // Convert Python result to int (0 = continue, non-zero = abort)
-                                    // Python True/False -> 0/non-zero
-                                    if let Ok(should_continue) = result.extract::<bool>() {
-                                        if should_continue {
-                                            0 // Continue
-                                        } else {
-                                            1 // Abort
-                                        }
-                                    } else {
-                                        result.extract::<i32>().unwrap_or(0) // Use integer directly, default to continue if conversion fails
-                                    }
-                                }
-                                Err(_) => {
-                                    // Progress handler callbacks are advisory - on error, default to continue
-                                    // This prevents progress callback failures from aborting long-running operations
-                                    0 // Continue on error
-                                }
-                            }
-                        })
-                    }
-                }
-
-                // Set up the callback pointer for the trampoline
-                let callback_for_progress = {
-                    let progress_guard = progress_handler.lock().unwrap();
-                    progress_guard.as_ref().map(|(_, cb)| {
-                        // Note: Python::with_gil is used here for sync clone_ref in async context.
-                        // The deprecation warning is acceptable as this is a sync operation within async.
-                        #[allow(deprecated)]
-                        Python::with_gil(|py| cb.clone_ref(py))
-                    })
-                };
-
-                let callback_ptr = if let Some(cb) = callback_for_progress {
-                    let callback_box: Box<Py<PyAny>> = Box::new(cb);
-                    Box::into_raw(callback_box) as *mut std::ffi::c_void
-                } else {
-                    std::ptr::null_mut()
-                };
-
-                // Set or clear the progress handler
-                // Safety: raw_db is a valid sqlite3* pointer obtained from
-                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                // for the lifetime of the handle lock. callback_ptr is either null or
-                // a pointer to Box<Py<PyAny>> created with Box::into_raw. The trampoline
-                // function handles the callback safely.
-                unsafe {
-                    sqlite3_progress_handler(
-                        raw_db,
-                        if callback_ptr.is_null() { 0 } else { n },
-                        if callback_ptr.is_null() {
-                            None
-                        } else {
-                            Some(progress_trampoline)
-                        },
-                        callback_ptr, // pArg - the Python callback
-                    );
-                }
-
-                // After clearing, check if all callbacks are now cleared
-                if callback.is_none() {
-                    let all_cleared = !has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-                    if all_cleared {
-                        // Release the callback connection
-                        drop(handle);
-                        drop(conn_guard);
-                        let mut callback_guard = callback_connection.lock().await;
-                        callback_guard.0.take();
-                        return Ok(());
-                    }
-                }
-
-                Ok(())
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, callbacks::set_progress_handler_impl(ctx, n, callback))
+                .map(|bound| bound.unbind())
         })
     }
 
@@ -5011,1673 +3555,78 @@ impl Connection {
     /// Get list of table names in the database.
     #[pyo3(signature = (name = None))]
     fn get_tables(self_: PyRef<Self>, name: Option<String>) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        // Init hook infrastructure (Phase 2.11)
-        let init_hook = Arc::clone(&self_.init_hook);
-        let init_hook_called = Arc::clone(&self_.init_hook_called);
-        let closed = Arc::clone(&self_.closed);
-        let connection_self = self_.into();
-
+        let ctx = Self::build_schema_context(self_);
         Python::attach(|py| {
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
-
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
-                // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                // Build query
-                let query = if let Some(ref table_name) = name {
-                    // Safety: table_name comes from user input, escaped to prevent SQL injection
-                    format!("SELECT name FROM sqlite_master WHERE type='table' AND name = '{}' AND name NOT LIKE 'sqlite_%'", table_name.replace("'", "''"))
-                } else {
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
-                };
-
-                let rows = if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
-                };
-
-                // Convert to list of table names (strings)
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let result_list = PyList::empty(py);
-                    for row in rows.iter() {
-                        if let Ok(table_name) = row.try_get::<String, _>(0) {
-                            result_list.append(PyString::new(py, &table_name))?;
-                        }
-                    }
-                    Ok(result_list.into())
-                })
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, schema::get_tables(ctx, name)).map(|bound| bound.unbind())
         })
     }
 
     /// Get table information (columns) for a specific table.
     fn get_table_info(self_: PyRef<Self>, table_name: String) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        // Init hook infrastructure (Phase 2.11)
-        let init_hook = Arc::clone(&self_.init_hook);
-        let init_hook_called = Arc::clone(&self_.init_hook_called);
-        let closed = Arc::clone(&self_.closed);
-        let connection_self = self_.into();
-
-        // Escape table name for SQL (string literal escaping)
-        // Safety: table_name comes from user input, so we escape single quotes to prevent SQL injection.
-        // Using string literal escaping ('...') is safe here as SQLite will parse it as a string literal.
-        // For better safety, we could use identifier quoting (double quotes), but string literals work
-        // for PRAGMA table_info which accepts table names as string literals.
-        let escaped_table_name = table_name.replace("'", "''");
-        let query = format!("PRAGMA table_info('{escaped_table_name}')");
-
+        let ctx = Self::build_schema_context(self_);
         Python::attach(|py| {
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
-
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
-                // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                let rows = if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
-                };
-
-                // Convert to list of dictionaries
-                // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let result_list = PyList::empty(py);
-                    for row in rows.iter() {
-                        let dict = PyDict::new(py);
-
-                        // cid (column id)
-                        if let Ok(cid) = row.try_get::<i64, _>(0) {
-                            dict.set_item("cid", PyInt::new(py, cid))?;
-                        }
-
-                        // name
-                        if let Ok(name) = row.try_get::<String, _>(1) {
-                            dict.set_item("name", PyString::new(py, &name))?;
-                        }
-
-                        // type
-                        if let Ok(col_type) = row.try_get::<String, _>(2) {
-                            dict.set_item("type", PyString::new(py, &col_type))?;
-                        }
-
-                        // notnull (0 or 1)
-                        if let Ok(notnull) = row.try_get::<i64, _>(3) {
-                            dict.set_item("notnull", PyInt::new(py, notnull))?;
-                        }
-
-                        // dflt_value (default value, can be NULL)
-                        let dflt_val: Py<PyAny> =
-                            if let Ok(Some(val)) = row.try_get::<Option<String>, _>(4) {
-                                PyString::new(py, &val).into()
-                            } else if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(4) {
-                                PyInt::new(py, val).into()
-                            } else if let Ok(Some(val)) = row.try_get::<Option<f64>, _>(4) {
-                                PyFloat::new(py, val).into()
-                            } else {
-                                py.None()
-                            };
-                        dict.set_item("dflt_value", dflt_val)?;
-
-                        // pk (primary key, 0 or 1)
-                        if let Ok(pk) = row.try_get::<i64, _>(5) {
-                            dict.set_item("pk", PyInt::new(py, pk))?;
-                        }
-
-                        result_list.append(dict)?;
-                    }
-                    Ok(result_list.into())
-                })
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, schema::get_table_info(ctx, table_name)).map(|bound| bound.unbind())
         })
     }
 
     /// Get list of indexes in the database.
     #[pyo3(signature = (table_name = None))]
     fn get_indexes(self_: PyRef<Self>, table_name: Option<String>) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        // Init hook infrastructure (Phase 2.11)
-        let init_hook = Arc::clone(&self_.init_hook);
-        let init_hook_called = Arc::clone(&self_.init_hook_called);
-        let closed = Arc::clone(&self_.closed);
-        let connection_self = self_.into();
-
-        // Build query
-        // Safety: table_name comes from user input, so we escape single quotes to prevent SQL injection.
-        // The escaped value is used in a WHERE clause string literal, which is safe.
-        let query = if let Some(ref tbl_name) = table_name {
-            let escaped = tbl_name.replace("'", "''");
-            format!("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name = '{escaped}' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-        } else {
-            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
-        };
-
+        let ctx = Self::build_schema_context(self_);
         Python::attach(|py| {
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
-
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
-                // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                let rows = if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
-                };
-
-                // Convert to list of dictionaries
-                // Columns: name, tbl_name, sql
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let result_list = PyList::empty(py);
-                    for row in rows.iter() {
-                        let dict = PyDict::new(py);
-
-                        // name
-                        if let Ok(name) = row.try_get::<String, _>(0) {
-                            dict.set_item("name", PyString::new(py, &name))?;
-                        }
-
-                        // table
-                        if let Ok(tbl_name) = row.try_get::<String, _>(1) {
-                            dict.set_item("table", PyString::new(py, &tbl_name))?;
-                        }
-
-                        // unique (determined from SQL - check if UNIQUE keyword exists)
-                        let unique = if let Ok(Some(sql)) = row.try_get::<Option<String>, _>(2) {
-                            if sql.to_uppercase().contains("UNIQUE") {
-                                1
-                            } else {
-                                0
-                            }
-                        } else {
-                            0
-                        };
-                        dict.set_item("unique", PyInt::new(py, unique))?;
-
-                        // sql
-                        if let Ok(Some(sql)) = row.try_get::<Option<String>, _>(2) {
-                            dict.set_item("sql", PyString::new(py, &sql))?;
-                        } else {
-                            dict.set_item("sql", py.None())?;
-                        }
-
-                        result_list.append(dict)?;
-                    }
-                    Ok(result_list.into())
-                })
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, schema::get_indexes(ctx, table_name)).map(|bound| bound.unbind())
         })
     }
 
     /// Get foreign key constraints for a specific table.
     fn get_foreign_keys(self_: PyRef<Self>, table_name: String) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        // Init hook infrastructure (Phase 2.11)
-        let init_hook = Arc::clone(&self_.init_hook);
-        let init_hook_called = Arc::clone(&self_.init_hook_called);
-        let closed = Arc::clone(&self_.closed);
-        let connection_self = self_.into();
-
-        // Escape table name for SQL
-        let escaped_table_name = table_name.replace("'", "''");
-        let query = format!("PRAGMA foreign_key_list('{escaped_table_name}')");
-
+        let ctx = Self::build_schema_context(self_);
         Python::attach(|py| {
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
-
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
-                // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                let rows = if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
-                };
-
-                // Convert to list of dictionaries
-                // PRAGMA foreign_key_list returns: id, seq, table, from, to, on_update, on_delete, match
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let result_list = PyList::empty(py);
-                    for row in rows.iter() {
-                        let dict = PyDict::new(py);
-
-                        // id
-                        if let Ok(id) = row.try_get::<i64, _>(0) {
-                            dict.set_item("id", PyInt::new(py, id))?;
-                        }
-
-                        // seq
-                        if let Ok(seq) = row.try_get::<i64, _>(1) {
-                            dict.set_item("seq", PyInt::new(py, seq))?;
-                        }
-
-                        // table (referenced table)
-                        if let Ok(ref_table) = row.try_get::<String, _>(2) {
-                            dict.set_item("table", PyString::new(py, &ref_table))?;
-                        }
-
-                        // from (column in current table)
-                        if let Ok(from_col) = row.try_get::<String, _>(3) {
-                            dict.set_item("from", PyString::new(py, &from_col))?;
-                        }
-
-                        // to (column in referenced table)
-                        if let Ok(to_col) = row.try_get::<String, _>(4) {
-                            dict.set_item("to", PyString::new(py, &to_col))?;
-                        }
-
-                        // on_update
-                        if let Ok(on_update) = row.try_get::<String, _>(5) {
-                            dict.set_item("on_update", PyString::new(py, &on_update))?;
-                        }
-
-                        // on_delete
-                        if let Ok(on_delete) = row.try_get::<String, _>(6) {
-                            dict.set_item("on_delete", PyString::new(py, &on_delete))?;
-                        }
-
-                        // match
-                        if let Ok(match_val) = row.try_get::<String, _>(7) {
-                            dict.set_item("match", PyString::new(py, &match_val))?;
-                        }
-
-                        result_list.append(dict)?;
-                    }
-                    Ok(result_list.into())
-                })
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, schema::get_foreign_keys(ctx, table_name))
+                .map(|bound| bound.unbind())
         })
     }
 
     /// Get comprehensive schema information for a table or all tables.
     #[pyo3(signature = (table_name = None))]
     fn get_schema(self_: PyRef<Self>, table_name: Option<String>) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        let closed = Arc::clone(&self_.closed);
-
+        let ctx = Self::build_schema_context(self_);
         Python::attach(|py| {
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                // Get tables
-                let tables_query = if let Some(ref tbl_name) = table_name {
-                    format!("SELECT name FROM sqlite_master WHERE type='table' AND name = '{}' AND name NOT LIKE 'sqlite_%'", tbl_name.replace("'", "''"))
-                } else {
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
-                };
-
-                let tables_rows = if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&tables_query, &[], conn, &path).await?
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&tables_query, &[], conn, &path).await?
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_all_on_connection(&tables_query, &[], &mut conn, &path).await?
-                };
-
-                // Extract table names
-                let mut table_names = Vec::new();
-                for row in tables_rows.iter() {
-                    if let Ok(name) = row.try_get::<String, _>(0) {
-                        table_names.push(name);
-                    }
-                }
-
-                // For each table, fetch detailed information
-                let mut tables_info = Vec::new();
-                for tbl_name in &table_names {
-                    // Get table info
-                    let info_query =
-                        format!("PRAGMA table_info('{}')", tbl_name.replace("'", "''"));
-                    let info_rows = if in_transaction {
-                        let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Transaction connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(&info_query, &[], conn, &path).await?
-                    } else if has_callbacks_flag {
-                        let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Callback connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(&info_query, &[], conn, &path).await?
-                    } else {
-                        let pool_clone = get_or_create_pool(
-                            &path,
-                            &pool,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut conn = acquire_with_pragmas(
-                            &pool_clone,
-                            &pragmas,
-                            &path,
-                            pool_size_val,
-                            timeout_val,
-                        )
-                        .await?;
-                        bind_and_fetch_all_on_connection(&info_query, &[], &mut conn, &path).await?
-                    };
-
-                    // Get indexes
-                    let indexes_query = format!("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND tbl_name = '{}' AND name NOT LIKE 'sqlite_%' ORDER BY name", tbl_name.replace("'", "''"));
-                    let indexes_rows = if in_transaction {
-                        let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Transaction connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(&indexes_query, &[], conn, &path).await?
-                    } else if has_callbacks_flag {
-                        let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Callback connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(&indexes_query, &[], conn, &path).await?
-                    } else {
-                        let pool_clone = get_or_create_pool(
-                            &path,
-                            &pool,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut conn = acquire_with_pragmas(
-                            &pool_clone,
-                            &pragmas,
-                            &path,
-                            pool_size_val,
-                            timeout_val,
-                        )
-                        .await?;
-                        bind_and_fetch_all_on_connection(&indexes_query, &[], &mut conn, &path)
-                            .await?
-                    };
-
-                    // Get foreign keys
-                    let fk_query =
-                        format!("PRAGMA foreign_key_list('{}')", tbl_name.replace("'", "''"));
-                    let fk_rows = if in_transaction {
-                        let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Transaction connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(&fk_query, &[], conn, &path).await?
-                    } else if has_callbacks_flag {
-                        let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Callback connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(&fk_query, &[], conn, &path).await?
-                    } else {
-                        let pool_clone = get_or_create_pool(
-                            &path,
-                            &pool,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut conn = acquire_with_pragmas(
-                            &pool_clone,
-                            &pragmas,
-                            &path,
-                            pool_size_val,
-                            timeout_val,
-                        )
-                        .await?;
-                        bind_and_fetch_all_on_connection(&fk_query, &[], &mut conn, &path).await?
-                    };
-
-                    tables_info.push((tbl_name.clone(), info_rows, indexes_rows, fk_rows));
-                }
-
-                // Build schema dictionary
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let schema_dict = PyDict::new(py);
-
-                    if let Some(ref tbl_name) = table_name {
-                        // Single table - return detailed info
-                        if let Some((_, info_rows, indexes_rows, fk_rows)) = tables_info.first() {
-                            // Table info
-                            let columns_list = PyList::empty(py);
-                            for row in info_rows.iter() {
-                                let dict = PyDict::new(py);
-                                if let Ok(cid) = row.try_get::<i64, _>(0) {
-                                    dict.set_item("cid", PyInt::new(py, cid))?;
-                                }
-                                if let Ok(name) = row.try_get::<String, _>(1) {
-                                    dict.set_item("name", PyString::new(py, &name))?;
-                                }
-                                if let Ok(col_type) = row.try_get::<String, _>(2) {
-                                    dict.set_item("type", PyString::new(py, &col_type))?;
-                                }
-                                if let Ok(notnull) = row.try_get::<i64, _>(3) {
-                                    dict.set_item("notnull", PyInt::new(py, notnull))?;
-                                }
-                                let dflt_val: Py<PyAny> =
-                                    if let Ok(Some(val)) = row.try_get::<Option<String>, _>(4) {
-                                        PyString::new(py, &val).into()
-                                    } else if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(4) {
-                                        PyInt::new(py, val).into()
-                                    } else if let Ok(Some(val)) = row.try_get::<Option<f64>, _>(4) {
-                                        PyFloat::new(py, val).into()
-                                    } else {
-                                        py.None()
-                                    };
-                                dict.set_item("dflt_value", dflt_val)?;
-                                if let Ok(pk) = row.try_get::<i64, _>(5) {
-                                    dict.set_item("pk", PyInt::new(py, pk))?;
-                                }
-                                columns_list.append(dict)?;
-                            }
-                            schema_dict.set_item("columns", columns_list)?;
-
-                            // Indexes
-                            let indexes_list = PyList::empty(py);
-                            for row in indexes_rows.iter() {
-                                let dict = PyDict::new(py);
-                                if let Ok(name) = row.try_get::<String, _>(0) {
-                                    dict.set_item("name", PyString::new(py, &name))?;
-                                }
-                                if let Ok(tbl_name) = row.try_get::<String, _>(1) {
-                                    dict.set_item("table", PyString::new(py, &tbl_name))?;
-                                }
-                                let unique =
-                                    if let Ok(Some(sql)) = row.try_get::<Option<String>, _>(2) {
-                                        if sql.to_uppercase().contains("UNIQUE") {
-                                            1
-                                        } else {
-                                            0
-                                        }
-                                    } else {
-                                        0
-                                    };
-                                dict.set_item("unique", PyInt::new(py, unique))?;
-                                if let Ok(Some(sql)) = row.try_get::<Option<String>, _>(2) {
-                                    dict.set_item("sql", PyString::new(py, &sql))?;
-                                } else {
-                                    dict.set_item("sql", py.None())?;
-                                }
-                                indexes_list.append(dict)?;
-                            }
-                            schema_dict.set_item("indexes", indexes_list)?;
-
-                            // Foreign keys
-                            let fk_list = PyList::empty(py);
-                            for row in fk_rows.iter() {
-                                let dict = PyDict::new(py);
-                                if let Ok(id) = row.try_get::<i64, _>(0) {
-                                    dict.set_item("id", PyInt::new(py, id))?;
-                                }
-                                if let Ok(seq) = row.try_get::<i64, _>(1) {
-                                    dict.set_item("seq", PyInt::new(py, seq))?;
-                                }
-                                if let Ok(ref_table) = row.try_get::<String, _>(2) {
-                                    dict.set_item("table", PyString::new(py, &ref_table))?;
-                                }
-                                if let Ok(from_col) = row.try_get::<String, _>(3) {
-                                    dict.set_item("from", PyString::new(py, &from_col))?;
-                                }
-                                if let Ok(to_col) = row.try_get::<String, _>(4) {
-                                    dict.set_item("to", PyString::new(py, &to_col))?;
-                                }
-                                if let Ok(on_update) = row.try_get::<String, _>(5) {
-                                    dict.set_item("on_update", PyString::new(py, &on_update))?;
-                                }
-                                if let Ok(on_delete) = row.try_get::<String, _>(6) {
-                                    dict.set_item("on_delete", PyString::new(py, &on_delete))?;
-                                }
-                                if let Ok(match_val) = row.try_get::<String, _>(7) {
-                                    dict.set_item("match", PyString::new(py, &match_val))?;
-                                }
-                                fk_list.append(dict)?;
-                            }
-                            schema_dict.set_item("foreign_keys", fk_list)?;
-                            schema_dict.set_item("table_name", PyString::new(py, tbl_name))?;
-                        }
-                    } else {
-                        // All tables - return list of table names with basic info
-                        let tables_list = PyList::empty(py);
-                        for (tbl_name, _, _, _) in &tables_info {
-                            let table_dict = PyDict::new(py);
-                            table_dict.set_item("name", PyString::new(py, tbl_name))?;
-                            tables_list.append(table_dict)?;
-                        }
-                        schema_dict.set_item("tables", tables_list)?;
-                    }
-
-                    Ok(schema_dict.into())
-                })
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, schema::get_schema(ctx, table_name)).map(|bound| bound.unbind())
         })
     }
 
     /// Get list of views in the database.
     #[pyo3(signature = (name = None))]
     fn get_views(self_: PyRef<Self>, name: Option<String>) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        // Init hook infrastructure (Phase 2.11)
-        let init_hook = Arc::clone(&self_.init_hook);
-        let init_hook_called = Arc::clone(&self_.init_hook_called);
-        let closed = Arc::clone(&self_.closed);
-        let connection_self = self_.into();
-
+        let ctx = Self::build_schema_context(self_);
         Python::attach(|py| {
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
-
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
-                // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                // Build query for views
-                let query = if let Some(ref view_name) = name {
-                    format!(
-                        "SELECT name FROM sqlite_master WHERE type='view' AND name = '{}'",
-                        view_name.replace("'", "''")
-                    )
-                } else {
-                    "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name".to_string()
-                };
-
-                let rows = if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
-                };
-
-                // Convert to list of view names (strings)
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let result_list = PyList::empty(py);
-                    for row in rows.iter() {
-                        if let Ok(view_name) = row.try_get::<String, _>(0) {
-                            result_list.append(PyString::new(py, &view_name))?;
-                        }
-                    }
-                    Ok(result_list.into())
-                })
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, schema::get_views(ctx, name)).map(|bound| bound.unbind())
         })
     }
 
     /// Get list of indexes for a specific table using PRAGMA index_list.
     fn get_index_list(self_: PyRef<Self>, table_name: String) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        // Init hook infrastructure (Phase 2.11)
-        let init_hook = Arc::clone(&self_.init_hook);
-        let init_hook_called = Arc::clone(&self_.init_hook_called);
-        let closed = Arc::clone(&self_.closed);
-        let connection_self = self_.into();
-
-        // Escape table name for SQL
-        let escaped_table_name = table_name.replace("'", "''");
-        let query = format!("PRAGMA index_list('{escaped_table_name}')");
-
+        let ctx = Self::build_schema_context(self_);
         Python::attach(|py| {
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
-
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
-                // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                let rows = if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
-                };
-
-                // Convert to list of dictionaries
-                // PRAGMA index_list returns: seq, name, unique, origin, partial
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let result_list = PyList::empty(py);
-                    for row in rows.iter() {
-                        let dict = PyDict::new(py);
-
-                        // seq (sequence number)
-                        if let Ok(seq) = row.try_get::<i64, _>(0) {
-                            dict.set_item("seq", PyInt::new(py, seq))?;
-                        }
-
-                        // name
-                        if let Ok(name) = row.try_get::<String, _>(1) {
-                            dict.set_item("name", PyString::new(py, &name))?;
-                        }
-
-                        // unique (0 or 1)
-                        if let Ok(unique) = row.try_get::<i64, _>(2) {
-                            dict.set_item("unique", PyInt::new(py, unique))?;
-                        }
-
-                        // origin (c, u, pk, or null)
-                        if let Ok(Some(origin)) = row.try_get::<Option<String>, _>(3) {
-                            dict.set_item("origin", PyString::new(py, &origin))?;
-                        } else {
-                            dict.set_item("origin", py.None())?;
-                        }
-
-                        // partial (0 or 1)
-                        if let Ok(partial) = row.try_get::<i64, _>(4) {
-                            dict.set_item("partial", PyInt::new(py, partial))?;
-                        }
-
-                        result_list.append(dict)?;
-                    }
-                    Ok(result_list.into())
-                })
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, schema::get_index_list(ctx, table_name)).map(|bound| bound.unbind())
         })
     }
 
     /// Get information about columns in an index using PRAGMA index_info.
     fn get_index_info(self_: PyRef<Self>, index_name: String) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        // Init hook infrastructure (Phase 2.11)
-        let init_hook = Arc::clone(&self_.init_hook);
-        let init_hook_called = Arc::clone(&self_.init_hook_called);
-        let closed = Arc::clone(&self_.closed);
-        let connection_self = self_.into();
-
-        // Escape index name for SQL
-        let escaped_index_name = index_name.replace("'", "''");
-        let query = format!("PRAGMA index_info('{escaped_index_name}')");
-
+        let ctx = Self::build_schema_context(self_);
         Python::attach(|py| {
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
-
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
-                // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                let rows = if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
-                };
-
-                // Convert to list of dictionaries
-                // PRAGMA index_info returns: seqno, cid, name
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let result_list = PyList::empty(py);
-                    for row in rows.iter() {
-                        let dict = PyDict::new(py);
-
-                        // seqno (sequence number in index)
-                        if let Ok(seqno) = row.try_get::<i64, _>(0) {
-                            dict.set_item("seqno", PyInt::new(py, seqno))?;
-                        }
-
-                        // cid (column id in table)
-                        if let Ok(cid) = row.try_get::<i64, _>(1) {
-                            dict.set_item("cid", PyInt::new(py, cid))?;
-                        }
-
-                        // name (column name)
-                        if let Ok(name) = row.try_get::<String, _>(2) {
-                            dict.set_item("name", PyString::new(py, &name))?;
-                        }
-
-                        result_list.append(dict)?;
-                    }
-                    Ok(result_list.into())
-                })
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, schema::get_index_info(ctx, index_name)).map(|bound| bound.unbind())
         })
     }
 
     /// Get extended table information using PRAGMA table_xinfo (SQLite 3.26.0+).
     /// Returns additional information beyond table_info, including hidden columns.
     fn get_table_xinfo(self_: PyRef<Self>, table_name: String) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        // Init hook infrastructure (Phase 2.11)
-        let init_hook = Arc::clone(&self_.init_hook);
-        let init_hook_called = Arc::clone(&self_.init_hook_called);
-        let closed = Arc::clone(&self_.closed);
-        let connection_self = self_.into();
-
-        // Escape table name for SQL
-        let escaped_table_name = table_name.replace("'", "''");
-        let query = format!("PRAGMA table_xinfo('{escaped_table_name}')");
-
+        let ctx = Self::build_schema_context(self_);
         Python::attach(|py| {
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
-
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
-                // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
-
-                let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
-
-                let rows = if in_transaction {
-                    let mut conn_guard = transaction_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Transaction connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let mut conn_guard = callback_connection.lock().await;
-                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                        OperationalError::new_err("Callback connection not available")
-                    })?;
-                    bind_and_fetch_all_on_connection(&query, &[], conn, &path).await?
-                } else {
-                    let pool_clone = get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_all_on_connection(&query, &[], &mut conn, &path).await?
-                };
-
-                // Convert to list of dictionaries
-                // PRAGMA table_xinfo returns: cid, name, type, notnull, dflt_value, pk, hidden
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
-                #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    let result_list = PyList::empty(py);
-                    for row in rows.iter() {
-                        let dict = PyDict::new(py);
-
-                        // cid (column id)
-                        if let Ok(cid) = row.try_get::<i64, _>(0) {
-                            dict.set_item("cid", PyInt::new(py, cid))?;
-                        }
-
-                        // name
-                        if let Ok(name) = row.try_get::<String, _>(1) {
-                            dict.set_item("name", PyString::new(py, &name))?;
-                        }
-
-                        // type
-                        if let Ok(col_type) = row.try_get::<String, _>(2) {
-                            dict.set_item("type", PyString::new(py, &col_type))?;
-                        }
-
-                        // notnull (0 or 1)
-                        if let Ok(notnull) = row.try_get::<i64, _>(3) {
-                            dict.set_item("notnull", PyInt::new(py, notnull))?;
-                        }
-
-                        // dflt_value (default value, can be NULL)
-                        let dflt_val: Py<PyAny> =
-                            if let Ok(Some(val)) = row.try_get::<Option<String>, _>(4) {
-                                PyString::new(py, &val).into()
-                            } else if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(4) {
-                                PyInt::new(py, val).into()
-                            } else if let Ok(Some(val)) = row.try_get::<Option<f64>, _>(4) {
-                                PyFloat::new(py, val).into()
-                            } else {
-                                py.None()
-                            };
-                        dict.set_item("dflt_value", dflt_val)?;
-
-                        // pk (primary key, 0 or 1)
-                        if let Ok(pk) = row.try_get::<i64, _>(5) {
-                            dict.set_item("pk", PyInt::new(py, pk))?;
-                        }
-
-                        // hidden (0=normal, 1=hidden, 2=virtual, 3=stored)
-                        if let Ok(hidden) = row.try_get::<i64, _>(6) {
-                            dict.set_item("hidden", PyInt::new(py, hidden))?;
-                        }
-
-                        result_list.append(dict)?;
-                    }
-                    Ok(result_list.into())
-                })
-            };
-            future_into_py(py, future).map(|bound| bound.unbind())
+            future_into_py(py, schema::get_table_xinfo(ctx, table_name)).map(|bound| bound.unbind())
         })
     }
 
@@ -6691,478 +3640,58 @@ impl Connection {
         name: &str,
         sleep: f64,
     ) -> PyResult<Py<PyAny>> {
-        let path = self_.path.clone();
-        let pool = Arc::clone(&self_.pool);
-        let pragmas = Arc::clone(&self_.pragmas);
-        let pool_size = Arc::clone(&self_.pool_size);
-        let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
-        let transaction_state = Arc::clone(&self_.transaction_state);
-        let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
-        let user_functions = Arc::clone(&self_.user_functions);
-        let user_aggregates = Arc::clone(&self_.user_aggregates);
-        let user_collations = Arc::clone(&self_.user_collations);
-        let trace_callback = Arc::clone(&self_.trace_callback);
-        let authorizer_callback = Arc::clone(&self_.authorizer_callback);
-        let progress_handler = Arc::clone(&self_.progress_handler);
-        let closed = Arc::clone(&self_.closed);
-
+        let source = backup::BackupSourceContext {
+            closed: Arc::clone(&self_.closed),
+            path: self_.path.clone(),
+            pool: Arc::clone(&self_.pool),
+            pragmas: Arc::clone(&self_.pragmas),
+            pool_size: Arc::clone(&self_.pool_size),
+            connection_timeout_secs: Arc::clone(&self_.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self_.idle_timeout_secs),
+            transaction_state: Arc::clone(&self_.transaction_state),
+            transaction_connection: Arc::clone(&self_.transaction_connection),
+            callback_connection: Arc::clone(&self_.callback_connection),
+            load_extension_enabled: Arc::clone(&self_.load_extension_enabled),
+            user_functions: Arc::clone(&self_.user_functions),
+            user_aggregates: Arc::clone(&self_.user_aggregates),
+            user_collations: Arc::clone(&self_.user_collations),
+            trace_callback: Arc::clone(&self_.trace_callback),
+            authorizer_callback: Arc::clone(&self_.authorizer_callback),
+            progress_handler: Arc::clone(&self_.progress_handler),
+        };
         let name = name.to_string();
         Python::attach(|py| {
-            // Clone progress callback with GIL
             let progress_callback = progress.as_ref().map(|p| p.clone_ref(py));
-
-            // Check if target is rapsqlite Connection or sqlite3.Connection and extract info
-            let target_is_rapsqlite = target.bind(py).is_instance_of::<Connection>();
-            let target_clone = target.clone_ref(py);
-
-            // If rapsqlite, extract connection fields before async block
-            let (
-                target_path_opt,
-                target_pool_opt,
-                target_pragmas_opt,
-                target_pool_size_opt,
-                target_connection_timeout_secs_opt,
-                target_idle_timeout_secs_opt,
-                target_transaction_state_opt,
-                target_transaction_connection_opt,
-                target_callback_connection_opt,
-                target_load_extension_enabled_opt,
-                target_user_functions_opt,
-                target_user_aggregates_opt,
-                target_user_collations_opt,
-                target_trace_callback_opt,
-                target_authorizer_callback_opt,
-                target_progress_handler_opt,
-            ) = if target_is_rapsqlite {
-                let target_conn = target_clone
+            let target_enum = if target.bind(py).is_instance_of::<Connection>() {
+                let target_py = target.clone_ref(py);
+                let target_conn = target_py
                     .bind(py)
                     .cast::<Connection>()
                     .map_err(|_| OperationalError::new_err("Failed to cast target connection"))?;
-                let target_conn_borrowed = target_conn.borrow();
-                (
-                    Some(target_conn_borrowed.path.clone()),
-                    Some(target_conn_borrowed.pool.clone()),
-                    Some(target_conn_borrowed.pragmas.clone()),
-                    Some(target_conn_borrowed.pool_size.clone()),
-                    Some(target_conn_borrowed.connection_timeout_secs.clone()),
-                    Some(target_conn_borrowed.idle_timeout_secs.clone()),
-                    Some(target_conn_borrowed.transaction_state.clone()),
-                    Some(target_conn_borrowed.transaction_connection.clone()),
-                    Some(target_conn_borrowed.callback_connection.clone()),
-                    Some(target_conn_borrowed.load_extension_enabled.clone()),
-                    Some(target_conn_borrowed.user_functions.clone()),
-                    Some(target_conn_borrowed.user_aggregates.clone()),
-                    Some(target_conn_borrowed.user_collations.clone()),
-                    Some(target_conn_borrowed.trace_callback.clone()),
-                    Some(target_conn_borrowed.authorizer_callback.clone()),
-                    Some(target_conn_borrowed.progress_handler.clone()),
-                )
+                let t = target_conn.borrow();
+                backup::BackupTarget::Rapsqlite(backup::BackupTargetRapsqliteContext {
+                    path: t.path.clone(),
+                    pool: Arc::clone(&t.pool),
+                    pragmas: Arc::clone(&t.pragmas),
+                    pool_size: Arc::clone(&t.pool_size),
+                    connection_timeout_secs: Arc::clone(&t.connection_timeout_secs),
+                    idle_timeout_secs: Arc::clone(&t.idle_timeout_secs),
+                    transaction_state: Arc::clone(&t.transaction_state),
+                    transaction_connection: Arc::clone(&t.transaction_connection),
+                    callback_connection: Arc::clone(&t.callback_connection),
+                    load_extension_enabled: Arc::clone(&t.load_extension_enabled),
+                    user_functions: Arc::clone(&t.user_functions),
+                    user_aggregates: Arc::clone(&t.user_aggregates),
+                    user_collations: Arc::clone(&t.user_collations),
+                    trace_callback: Arc::clone(&t.trace_callback),
+                    authorizer_callback: Arc::clone(&t.authorizer_callback),
+                    progress_handler: Arc::clone(&t.progress_handler),
+                })
             } else {
-                (
-                    None, None, None, None, None, None, None, None, None, None, None, None, None,
-                    None, None, None,
-                )
+                backup::BackupTarget::Sqlite3(target.clone_ref(py))
             };
-
-            let future = async move {
-                ensure_not_closed(&closed)?;
-                // RAII guards for connections taken out of slots; on drop they forget the
-                // connection (never run sqlx PoolConnection::Drop) so cleanup is safe.
-                // Success path restores explicitly via take_for_restore().
-                let mut source_taken = TakenConnectionGuard::default();
-                let mut target_taken = TakenConnectionGuard::default();
-
-                let result: Result<(), PyErr> = async {
-                    // Determine source connection kind.
-                    let in_transaction = {
-                        let g = transaction_state.lock().await;
-                        g.is_active()
-                    };
-                    let has_callbacks_flag = has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-
-                    // Acquire an exclusive source PoolConnection.
-                    let mut source_pool_conn = PoolConnectionSlot::default();
-                    if in_transaction {
-                        let mut guard = transaction_connection.lock().await;
-                        let conn = guard
-                            .0
-                            .take()
-                            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
-                        source_taken = TakenConnectionGuard::new(Arc::clone(&transaction_connection), conn);
-                    } else if has_callbacks_flag {
-                        ensure_callback_connection(
-                            &path,
-                            &pool,
-                            &callback_connection,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-                        let mut guard = callback_connection.lock().await;
-                        let conn = guard
-                            .0
-                            .take()
-                            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-                        source_taken = TakenConnectionGuard::new(Arc::clone(&callback_connection), conn);
-                    } else {
-                        let pool_clone = get_or_create_pool(
-                            &path,
-                            &pool,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        source_pool_conn.0 = Some(
-                            acquire_with_pragmas(
-                                &pool_clone,
-                                &pragmas,
-                                &path,
-                                pool_size_val,
-                                timeout_val,
-                            )
-                            .await?,
-                        );
-                    }
-
-                    // Get a mutable reference to the exclusive source connection.
-                    let source_conn: &mut PoolConnection<sqlx::Sqlite> =
-                        if let Some(conn) = source_taken.as_mut() {
-                            conn
-                        } else {
-                            source_pool_conn.0.as_mut().ok_or_else(|| {
-                                InternalError::new_err(
-                                    "internal error: source_pool_conn must exist",
-                                )
-                            })?
-                        };
-
-                    // Acquire an exclusive target handle.
-                    let mut target_pool_conn = PoolConnectionSlot::default();
-                    let target_handle: backup::SendPtr<sqlite3>;
-                    if target_is_rapsqlite {
-                        // These are guaranteed to be Some when target_is_rapsqlite is true,
-                        // but use ok_or_else for defensive programming and clear error messages.
-                        let target_path: String = target_path_opt.clone().ok_or_else(|| {
-                            OperationalError::new_err("Internal error: target path not available")
-                        })?;
-                        let target_pool: Arc<Mutex<PoolSlot>> =
-                            target_pool_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err("Internal error: target pool not available")
-                            })?;
-                        let target_pragmas: Arc<StdMutex<Vec<(String, String)>>> =
-                            target_pragmas_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err("Internal error: target pragmas not available")
-                            })?;
-                        let target_pool_size: Arc<StdMutex<Option<usize>>> =
-                            target_pool_size_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err("Internal error: target pool_size not available")
-                            })?;
-                        let target_connection_timeout_secs: Arc<StdMutex<Option<u64>>> =
-                            target_connection_timeout_secs_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target connection_timeout_secs not available",
-                                )
-                            })?;
-                        let target_idle_timeout_secs: Arc<StdMutex<Option<u64>>> =
-                            target_idle_timeout_secs_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target idle_timeout_secs not available",
-                                )
-                            })?;
-                        let target_transaction_state: Arc<Mutex<TransactionState>> =
-                            target_transaction_state_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target transaction_state not available",
-                                )
-                            })?;
-                        let target_transaction_connection: Arc<
-                            Mutex<PoolConnectionSlot>,
-                        > = target_transaction_connection_opt.clone().ok_or_else(|| {
-                            OperationalError::new_err(
-                                "Internal error: target transaction_connection not available",
-                            )
-                        })?;
-                        let target_callback_connection: Arc<
-                            Mutex<PoolConnectionSlot>,
-                        > = target_callback_connection_opt.clone().ok_or_else(|| {
-                            OperationalError::new_err(
-                                "Internal error: target callback_connection not available",
-                            )
-                        })?;
-                        let target_load_extension_enabled: Arc<StdMutex<bool>> =
-                            target_load_extension_enabled_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target load_extension_enabled not available",
-                                )
-                            })?;
-                        let target_user_functions: UserFunctions =
-                            target_user_functions_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target user_functions not available",
-                                )
-                            })?;
-                        let target_user_aggregates: UserAggregates =
-                            target_user_aggregates_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target user_aggregates not available",
-                                )
-                            })?;
-                        let target_user_collations: UserCollations =
-                            target_user_collations_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target user_collations not available",
-                                )
-                            })?;
-                        let target_trace_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
-                            target_trace_callback_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target trace_callback not available",
-                                )
-                            })?;
-                        let target_authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>> =
-                            target_authorizer_callback_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target authorizer_callback not available",
-                                )
-                            })?;
-                        let target_progress_handler: ProgressHandler =
-                            target_progress_handler_opt.clone().ok_or_else(|| {
-                                OperationalError::new_err(
-                                    "Internal error: target progress_handler not available",
-                                )
-                            })?;
-
-                        let target_in_transaction = {
-                            let g = target_transaction_state.lock().await;
-                            g.is_active()
-                        };
-
-                        let target_has_callbacks_flag = has_callbacks(
-                            &target_load_extension_enabled,
-                            &target_user_functions,
-                            &target_user_aggregates,
-                            &target_user_collations,
-                            &target_trace_callback,
-                            &target_authorizer_callback,
-                            &target_progress_handler,
-                        );
-
-                        if target_in_transaction {
-                            let mut guard = target_transaction_connection.lock().await;
-                            let conn = guard.0.take().ok_or_else(|| {
-                                OperationalError::new_err("Target transaction connection not available")
-                            })?;
-                            target_taken = TakenConnectionGuard::new(Arc::clone(&target_transaction_connection), conn);
-                        } else if target_has_callbacks_flag {
-                            ensure_callback_connection(
-                                &target_path,
-                                &target_pool,
-                                &target_callback_connection,
-                                &target_pragmas,
-                                &target_pool_size,
-                                &target_connection_timeout_secs,
-                                &target_idle_timeout_secs,
-                            )
-                            .await?;
-                            let mut guard = target_callback_connection.lock().await;
-                            let conn = guard.0.take().ok_or_else(|| {
-                                OperationalError::new_err("Target callback connection not available")
-                            })?;
-                            target_taken = TakenConnectionGuard::new(Arc::clone(&target_callback_connection), conn);
-                        } else {
-                            let target_pool_clone = get_or_create_pool(
-                                &target_path,
-                                &target_pool,
-                                &target_pragmas,
-                                &target_pool_size,
-                                &target_connection_timeout_secs,
-                                &target_idle_timeout_secs,
-                            )
-                            .await?;
-                            let target_pool_size_val = {
-                                let g = target_pool_size.lock().unwrap();
-                                *g
-                            };
-                            let target_timeout_val = {
-                                let g = target_connection_timeout_secs.lock().unwrap();
-                                *g
-                            };
-                            target_pool_conn.0 = Some(
-                                acquire_with_pragmas(
-                                    &target_pool_clone,
-                                    &target_pragmas,
-                                    &target_path,
-                                    target_pool_size_val,
-                                    target_timeout_val,
-                                )
-                                .await?,
-                            );
-                        }
-
-                        let target_conn: &mut PoolConnection<sqlx::Sqlite> =
-                            if let Some(conn) = target_taken.as_mut() {
-                                conn
-                            } else {
-                                target_pool_conn.0.as_mut().ok_or_else(|| {
-                                    InternalError::new_err(
-                                        "internal error: target_pool_conn must exist",
-                                    )
-                                })?
-                            };
-
-                        let sqlite_conn: &mut SqliteConnection = &mut *target_conn;
-                        let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                            OperationalError::new_err(format!("Failed to lock target handle: {e}"))
-                        })?;
-                        target_handle = backup::SendPtr(handle.as_raw_handle().as_ptr());
-                    } else {
-                        // sqlite3.Connection - use Python helper to extract handle.
-                        #[allow(deprecated)]
-                        let handle_ptr = Python::with_gil(|py| -> PyResult<*mut sqlite3> {
-                            let backup_helper = py.import("rapsqlite._backup_helper").map_err(|e| {
-                                OperationalError::new_err(format!(
-                                    "Failed to import backup helper: {e}. Make sure rapsqlite package is properly installed."
-                                ))
-                            })?;
-                            let get_handle = backup_helper.getattr("get_sqlite3_handle").map_err(|e| {
-                                OperationalError::new_err(format!(
-                                    "Failed to get get_sqlite3_handle function: {e}"
-                                ))
-                            })?;
-                            let conn_obj = target_clone.bind(py);
-                            let result = get_handle.call1((conn_obj,)).map_err(|e| {
-                                OperationalError::new_err(format!("Failed to extract sqlite3* handle: {e}"))
-                            })?;
-                            if result.is_none() {
-                                return Err(OperationalError::new_err(
-                                    "Could not extract sqlite3* handle from target connection. \
-                                    Target must be a rapsqlite.Connection or sqlite3.Connection. \
-                                    The connection may be closed or invalid.",
-                                ));
-                            }
-                            let ptr_val: usize = result.extract().map_err(|e| {
-                                OperationalError::new_err(format!("Failed to extract pointer value: {e}"))
-                            })?;
-                            if ptr_val == 0 {
-                                return Err(OperationalError::new_err(
-                                    "Extracted sqlite3* handle is null. Connection may be closed.",
-                                ));
-                            }
-                            Ok(ptr_val as *mut sqlite3)
-                        })?;
-
-                        if handle_ptr.is_null() {
-                            return Err(OperationalError::new_err(
-                                "Extracted sqlite3* handle is null. Connection may be closed or invalid.",
-                            ));
-                        }
-                        // Keep the Python object alive for the whole backup.
-                        let _ensure_target_alive = &target_clone;
-                        target_handle = backup::SendPtr(handle_ptr);
-                    }
-
-                    // Get source handle pointer (after ensuring exclusive ownership of the connection).
-                    // Important: do NOT hold the LockedSqliteHandle across await points.
-                    let source_handle = {
-                        let sqlite_conn: &mut SqliteConnection = &mut *source_conn;
-                        let mut guard = sqlite_conn.lock_handle().await.map_err(|e| {
-                            OperationalError::new_err(format!("Failed to lock source handle: {e}"))
-                        })?;
-                        backup::SendPtr(guard.as_raw_handle().as_ptr())
-                    };
-
-                    // Validate handles.
-                    if source_handle.0.is_null() {
-                        return Err(OperationalError::new_err(
-                            "Source sqlite3* handle is null. Connection may be closed or invalid.",
-                        ));
-                    }
-                    if target_handle.0.is_null() {
-                        return Err(OperationalError::new_err(
-                            "Target sqlite3* handle is null. Connection may be closed or invalid.",
-                        ));
-                    }
-
-                    // Check SQLite library version compatibility (debug info).
-                    // Safety: sqlite3_libversion() returns a static C string that is
-                    // valid for the lifetime of the program. cstr_from_c_char_ptr
-                    // converts it to a Rust CStr reference (works for both i8/u8 c_char).
-                    let source_libversion = unsafe {
-                        cstr_from_c_char_ptr(sqlite3_libversion() as *const std::ffi::c_char)
-                            .to_string_lossy()
-                            .to_string()
-                    };
-
-                    // SQLite backup requires destination to not have active transactions.
-                    // Safety: target_handle.0 is a valid sqlite3* pointer obtained from
-                    // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                    // for the lifetime of the handle lock. sqlite3_get_autocommit is a
-                    // read-only operation that doesn't modify the database handle.
-                    let target_has_transaction = unsafe { sqlite3_get_autocommit(target_handle.0) == 0 };
-                    if target_has_transaction {
-                        return Err(OperationalError::new_err(
-                            "Cannot backup: target connection has an active transaction. \
-                            Commit or rollback the transaction before backup.",
-                        ));
-                    }
-
-                    let backup_busy_timeout_secs: u64 = connection_timeout_secs
-                        .lock()
-                        .unwrap()
-                        .unwrap_or(5)
-                        .clamp(5, 120);
-
-                    backup::run_backup_loop(backup::BackupParams {
-                        source_handle,
-                        target_handle,
-                        name: &name,
-                        pages,
-                        sleep,
-                        progress_callback,
-                        backup_busy_timeout_secs,
-                        source_libversion,
-                    })
-                    .await?;
-
-                    Ok(())
-                }
-                .await;
-
-                // Restore any taken connections back to their slots.
-                if let Some((slot, conn)) = source_taken.take_for_restore() {
-                    let mut g = slot.lock().await;
-                    g.0 = Some(conn);
-                }
-                if let Some((slot, conn)) = target_taken.take_for_restore() {
-                    let mut g = slot.lock().await;
-                    g.0 = Some(conn);
-                }
-
-                result
-            };
+            let future =
+                backup::run_backup(source, target_enum, name, pages, progress_callback, sleep);
             future_into_py(py, future).map(|bound| bound.unbind())
         })
     }
