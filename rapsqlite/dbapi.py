@@ -10,13 +10,14 @@ import re
 from typing import Any, Callable, Coroutine, Iterable, Sequence, TypeVar, cast
 
 from . import (
-    Connection as _Connection,
+    ConnectionT,
     Cursor as _Cursor,
+    CursorT,
     Error,
     InterfaceError,
 )
 from . import connect as _connect
-from ._compat import _is_no_tx_error_message
+from ._compat.commit_rollback import _is_no_tx_error_message
 
 T = TypeVar("T")
 
@@ -121,7 +122,7 @@ class AsyncCursor:
         "_cached_description",
     )
 
-    def __init__(self, conn: "AsyncConnection", raw: _Cursor) -> None:
+    def __init__(self, conn: "AsyncConnection", raw: CursorT) -> None:
         self._conn = conn
         self._raw = raw
         self._result_buffer: list[Any] | None = None
@@ -300,7 +301,7 @@ class AsyncConnection:
     One operation per connection at a time; concurrent use raises ProgrammingError.
     """
 
-    def __init__(self, conn: _Connection) -> None:
+    def __init__(self, conn: ConnectionT) -> None:
         self._conn = conn
         self._closed = False
         self._op_lock = asyncio.Lock()

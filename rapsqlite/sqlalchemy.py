@@ -89,14 +89,14 @@ class _RapsqliteDialectModule:
     threadsafety = _dbapi.threadsafety
     sqlite_version = sqlite3.sqlite_version
     sqlite_version_info = sqlite3.sqlite_version_info
-    Error = _dbapi.Error
-    InterfaceError = _dbapi.InterfaceError
-    DatabaseError = _dbapi.DatabaseError
+    Error = _dbapi.Error  # type: ignore[has-type]
+    InterfaceError = _dbapi.InterfaceError  # type: ignore[has-type]
+    DatabaseError = _dbapi.DatabaseError  # type: ignore[has-type]
     DataError = _dbapi.DataError  # type: ignore[attr-defined]
-    OperationalError = _dbapi.OperationalError
+    OperationalError = _dbapi.OperationalError  # type: ignore[has-type]
     IntegrityError = _dbapi.IntegrityError  # type: ignore[attr-defined]
     InternalError = _dbapi.InternalError  # type: ignore[attr-defined]
-    ProgrammingError = _dbapi.ProgrammingError
+    ProgrammingError = _dbapi.ProgrammingError  # type: ignore[has-type]
     NotSupportedError = _dbapi.NotSupportedError  # type: ignore[attr-defined]
 
     def connect(self, *arg: Any, **kw: Any) -> _RapsqliteConnection:

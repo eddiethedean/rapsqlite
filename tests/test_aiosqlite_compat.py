@@ -8,7 +8,6 @@ Source: https://github.com/omnilib/aiosqlite/tree/main/aiosqlite/tests
 """
 
 import asyncio
-import os
 import pytest
 from pathlib import Path
 
@@ -1304,7 +1303,6 @@ async def test_iterdump_empty_database(test_db):
 @pytest.mark.slow
 async def test_backup_aiosqlite(test_db_file):
     """Test backup functionality (rapsqlite source and target)."""
-    import os
     import rapsqlite
 
     # Create source database with data, then close so backup uses a fresh connection
@@ -1400,7 +1398,6 @@ async def test_backup_with_pages_and_progress(test_db_file):
 @pytest.mark.slow
 async def test_backup_sqlite(test_db_file):
     """Test backup to sqlite3 connection using safe file-based strategy."""
-    import os
     import sqlite3
 
     import rapsqlite
@@ -1462,7 +1459,6 @@ async def test_backup_sqlite_memory_raises(test_db):
 @pytest.mark.slow
 async def test_backup_sqlite_connection_state_validation(test_db_file):
     """Test that backup fails gracefully with proper error messages for invalid sqlite3 connection states."""
-    import os
     import sqlite3
 
     import rapsqlite

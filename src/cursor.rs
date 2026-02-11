@@ -23,6 +23,209 @@ use crate::types::{
 use crate::utils::returns_result_rows;
 use crate::{Connection, OperationalError, ProgrammingError};
 
+// --- Shared fetch pipeline: ensure results cache is filled; fetchone/fetchall/fetchmany then take 1 / N / all. ---
+
+/// Context for the shared fetch pipeline. Built from Cursor and passed to ensure_cursor_results_cached.
+struct CursorFetchContext {
+    query: String,
+    results: Arc<StdMutex<Option<Vec<Py<PyAny>>>>>,
+    current_index: Arc<StdMutex<usize>>,
+    parameters: Arc<StdMutex<Option<Py<PyAny>>>>,
+    processed_query: Option<String>,
+    processed_params: Option<Vec<SqliteParam>>,
+    path: String,
+    pool: Arc<Mutex<PoolSlot>>,
+    pragmas: Arc<StdMutex<Vec<(String, String)>>>,
+    pool_size: Arc<StdMutex<Option<usize>>>,
+    connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
+    row_factory: Arc<StdMutex<Option<Py<PyAny>>>>,
+    text_factory: Arc<StdMutex<Option<Py<PyAny>>>>,
+    transaction_state: Arc<Mutex<TransactionState>>,
+    transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
+    callback_connection: Arc<Mutex<PoolConnectionSlot>>,
+    load_extension_enabled: Arc<StdMutex<bool>>,
+    user_functions: UserFunctions,
+    user_aggregates: UserAggregates,
+    user_collations: UserCollations,
+    trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    progress_handler: ProgressHandler,
+    description: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pending_description: Arc<StdMutex<Option<Py<PyAny>>>>,
+    row_factory_override: Arc<StdMutex<Option<Py<PyAny>>>>,
+    adapters: Adapters,
+    converters: Converters,
+    closed: Arc<StdMutex<bool>>,
+}
+
+/// Ensures the cursor's results cache is filled. If cache is empty and the query returns rows,
+/// acquires the appropriate connection, runs the query, converts rows with row_factory/text_factory,
+/// and sets results + pending_description + current_index. If the query does not return rows, sets empty results.
+async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), PyErr> {
+    ensure_not_closed(&ctx.closed)?;
+    let needs_fetch = ctx.results.lock().unwrap().is_none();
+    if !needs_fetch {
+        return Ok(());
+    }
+    if !returns_result_rows(&ctx.query) {
+        *ctx.results.lock().unwrap() = Some(Vec::new());
+        return Ok(());
+    }
+    let (processed_query, processed_params) = if let (Some(q), Some(p)) =
+        (ctx.processed_query.as_ref(), ctx.processed_params.as_ref())
+    {
+        (q.clone(), p.clone())
+    } else {
+        #[allow(deprecated)]
+        Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
+            let params_guard = ctx.parameters.lock().unwrap();
+            if let Some(ref params_py) = *params_guard {
+                let params_bound = params_py.bind(py);
+                if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
+                    let (proc_query, param_values) =
+                        process_named_parameters(py, &ctx.query, dict, Some(&ctx.adapters))?;
+                    if param_values.is_empty()
+                        && (ctx.query.contains(':')
+                            || ctx.query.contains('@')
+                            || ctx.query.contains('$'))
+                    {
+                        return Err(ProgrammingError::new_err(format!(
+                            "Named parameters found in query but none extracted. Query: '{}', Processed: '{}'",
+                            ctx.query, proc_query
+                        )));
+                    }
+                    if !proc_query.contains('?') && ctx.query.contains(':') {
+                        return Err(ProgrammingError::new_err(format!(
+                            "Query had named parameters but processed query has no ? placeholders. Original: '{}', Processed: '{}'",
+                            ctx.query, proc_query
+                        )));
+                    }
+                    return Ok((proc_query, param_values));
+                }
+                if let Ok(list) = params_bound.cast::<PyList>() {
+                    let param_values =
+                        process_positional_parameters(py, list, Some(&ctx.adapters))?;
+                    return Ok((ctx.query.clone(), param_values));
+                }
+                let param = SqliteParam::apply_adapters_then_from_py(
+                    py,
+                    params_bound,
+                    Some(&ctx.adapters),
+                )?;
+                return Ok((ctx.query.clone(), vec![param]));
+            }
+            Ok((ctx.query.clone(), Vec::new()))
+        })?
+    };
+
+    let in_transaction = {
+        let g = ctx.transaction_state.lock().await;
+        g.is_active()
+    };
+    let has_callbacks_flag = has_callbacks(
+        &ctx.load_extension_enabled,
+        &ctx.user_functions,
+        &ctx.user_aggregates,
+        &ctx.user_collations,
+        &ctx.trace_callback,
+        &ctx.authorizer_callback,
+        &ctx.progress_handler,
+    );
+
+    let rows = if in_transaction {
+        let mut conn_guard = ctx.transaction_connection.lock().await;
+        let conn = conn_guard
+            .0
+            .as_mut()
+            .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
+        bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &ctx.path)
+            .await?
+    } else if has_callbacks_flag {
+        ensure_callback_connection(
+            &ctx.path,
+            &ctx.pool,
+            &ctx.callback_connection,
+            &ctx.pragmas,
+            &ctx.pool_size,
+            &ctx.connection_timeout_secs,
+            &ctx.idle_timeout_secs,
+        )
+        .await?;
+        let mut conn_guard = ctx.callback_connection.lock().await;
+        let conn = conn_guard
+            .0
+            .as_mut()
+            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+        bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &ctx.path)
+            .await?
+    } else {
+        let pool_clone = get_or_create_pool(
+            &ctx.path,
+            &ctx.pool,
+            &ctx.pragmas,
+            &ctx.pool_size,
+            &ctx.connection_timeout_secs,
+            &ctx.idle_timeout_secs,
+        )
+        .await?;
+        let pool_size_val = *ctx.pool_size.lock().unwrap();
+        let timeout_val = *ctx.connection_timeout_secs.lock().unwrap();
+        let mut conn = acquire_with_pragmas(
+            &pool_clone,
+            &ctx.pragmas,
+            &ctx.path,
+            pool_size_val,
+            timeout_val,
+        )
+        .await?;
+        bind_and_fetch_all_on_connection(&processed_query, &processed_params, &mut conn, &ctx.path)
+            .await?
+    };
+
+    #[allow(deprecated)]
+    let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
+        let tf_guard = ctx.text_factory.lock().unwrap();
+        let tf_opt = tf_guard.as_ref();
+        let mut vec = Vec::new();
+        let o_guard = ctx.row_factory_override.lock().unwrap();
+        let factory_opt = if o_guard.is_some() {
+            o_guard.as_ref()
+        } else {
+            drop(o_guard);
+            let c_guard = ctx.row_factory.lock().unwrap();
+            for row in rows.iter() {
+                let out = row_to_py_with_factory(
+                    py,
+                    row,
+                    c_guard.as_ref(),
+                    tf_opt,
+                    Some(&ctx.converters),
+                )?;
+                vec.push(out.unbind());
+            }
+            return Ok(vec);
+        };
+        for row in rows.iter() {
+            let out = row_to_py_with_factory(py, row, factory_opt, tf_opt, Some(&ctx.converters))?;
+            vec.push(out.unbind());
+        }
+        Ok(vec)
+    })?;
+
+    *ctx.results.lock().unwrap() = Some(cached_results);
+    if let Some(first) = rows.first() {
+        #[allow(deprecated)]
+        let desc = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+            let t = build_description_tuple(py, first)?;
+            Ok(t.unbind().into())
+        })?;
+        *ctx.pending_description.lock().unwrap() = Some(desc);
+    }
+    *ctx.current_index.lock().unwrap() = 0;
+    Ok(())
+}
+
 /// Cursor for executing queries.
 #[pyclass]
 pub(crate) struct Cursor {
@@ -64,6 +267,44 @@ pub(crate) struct Cursor {
     pub(crate) rowcount: Arc<StdMutex<i64>>,
     pub(crate) row_factory_override: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) closed: Arc<StdMutex<bool>>,
+}
+
+impl Cursor {
+    /// Build context for the shared fetch pipeline (used by fetchone, fetchall, fetchmany).
+    fn build_fetch_context(&self) -> CursorFetchContext {
+        CursorFetchContext {
+            query: self.query.clone(),
+            results: Arc::clone(&self.results),
+            current_index: Arc::clone(&self.current_index),
+            parameters: Arc::clone(&self.parameters),
+            processed_query: self.processed_query.clone(),
+            processed_params: self.processed_params.clone(),
+            path: self.connection_path.clone(),
+            pool: Arc::clone(&self.connection_pool),
+            pragmas: Arc::clone(&self.connection_pragmas),
+            pool_size: Arc::clone(&self.pool_size),
+            connection_timeout_secs: Arc::clone(&self.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
+            row_factory: Arc::clone(&self.row_factory),
+            text_factory: Arc::clone(&self.text_factory),
+            transaction_state: Arc::clone(&self.transaction_state),
+            transaction_connection: Arc::clone(&self.transaction_connection),
+            callback_connection: Arc::clone(&self.callback_connection),
+            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            user_functions: Arc::clone(&self.user_functions),
+            user_aggregates: Arc::clone(&self.user_aggregates),
+            user_collations: Arc::clone(&self.user_collations),
+            trace_callback: Arc::clone(&self.trace_callback),
+            authorizer_callback: Arc::clone(&self.authorizer_callback),
+            progress_handler: Arc::clone(&self.progress_handler),
+            description: Arc::clone(&self.description),
+            pending_description: Arc::clone(&self.pending_description),
+            row_factory_override: Arc::clone(&self.row_factory_override),
+            adapters: Arc::clone(&self.adapters),
+            converters: Arc::clone(&self.converters),
+            closed: Arc::clone(&self.closed),
+        }
+    }
 }
 
 #[pymethods]
@@ -211,260 +452,32 @@ impl Cursor {
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
-
-        // Use same logic as fetchmany but return single element or None
-        let query = self.query.clone();
-        let results = Arc::clone(&self.results);
-        let current_index = Arc::clone(&self.current_index);
-        let parameters = Arc::clone(&self.parameters);
-        let stored_proc_query_fetchone = self.processed_query.clone();
-        let stored_proc_params_fetchone = self.processed_params.clone();
-        let path = self.connection_path.clone();
-        let pool = Arc::clone(&self.connection_pool);
-        let pragmas = Arc::clone(&self.connection_pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let row_factory = Arc::clone(&self.row_factory);
-        let text_factory = Arc::clone(&self.text_factory);
-        let transaction_state = Arc::clone(&self.transaction_state);
-        let transaction_connection = Arc::clone(&self.transaction_connection);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let user_functions = Arc::clone(&self.user_functions);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let user_collations = Arc::clone(&self.user_collations);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
-        let description = Arc::clone(&self.description);
-        let pending_description = Arc::clone(&self.pending_description);
-        let row_factory_override = Arc::clone(&self.row_factory_override);
-        let closed = Arc::clone(&self.closed);
-        let adapters = Arc::clone(&self.adapters);
-        let converters = Arc::clone(&self.converters);
-
+        let ctx = self.build_fetch_context();
         Python::attach(|py| {
             let future = async move {
-                ensure_not_closed(&closed)?;
-                // Ensure results are cached (same logic as fetchmany)
-                let needs_fetch = {
-                    let results_guard = results.lock().unwrap();
-                    results_guard.is_none()
-                };
-
-                if needs_fetch {
-                    // Use stored processed parameters if available, otherwise re-process
-                    let (processed_query, processed_params) =
-                        if let (Some(proc_query), Some(proc_params)) =
-                            (stored_proc_query_fetchone, stored_proc_params_fetchone)
-                        {
-                            (proc_query, proc_params)
-                        } else {
-                            // Fallback: re-process parameters
-                            // Note: Python::with_gil is used here for sync parameter processing in async context.
-                            // The deprecation warning is acceptable as this is a sync operation within async.
-                            #[allow(deprecated)]
-                            Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
-                                let params_guard = parameters.lock().unwrap();
-                                if let Some(ref params_py) = *params_guard {
-                                    let params_bound = params_py.bind(py);
-                                    if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                                        let (proc_query, param_values) = process_named_parameters(
-                                            py,
-                                            &query,
-                                            dict,
-                                            Some(&adapters),
-                                        )?;
-                                        return Ok((proc_query, param_values));
-                                    }
-                                    if let Ok(list) = params_bound.cast::<PyList>() {
-                                        let param_values = process_positional_parameters(
-                                            py,
-                                            list,
-                                            Some(&adapters),
-                                        )?;
-                                        return Ok((query.clone(), param_values));
-                                    }
-                                    let param = SqliteParam::apply_adapters_then_from_py(
-                                        py,
-                                        params_bound,
-                                        Some(&adapters),
-                                    )?;
-                                    return Ok((query.clone(), vec![param]));
-                                }
-                                Ok((query.clone(), Vec::new()))
-                            })?
-                        };
-
-                    // Priority: transaction > callbacks > pool
-                    let in_transaction = {
-                        let g = transaction_state.lock().await;
-                        g.is_active()
-                    };
-
-                    let has_callbacks_flag = has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-
-                    let rows = if in_transaction {
-                        let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Transaction connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(
-                            &processed_query,
-                            &processed_params,
-                            conn,
-                            &path,
-                        )
-                        .await?
-                    } else if has_callbacks_flag {
-                        // Ensure callback connection exists
-                        ensure_callback_connection(
-                            &path,
-                            &pool,
-                            &callback_connection,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-
-                        // Use callback connection
-                        let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Callback connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(
-                            &processed_query,
-                            &processed_params,
-                            conn,
-                            &path,
-                        )
-                        .await?
-                    } else {
-                        let pool_clone = get_or_create_pool(
-                            &path,
-                            &pool,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut conn = acquire_with_pragmas(
-                            &pool_clone,
-                            &pragmas,
-                            &path,
-                            pool_size_val,
-                            timeout_val,
-                        )
-                        .await?;
-                        bind_and_fetch_all_on_connection(
-                            &processed_query,
-                            &processed_params,
-                            &mut conn,
-                            &path,
-                        )
-                        .await?
-                    };
-
-                    #[allow(deprecated)]
-                    let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
-                        let tf_guard = text_factory.lock().unwrap();
-                        let tf_opt = tf_guard.as_ref();
-                        let mut vec = Vec::new();
-                        let o_guard = row_factory_override.lock().unwrap();
-                        let factory_opt = if o_guard.is_some() {
-                            o_guard.as_ref()
-                        } else {
-                            drop(o_guard);
-                            let c_guard = row_factory.lock().unwrap();
-                            for row in rows.iter() {
-                                let out = row_to_py_with_factory(
-                                    py,
-                                    row,
-                                    c_guard.as_ref(),
-                                    tf_opt,
-                                    Some(&converters),
-                                )?;
-                                vec.push(out.unbind());
-                            }
-                            return Ok(vec);
-                        };
-                        for row in rows.iter() {
-                            let out = row_to_py_with_factory(
-                                py,
-                                row,
-                                factory_opt,
-                                tf_opt,
-                                Some(&converters),
-                            )?;
-                            vec.push(out.unbind());
-                        }
-                        Ok(vec)
-                    })?;
-
-                    {
-                        let mut results_guard = results.lock().unwrap();
-                        *results_guard = Some(cached_results);
-                    }
-                    if let Some(first) = rows.first() {
-                        #[allow(deprecated)]
-                        let desc = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                            let t = build_description_tuple(py, first)?;
-                            Ok(t.unbind().into())
-                        })?;
-                        *pending_description.lock().unwrap() = Some(desc);
-                    }
-                    *current_index.lock().unwrap() = 0;
-                }
-
-                // Get first element or None (from cache)
+                ensure_cursor_results_cached(&ctx).await?;
                 #[allow(deprecated)]
                 Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    // Lazy description: set from pending on first fetch
                     {
-                        let mut desc_guard = description.lock().unwrap();
+                        let mut desc_guard = ctx.description.lock().unwrap();
                         if desc_guard.is_none() {
-                            let mut pending = pending_description.lock().unwrap();
+                            let mut pending = ctx.pending_description.lock().unwrap();
                             if let Some(pd) = pending.take() {
                                 *desc_guard = Some(pd);
                             }
                         }
                     }
-                    let mut index_guard = current_index.lock().unwrap();
-                    let results_guard = results.lock().unwrap();
-
+                    let mut index_guard = ctx.current_index.lock().unwrap();
+                    let results_guard = ctx.results.lock().unwrap();
                     let Some(ref results_vec) = *results_guard else {
                         return Ok(py.None());
                     };
-
                     if *index_guard >= results_vec.len() {
                         return Ok(py.None());
                     }
-
                     let mut row = results_vec[*index_guard].clone_ref(py);
                     *index_guard += 1;
-
-                    // Apply row_factory_override "tuple" when returning from cache (user set after execute)
-                    let o_guard = row_factory_override.lock().unwrap();
+                    let o_guard = ctx.row_factory_override.lock().unwrap();
                     if let Some(ref f) = *o_guard {
                         if let Ok(s) = f.bind(py).downcast::<PyString>() {
                             if s.to_str().is_ok_and(|n| n == "tuple") {
@@ -487,316 +500,47 @@ impl Cursor {
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
-
-        let query = self.query.clone();
-        let results = Arc::clone(&self.results);
-        let current_index = Arc::clone(&self.current_index);
-        let parameters = Arc::clone(&self.parameters);
-        let path = self.connection_path.clone();
-        let pool = Arc::clone(&self.connection_pool);
-        let pragmas = Arc::clone(&self.connection_pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let row_factory = Arc::clone(&self.row_factory);
-        let text_factory = Arc::clone(&self.text_factory);
-        let transaction_state = Arc::clone(&self.transaction_state);
-        let transaction_connection = Arc::clone(&self.transaction_connection);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let user_functions = Arc::clone(&self.user_functions);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let user_collations = Arc::clone(&self.user_collations);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
-        let description = Arc::clone(&self.description);
-        let pending_description = Arc::clone(&self.pending_description);
-        let row_factory_override = Arc::clone(&self.row_factory_override);
-
-        // Check if this statement returns result rows - if not and results are None,
-        // it was already executed in __aenter__ and we should return empty results
-        let is_select = returns_result_rows(&query);
+        // Non-SELECT with no results yet: already executed in __aenter__, return empty list
+        let is_select = returns_result_rows(&self.query);
         if !is_select {
-            let results_guard = results.lock().unwrap();
+            let results_guard = self.results.lock().unwrap();
             if results_guard.is_none() {
-                // Non-SELECT query already executed in __aenter__, return empty results
-                // Mark as executed to prevent re-execution
                 drop(results_guard);
-                *results.lock().unwrap() = Some(Vec::new());
-                // Return an awaitable future (empty list for non-SELECT queries)
+                *self.results.lock().unwrap() = Some(Vec::new());
                 return Python::attach(|py| -> PyResult<Py<PyAny>> {
                     let future = async move {
-                        Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(PyList::empty(py).into()) })
+                        #[allow(deprecated)]
+                        Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                            Ok(PyList::empty(py).into())
+                        })
                     };
                     future_into_py(py, future).map(|bound| bound.unbind())
                 });
             }
         }
-
-        // Clone processed parameters for use in async future
-        let stored_proc_query = self.processed_query.clone();
-        let stored_proc_params = self.processed_params.clone();
-        let closed = Arc::clone(&self.closed);
-        let adapters = Arc::clone(&self.adapters);
-        let converters = Arc::clone(&self.converters);
-
+        let ctx = self.build_fetch_context();
         Python::attach(|py| {
             let future = async move {
-                ensure_not_closed(&closed)?;
-                // Ensure results are cached
-                let needs_fetch = {
-                    let results_guard = results.lock().unwrap();
-                    results_guard.is_none()
-                };
-
-                if needs_fetch {
-                    // If statement does not return rows, it was already executed in __aenter__
-                    let is_select = returns_result_rows(&query);
-                    if !is_select {
-                        // Non-SELECT query already executed in __aenter__, mark as empty
-                        let mut results_guard = results.lock().unwrap();
-                        *results_guard = Some(Vec::new());
-                    } else {
-                        // SELECT query - fetch results
-                        // Use stored processed parameters if available (from Connection.execute()), otherwise re-process
-                        let (processed_query, processed_params) = if let (
-                            Some(proc_query),
-                            Some(proc_params),
-                        ) =
-                            (stored_proc_query, stored_proc_params)
-                        {
-                            // Use stored processed parameters - these are already in the correct order
-                            // and match the ? placeholders in processed_query
-                            // The parameters were processed by process_named_parameters() which ensures
-                            // correct order matching the ? placeholders
-                            (proc_query, proc_params)
-                        } else {
-                            // Fallback: re-process parameters (for cursors created via cursor() method)
-                            // Note: Python::with_gil is used here for sync parameter processing in async context.
-                            // The deprecation warning is acceptable as this is a sync operation within async.
-                            #[allow(deprecated)]
-                            Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
-                                let params_guard = parameters.lock().unwrap();
-                                if let Some(ref params_py) = *params_guard {
-                                    let params_bound = params_py.bind(py);
-
-                                    // Try dict first (named parameters)
-                                    if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                                        let (proc_query, param_values) = process_named_parameters(
-                                            py,
-                                            &query,
-                                            dict,
-                                            Some(&adapters),
-                                        )?;
-                                        // Verify we got parameters if query contains named placeholders
-                                        if param_values.is_empty()
-                                            && (query.contains(':')
-                                                || query.contains('@')
-                                                || query.contains('$'))
-                                        {
-                                            return Err(ProgrammingError::new_err(
-                                                format!("Named parameters found in query but none extracted. Query: '{query}', Processed: '{proc_query}'")
-                                            ));
-                                        }
-                                        // Additional verification: check if processed query has ? placeholders
-                                        if !proc_query.contains('?') && query.contains(':') {
-                                            return Err(ProgrammingError::new_err(
-                                                format!("Query had named parameters but processed query has no ? placeholders. Original: '{query}', Processed: '{proc_query}'")
-                                            ));
-                                        }
-                                        return Ok((proc_query, param_values));
-                                    }
-
-                                    // Try list (positional parameters)
-                                    if let Ok(list) = params_bound.cast::<PyList>() {
-                                        let param_values = process_positional_parameters(
-                                            py,
-                                            list,
-                                            Some(&adapters),
-                                        )?;
-                                        return Ok((query.clone(), param_values));
-                                    }
-
-                                    // Single value
-                                    let param = SqliteParam::apply_adapters_then_from_py(
-                                        py,
-                                        params_bound,
-                                        Some(&adapters),
-                                    )?;
-                                    return Ok((query.clone(), vec![param]));
-                                }
-                                Ok((query.clone(), Vec::new()))
-                            })?
-                        };
-
-                        // Priority: transaction > callbacks > pool
-                        // Check transaction state - must check inside async future to get current state
-                        let in_transaction = {
-                            let g = transaction_state.lock().await;
-                            g.is_active()
-                        };
-
-                        let has_callbacks_flag = has_callbacks(
-                            &load_extension_enabled,
-                            &user_functions,
-                            &user_aggregates,
-                            &user_collations,
-                            &trace_callback,
-                            &authorizer_callback,
-                            &progress_handler,
-                        );
-
-                        let rows = if in_transaction {
-                            // Use transaction connection - it's already acquired and holds the transaction
-                            let mut conn_guard = transaction_connection.lock().await;
-                            let conn = conn_guard
-                                .0
-                                .as_mut()
-                                .ok_or_else(|| OperationalError::new_err(
-                                    "Transaction is active but transaction_connection is None. This indicates a bug in transaction management.".to_string()
-                                ))?;
-                            bind_and_fetch_all_on_connection(
-                                &processed_query,
-                                &processed_params,
-                                conn,
-                                &path,
-                            )
-                            .await?
-                        } else if has_callbacks_flag {
-                            // Ensure callback connection exists
-                            ensure_callback_connection(
-                                &path,
-                                &pool,
-                                &callback_connection,
-                                &pragmas,
-                                &pool_size,
-                                &connection_timeout_secs,
-                                &idle_timeout_secs,
-                            )
-                            .await?;
-
-                            // Use callback connection
-                            let mut conn_guard = callback_connection.lock().await;
-                            let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                                OperationalError::new_err("Callback connection not available")
-                            })?;
-                            bind_and_fetch_all_on_connection(
-                                &processed_query,
-                                &processed_params,
-                                conn,
-                                &path,
-                            )
-                            .await?
-                        } else {
-                            let pool_clone = get_or_create_pool(
-                                &path,
-                                &pool,
-                                &pragmas,
-                                &pool_size,
-                                &connection_timeout_secs,
-                                &idle_timeout_secs,
-                            )
-                            .await?;
-                            let pool_size_val = {
-                                let g = pool_size.lock().unwrap();
-                                *g
-                            };
-                            let timeout_val = {
-                                let g = connection_timeout_secs.lock().unwrap();
-                                *g
-                            };
-                            let mut conn = acquire_with_pragmas(
-                                &pool_clone,
-                                &pragmas,
-                                &path,
-                                pool_size_val,
-                                timeout_val,
-                            )
-                            .await?;
-                            bind_and_fetch_all_on_connection(
-                                &processed_query,
-                                &processed_params,
-                                &mut conn,
-                                &path,
-                            )
-                            .await?
-                        };
-
-                        #[allow(deprecated)]
-                        let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
-                            let tf_guard = text_factory.lock().unwrap();
-                            let tf_opt = tf_guard.as_ref();
-                            let mut vec = Vec::new();
-                            let o_guard = row_factory_override.lock().unwrap();
-                            let factory_opt = if o_guard.is_some() {
-                                o_guard.as_ref()
-                            } else {
-                                drop(o_guard);
-                                let c_guard = row_factory.lock().unwrap();
-                                for row in rows.iter() {
-                                    let out = row_to_py_with_factory(
-                                        py,
-                                        row,
-                                        c_guard.as_ref(),
-                                        tf_opt,
-                                        Some(&converters),
-                                    )?;
-                                    vec.push(out.unbind());
-                                }
-                                return Ok(vec);
-                            };
-                            for row in rows.iter() {
-                                let out = row_to_py_with_factory(
-                                    py,
-                                    row,
-                                    factory_opt,
-                                    tf_opt,
-                                    Some(&converters),
-                                )?;
-                                vec.push(out.unbind());
-                            }
-                            Ok(vec)
-                        })?;
-
-                        {
-                            let mut results_guard = results.lock().unwrap();
-                            *results_guard = Some(cached_results);
-                        }
-                        if let Some(first) = rows.first() {
-                            #[allow(deprecated)]
-                            let desc = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                                let t = build_description_tuple(py, first)?;
-                                Ok(t.unbind().into())
-                            })?;
-                            *pending_description.lock().unwrap() = Some(desc);
-                        }
-                    }
-                }
-
-                // Return all remaining results (from cache)
+                ensure_cursor_results_cached(&ctx).await?;
                 #[allow(deprecated)]
                 Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    // Lazy description: set from pending on first fetch
                     {
-                        let mut desc_guard = description.lock().unwrap();
+                        let mut desc_guard = ctx.description.lock().unwrap();
                         if desc_guard.is_none() {
-                            let mut pending = pending_description.lock().unwrap();
+                            let mut pending = ctx.pending_description.lock().unwrap();
                             if let Some(pd) = pending.take() {
                                 *desc_guard = Some(pd);
                             }
                         }
                     }
-                    let mut index_guard = current_index.lock().unwrap();
-                    let results_guard = results.lock().unwrap();
-
+                    let mut index_guard = ctx.current_index.lock().unwrap();
+                    let results_guard = ctx.results.lock().unwrap();
                     let Some(ref results_vec) = *results_guard else {
                         return Err(ProgrammingError::new_err("No results available"));
                     };
-
                     let start = *index_guard;
                     let result_list = PyList::empty(py);
-                    let o_guard = row_factory_override.lock().unwrap();
+                    let o_guard = ctx.row_factory_override.lock().unwrap();
                     let use_tuple = o_guard
                         .as_ref()
                         .and_then(|f| {
@@ -816,10 +560,7 @@ impl Cursor {
                         }
                         result_list.append(r)?;
                     }
-
-                    // Update index to end
                     *index_guard = results_vec.len();
-
                     Ok(result_list.into())
                 })
             };
@@ -836,271 +577,30 @@ impl Cursor {
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
-
-        let query = self.query.clone();
-        let results = Arc::clone(&self.results);
-        let current_index = Arc::clone(&self.current_index);
-        let parameters = Arc::clone(&self.parameters);
-        let stored_proc_query_fetchmany = self.processed_query.clone();
-        let stored_proc_params_fetchmany = self.processed_params.clone();
-        let path = self.connection_path.clone();
-        let pool = Arc::clone(&self.connection_pool);
-        let pragmas = Arc::clone(&self.connection_pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let row_factory = Arc::clone(&self.row_factory);
-        let text_factory = Arc::clone(&self.text_factory);
-        let transaction_state = Arc::clone(&self.transaction_state);
-        let transaction_connection = Arc::clone(&self.transaction_connection);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
-        let user_functions = Arc::clone(&self.user_functions);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let user_collations = Arc::clone(&self.user_collations);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
-        let arraysize = Arc::clone(&self.arraysize);
-        let description = Arc::clone(&self.description);
-        let pending_description = Arc::clone(&self.pending_description);
-        let row_factory_override = Arc::clone(&self.row_factory_override);
-        let closed = Arc::clone(&self.closed);
-        let adapters = Arc::clone(&self.adapters);
-        let converters = Arc::clone(&self.converters);
-
+        let fetch_size = size.unwrap_or_else(|| *self.arraysize.lock().unwrap());
+        let ctx = self.build_fetch_context();
         Python::attach(|py| {
             let future = async move {
-                ensure_not_closed(&closed)?;
-                // Check if results need to be fetched
-                let needs_fetch = {
-                    let results_guard = results.lock().unwrap();
-                    results_guard.is_none()
-                };
-
-                if needs_fetch {
-                    // Use stored processed parameters if available, otherwise re-process
-                    let (processed_query, processed_params) =
-                        if let (Some(proc_query), Some(proc_params)) =
-                            (stored_proc_query_fetchmany, stored_proc_params_fetchmany)
-                        {
-                            (proc_query, proc_params)
-                        } else {
-                            // Fallback: re-process parameters
-                            // Note: Python::with_gil is used here for sync parameter processing in async context.
-                            // The deprecation warning is acceptable as this is a sync operation within async.
-                            #[allow(deprecated)]
-                            Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
-                                let params_guard = parameters.lock().unwrap();
-                                if let Some(ref params_py) = *params_guard {
-                                    let params_bound = params_py.bind(py);
-
-                                    // Check if it's a dict (named parameters)
-                                    if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                                        let (proc_query, param_values) = process_named_parameters(
-                                            py,
-                                            &query,
-                                            dict,
-                                            Some(&adapters),
-                                        )?;
-                                        return Ok((proc_query, param_values));
-                                    }
-
-                                    // Check if it's a list (positional parameters)
-                                    if let Ok(list) = params_bound.cast::<PyList>() {
-                                        let param_values = process_positional_parameters(
-                                            py,
-                                            list,
-                                            Some(&adapters),
-                                        )?;
-                                        return Ok((query.clone(), param_values));
-                                    }
-
-                                    // Single value
-                                    let param = SqliteParam::apply_adapters_then_from_py(
-                                        py,
-                                        params_bound,
-                                        Some(&adapters),
-                                    )?;
-                                    return Ok((query.clone(), vec![param]));
-                                }
-                                Ok((query.clone(), Vec::new()))
-                            })?
-                        };
-
-                    // Priority: transaction > callbacks > pool
-                    let in_transaction = {
-                        let g = transaction_state.lock().await;
-                        g.is_active()
-                    };
-
-                    let has_callbacks_flag = has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
-
-                    let rows = if in_transaction {
-                        let mut conn_guard = transaction_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Transaction connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(
-                            &processed_query,
-                            &processed_params,
-                            conn,
-                            &path,
-                        )
-                        .await?
-                    } else if has_callbacks_flag {
-                        // Ensure callback connection exists
-                        ensure_callback_connection(
-                            &path,
-                            &pool,
-                            &callback_connection,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-
-                        // Use callback connection
-                        let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Callback connection not available")
-                        })?;
-                        bind_and_fetch_all_on_connection(
-                            &processed_query,
-                            &processed_params,
-                            conn,
-                            &path,
-                        )
-                        .await?
-                    } else {
-                        let pool_clone = get_or_create_pool(
-                            &path,
-                            &pool,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut conn = acquire_with_pragmas(
-                            &pool_clone,
-                            &pragmas,
-                            &path,
-                            pool_size_val,
-                            timeout_val,
-                        )
-                        .await?;
-                        bind_and_fetch_all_on_connection(
-                            &processed_query,
-                            &processed_params,
-                            &mut conn,
-                            &path,
-                        )
-                        .await?
-                    };
-
-                    // Cache results as Python objects; resolve row_factory (override else connection)
-                    #[allow(deprecated)]
-                    let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
-                        let tf_guard = text_factory.lock().unwrap();
-                        let tf_opt = tf_guard.as_ref();
-                        let mut vec = Vec::new();
-                        let o_guard = row_factory_override.lock().unwrap();
-                        let factory_opt = if o_guard.is_some() {
-                            o_guard.as_ref()
-                        } else {
-                            drop(o_guard);
-                            let c_guard = row_factory.lock().unwrap();
-                            for row in rows.iter() {
-                                let out = row_to_py_with_factory(
-                                    py,
-                                    row,
-                                    c_guard.as_ref(),
-                                    tf_opt,
-                                    Some(&converters),
-                                )?;
-                                vec.push(out.unbind());
-                            }
-                            return Ok(vec);
-                        };
-                        for row in rows.iter() {
-                            let out = row_to_py_with_factory(
-                                py,
-                                row,
-                                factory_opt,
-                                tf_opt,
-                                Some(&converters),
-                            )?;
-                            vec.push(out.unbind());
-                        }
-                        Ok(vec)
-                    })?;
-
-                    // Store cached results; keep description lazy (set on first read from cache)
-                    {
-                        let mut results_guard = results.lock().unwrap();
-                        *results_guard = Some(cached_results);
-                    }
-                    if let Some(first) = rows.first() {
-                        #[allow(deprecated)]
-                        let desc = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                            let t = build_description_tuple(py, first)?;
-                            Ok(t.unbind().into())
-                        })?;
-                        *pending_description.lock().unwrap() = Some(desc);
-                    }
-
-                    // Reset index
-                    *current_index.lock().unwrap() = 0;
-                }
-
-                // Get slice based on size (use arraysize when size is None)
-                // Note: Python::with_gil is used here for sync context manager creation before async execution.
-                // The deprecation warning is acceptable as this is a sync context.
-                #[allow(deprecated)]
-                // Note: Python::with_gil is used here for sync result conversion in async context.
-                // The deprecation warning is acceptable as this is a sync operation within async.
+                ensure_cursor_results_cached(&ctx).await?;
                 #[allow(deprecated)]
                 Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                    // Lazy description: set from pending on first fetch
                     {
-                        let mut desc_guard = description.lock().unwrap();
+                        let mut desc_guard = ctx.description.lock().unwrap();
                         if desc_guard.is_none() {
-                            let mut pending = pending_description.lock().unwrap();
+                            let mut pending = ctx.pending_description.lock().unwrap();
                             if let Some(pd) = pending.take() {
                                 *desc_guard = Some(pd);
                             }
                         }
                     }
-                    let mut index_guard = current_index.lock().unwrap();
-                    let results_guard = results.lock().unwrap();
-
+                    let mut index_guard = ctx.current_index.lock().unwrap();
+                    let results_guard = ctx.results.lock().unwrap();
                     let Some(ref results_vec) = *results_guard else {
                         return Err(ProgrammingError::new_err("No results available"));
                     };
-
                     let start = *index_guard;
-                    let fetch_size = size.unwrap_or_else(|| *arraysize.lock().unwrap());
                     let end = std::cmp::min(start + fetch_size, results_vec.len());
-
-                    let o_guard = row_factory_override.lock().unwrap();
+                    let o_guard = ctx.row_factory_override.lock().unwrap();
                     let use_tuple = o_guard
                         .as_ref()
                         .and_then(|f| {
@@ -1121,10 +621,7 @@ impl Cursor {
                         }
                         result_list.append(r)?;
                     }
-
-                    // Update index for next call
                     *index_guard = end;
-
                     Ok(result_list.into())
                 })
             };

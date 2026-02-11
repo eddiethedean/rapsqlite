@@ -1,0 +1,3 @@
+# CI lint deps (ruff, mypy). Used by GitHub Actions and Makefile lint-python.
+ruff
+mypy>=1.4

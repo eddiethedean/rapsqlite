@@ -97,6 +97,34 @@ pub(crate) fn process_positional_parameters_tuple(
     process_positional_parameters_iter(py, tup.iter(), adapters)
 }
 
+/// Parse query parameters from optional Python value (dict, list, tuple, or single value).
+/// Returns (processed_query, param_values). Use this to avoid duplicating the same
+/// branch logic in Connection and Cursor.
+pub(crate) fn process_parameters(
+    py: Python<'_>,
+    query: &str,
+    params: Option<&Bound<'_, PyAny>>,
+    adapters: Option<&Adapters>,
+) -> PyResult<(String, Vec<SqliteParam>)> {
+    let params = match params {
+        None => return Ok((query.to_string(), Vec::new())),
+        Some(p) => p.as_borrowed(),
+    };
+    if let Ok(dict) = params.cast::<PyDict>() {
+        return process_named_parameters(py, query, &dict, adapters);
+    }
+    if let Ok(list) = params.cast::<PyList>() {
+        let v = process_positional_parameters(py, &list, adapters)?;
+        return Ok((query.to_string(), v));
+    }
+    if let Ok(tup) = params.cast::<PyTuple>() {
+        let v = process_positional_parameters_tuple(py, &tup, adapters)?;
+        return Ok((query.to_string(), v));
+    }
+    let param = SqliteParam::apply_adapters_then_from_py(py, &params, adapters)?;
+    Ok((query.to_string(), vec![param]))
+}
+
 fn process_positional_parameters_iter<'a>(
     py: Python<'_>,
     iter: impl Iterator<Item = Bound<'a, PyAny>>,
