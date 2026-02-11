@@ -1201,14 +1201,63 @@ impl Cursor {
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
-                // Parse script into individual statements
-                // Simple approach: split by semicolon, but be careful about semicolons in strings
-                // For now, use a simple split - more sophisticated parsing can be added later
-                let statements: Vec<String> = script
-                    .split(';')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
+                // Parse script into individual statements.
+                // We implement a lightweight parser that respects single- and double-quoted
+                // string literals so semicolons inside strings do not split statements.
+                let mut statements = Vec::new();
+                let mut current = String::new();
+                let chars: Vec<char> = script.chars().collect();
+                let mut i = 0;
+                let len = chars.len();
+
+                while i < len {
+                    let ch = chars[i];
+                    match ch {
+                        '\'' => {
+                            // Copy a single-quoted string verbatim, including any semicolons.
+                            current.push(ch);
+                            i += 1;
+                            while i < len {
+                                let inner = chars[i];
+                                current.push(inner);
+                                i += 1;
+                                if inner == '\'' {
+                                    break;
+                                }
+                            }
+                        }
+                        '"' => {
+                            // Copy a double-quoted string verbatim, including any semicolons.
+                            current.push(ch);
+                            i += 1;
+                            while i < len {
+                                let inner = chars[i];
+                                current.push(inner);
+                                i += 1;
+                                if inner == '"' {
+                                    break;
+                                }
+                            }
+                        }
+                        ';' => {
+                            let trimmed = current.trim();
+                            if !trimmed.is_empty() {
+                                statements.push(trimmed.to_string());
+                            }
+                            current.clear();
+                            i += 1;
+                        }
+                        _ => {
+                            current.push(ch);
+                            i += 1;
+                        }
+                    }
+                }
+
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    statements.push(trimmed.to_string());
+                }
 
                 if statements.is_empty() {
                     return Ok(());

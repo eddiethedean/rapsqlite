@@ -172,8 +172,12 @@ async def readme_migration_total_changes():
         async with connect(path) as conn:
             changes = conn.total_changes
             in_tx = conn.in_transaction
-            assert isinstance(changes, int), f"total_changes should be int, got {type(changes)}"
-            assert isinstance(in_tx, bool), f"in_transaction should be bool, got {type(in_tx)}"
+            assert isinstance(changes, int), (
+                f"total_changes should be int, got {type(changes)}"
+            )
+            assert isinstance(in_tx, bool), (
+                f"in_transaction should be bool, got {type(in_tx)}"
+            )
     finally:
         _unlink_db(path)
 

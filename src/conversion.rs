@@ -99,11 +99,9 @@ pub(crate) unsafe fn py_to_sqlite_c_result(
         })?;
         let ptr = c_str.as_ptr();
         let len = c_str.as_bytes().len() as i32;
-        // SQLite will copy the string, so we need to ensure it's valid
-        // Use SQLITE_TRANSIENT to let SQLite manage the memory
+        // Use SQLITE_TRANSIENT so SQLite copies the string before this function returns.
+        // After sqlite3_result_text returns, c_str can be safely dropped.
         sqlite3_result_text(ctx, ptr, len, libsqlite3_sys::SQLITE_TRANSIENT());
-        // Keep c_str alive until after the call
-        std::mem::forget(c_str);
         return Ok(());
     }
 
@@ -117,8 +115,6 @@ pub(crate) unsafe fn py_to_sqlite_c_result(
             len,
             libsqlite3_sys::SQLITE_TRANSIENT(),
         );
-        // Keep bytes_val alive
-        std::mem::forget(bytes_val);
         return Ok(());
     }
 
