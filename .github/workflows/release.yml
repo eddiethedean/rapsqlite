@@ -174,7 +174,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
           command: publish
-          args: --zig --manylinux 2_17 --skip-existing
+          args: --zig --skip-existing
           manylinux: "2_17"
           container: off
 
@@ -191,7 +191,7 @@ jobs:
         with:
           target: aarch64-unknown-linux-gnu
           command: publish
-          args: --zig --manylinux 2_28 --skip-existing
+          args: --zig --skip-existing
           manylinux: "2_28"
           container: off
 
