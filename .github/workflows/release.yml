@@ -174,7 +174,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
           command: publish
-          args: --release --zig --manylinux 2_17 --skip-existing
+          args: --zig --manylinux 2_17 --skip-existing
           manylinux: "2_17"
           container: off
 
@@ -191,7 +191,7 @@ jobs:
         with:
           target: aarch64-unknown-linux-gnu
           command: publish
-          args: --release --zig --manylinux 2_28 --skip-existing
+          args: --zig --manylinux 2_28 --skip-existing
           manylinux: "2_28"
           container: off
 
@@ -212,7 +212,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           command: publish
-          args: --release --skip-existing
+          args: --skip-existing
 
   publish-pypi-musllinux-x86_64:
     name: PyPI musllinux x86_64
@@ -231,7 +231,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-musl
           command: publish
-          args: --release --zig --compatibility musllinux_1_2 -i 3.12 --skip-existing
+          args: --zig --compatibility musllinux_1_2 -i 3.12 --skip-existing
 
   publish-pypi-musllinux-aarch64:
     name: PyPI musllinux aarch64
@@ -250,7 +250,7 @@ jobs:
         with:
           target: aarch64-unknown-linux-musl
           command: publish
-          args: --release --zig --compatibility musllinux_1_2 -i 3.12 --skip-existing
+          args: --zig --compatibility musllinux_1_2 -i 3.12 --skip-existing
 
   publish-pypi-windows-x86_64:
     name: PyPI Windows x86_64
@@ -265,7 +265,7 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
           command: publish
-          args: --release --skip-existing
+          args: --skip-existing
 
   publish-pypi-windows-arm64:
     name: PyPI Windows aarch64
@@ -280,4 +280,4 @@ jobs:
         with:
           target: aarch64-pc-windows-msvc
           command: publish
-          args: --release --skip-existing
+          args: --skip-existing
