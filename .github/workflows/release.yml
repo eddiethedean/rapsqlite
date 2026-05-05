@@ -174,7 +174,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
           command: publish
-          args: --zig --skip-existing
+          args: --zig -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
           manylinux: "2_17"
           container: off
 
@@ -191,7 +191,7 @@ jobs:
         with:
           target: aarch64-unknown-linux-gnu
           command: publish
-          args: --zig --skip-existing
+          args: --zig -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
           manylinux: "2_28"
           container: off
 
@@ -212,7 +212,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           command: publish
-          args: --skip-existing
+          args: -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
 
   publish-pypi-musllinux-x86_64:
     name: PyPI musllinux x86_64
@@ -220,10 +220,6 @@ jobs:
     needs: [format, clippy, audit, deny, python-lint, python-tests]
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Publish to PyPI (maturin)
         uses: messense/maturin-action@v1
         env:
@@ -231,7 +227,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-musl
           command: publish
-          args: --zig --compatibility musllinux_1_2 -i 3.12 --skip-existing
+          args: --zig --compatibility musllinux_1_2 -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
 
   publish-pypi-musllinux-aarch64:
     name: PyPI musllinux aarch64
@@ -239,10 +235,6 @@ jobs:
     needs: [format, clippy, audit, deny, python-lint, python-tests]
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Publish to PyPI (maturin)
         uses: messense/maturin-action@v1
         env:
@@ -250,7 +242,7 @@ jobs:
         with:
           target: aarch64-unknown-linux-musl
           command: publish
-          args: --zig --compatibility musllinux_1_2 -i 3.12 --skip-existing
+          args: --zig --compatibility musllinux_1_2 -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
 
   publish-pypi-windows-x86_64:
     name: PyPI Windows x86_64
@@ -265,7 +257,7 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
           command: publish
-          args: --skip-existing
+          args: -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
 
   publish-pypi-windows-arm64:
     name: PyPI Windows aarch64
@@ -280,4 +272,4 @@ jobs:
         with:
           target: aarch64-pc-windows-msvc
           command: publish
-          args: --skip-existing
+          args: -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
