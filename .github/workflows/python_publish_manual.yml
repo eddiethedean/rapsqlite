@@ -41,7 +41,7 @@ jobs:
         with:
           target: aarch64-unknown-linux-gnu
           command: build
-          args: --release --no-sdist --zig -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
+          args: --release --zig -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
           manylinux: "2_28"
           container: off
       - name: Upload wheels to PyPI (manylinux aarch64)
@@ -61,7 +61,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-musl
           command: build
-          args: --release --no-sdist --zig --compatibility musllinux_1_2 -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
+          args: --release --zig --compatibility musllinux_1_2 -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
       - name: Upload wheels to PyPI (musllinux x86_64)
         uses: pypa/gh-action-pypi-publish@v1.10.0
         with:
@@ -79,7 +79,7 @@ jobs:
         with:
           target: aarch64-unknown-linux-musl
           command: build
-          args: --release --no-sdist --zig --compatibility musllinux_1_2 -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
+          args: --release --zig --compatibility musllinux_1_2 -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
       - name: Upload wheels to PyPI (musllinux aarch64)
         uses: pypa/gh-action-pypi-publish@v1.10.0
         with:
@@ -101,7 +101,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           command: build
-          args: --release --no-sdist -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
+          args: --release -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
       - name: Upload wheels to PyPI (macOS)
         uses: pypa/gh-action-pypi-publish@v1.10.0
         with:
