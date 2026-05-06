@@ -203,7 +203,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
           command: publish
-          args: --zig -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          args: -i 3.10 --skip-existing
           manylinux: "2_17"
           container: on
 
@@ -220,9 +220,9 @@ jobs:
         with:
           target: aarch64-unknown-linux-gnu
           command: publish
-          args: --zig -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          args: -i 3.10 --skip-existing
           manylinux: "2_28"
-          container: off
+          container: on
 
   publish-pypi-mac:
     name: PyPI macOS ${{ matrix.target }}
@@ -241,7 +241,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           command: publish
-          args: -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          args: -i 3.10 --skip-existing
 
   publish-pypi-musllinux-x86_64:
     name: PyPI musllinux x86_64
@@ -256,7 +256,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-musl
           command: publish
-          args: --zig --compatibility musllinux_1_2 -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          args: --compatibility musllinux_1_2 -i 3.10 --skip-existing
           container: on
 
   publish-pypi-musllinux-aarch64:
@@ -272,7 +272,7 @@ jobs:
         with:
           target: aarch64-unknown-linux-musl
           command: publish
-          args: --zig --compatibility musllinux_1_2 -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          args: --compatibility musllinux_1_2 -i 3.10 --skip-existing
 
   publish-pypi-windows-x86_64:
     name: PyPI Windows x86_64
@@ -287,7 +287,7 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
           command: publish
-          args: -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          args: -i 3.10 --skip-existing
 
   publish-pypi-windows-arm64:
     name: PyPI Windows aarch64
@@ -302,4 +302,4 @@ jobs:
         with:
           target: aarch64-pc-windows-msvc
           command: publish
-          args: -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          args: -i 3.10 --skip-existing

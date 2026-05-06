@@ -1,6 +1,7 @@
 """Tests for rapsqlite.dbapi (True Async DBAPI spec)."""
 
 import asyncio
+import os
 import time
 
 import pytest
@@ -283,8 +284,12 @@ async def test_cancellation_interrupts_and_connection_usable(unique_table_prefix
     # (in-memory DBs are per-connection).
     import tempfile
 
-    with tempfile.NamedTemporaryFile(suffix=".db") as f:
-        path = f.name
+    # NOTE: On Windows, NamedTemporaryFile keeps the file handle open, which prevents
+    # SQLite from opening/creating the database file (error code 14).
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "test.db")
+        # SQLx does not reliably create the file across platforms unless it exists.
+        open(path, "ab").close()
 
         conn1 = await dbapi.connect(path, timeout=5.0)
         conn2 = await dbapi.connect(path, timeout=5.0)

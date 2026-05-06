@@ -28,7 +28,10 @@ def _run_in_subprocess(code: str) -> subprocess.CompletedProcess[bytes]:
 
 def test_create_aggregate_subprocess_smoke():
     # If create_aggregate triggers a native crash, we want a non-zero return code.
-    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+    # On Windows, NamedTemporaryFile keeps the file handle open, which prevents SQLite
+    # from opening/creating the database file (error code 14).
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "test.db")
         code = f"""
 import asyncio
 from rapsqlite import connect
@@ -44,7 +47,8 @@ class SumAggregate:
         return self.total
 
 async def main():
-    async with connect({f.name!r}) as db:
+    open({path!r}, "ab").close()
+    async with connect({path!r}) as db:
         print("connected", file=sys.stderr, flush=True)
         await db.execute("CREATE TABLE t (x INT)")
         print("table", file=sys.stderr, flush=True)
@@ -66,7 +70,10 @@ asyncio.run(main())
 
 def test_create_collation_subprocess_smoke():
     # If create_collation triggers a native crash, we want a non-zero return code.
-    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+    # On Windows, NamedTemporaryFile keeps the file handle open, which prevents SQLite
+    # from opening/creating the database file (error code 14).
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "test.db")
         code = f"""
 import asyncio
 from rapsqlite import connect
@@ -78,7 +85,8 @@ def reverse_collation(s1: str, s2: str) -> int:
     return -1 if s1 > s2 else 1
 
 async def main():
-    async with connect({f.name!r}) as db:
+    open({path!r}, "ab").close()
+    async with connect({path!r}) as db:
         print("connected", file=sys.stderr, flush=True)
         await db.create_collation("reverse", reverse_collation)
         print("collation-set", file=sys.stderr, flush=True)
