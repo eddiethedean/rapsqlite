@@ -41,6 +41,7 @@ fn connect_options_for_path(path: &str) -> Result<SqliteConnectOptions, sqlx::Er
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(p);
 
     Ok(SqliteConnectOptions::new()
