@@ -302,6 +302,12 @@ impl Connection {
             }
         }
 
+        // Ensure busy_timeout is always set from the timeout parameter.
+        // This makes concurrent writers reliably wait rather than erroring with SQLITE_BUSY.
+        let timeout_ms = (timeout * 1000.0) as i64;
+        all_pragmas.retain(|(k, _)| k.to_lowercase() != "busy_timeout");
+        all_pragmas.push(("busy_timeout".to_string(), timeout_ms.to_string()));
+
         Ok(Connection {
             path: db_path,
             pool: Arc::new(Mutex::new(PoolSlot::default())),
@@ -698,6 +704,13 @@ impl Connection {
         }
         let mut guard = self.timeout.lock().unwrap();
         *guard = value;
+
+        // Keep per-connection PRAGMAs in sync so newly acquired pooled connections
+        // always have the correct busy_timeout.
+        let timeout_ms = (value * 1000.0) as i64;
+        let mut pragmas = self.pragmas.lock().unwrap();
+        pragmas.retain(|(k, _)| k.to_lowercase() != "busy_timeout");
+        pragmas.push(("busy_timeout".to_string(), timeout_ms.to_string()));
         Ok(())
     }
 
