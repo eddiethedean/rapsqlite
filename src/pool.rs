@@ -17,6 +17,20 @@ use tokio::sync::Mutex;
 use crate::types::{ProgressHandler, UserAggregates, UserCollations, UserFunctions};
 use crate::OperationalError;
 
+fn drop_on_background_tokio<T: Send + 'static>(value: T) {
+    // Best-effort: dropping sqlx pools/connections can require a Tokio runtime.
+    // If we get dropped outside of Tokio (e.g. Python GC at shutdown), spawn a
+    // short-lived runtime on a background thread to run the destructor.
+    std::thread::spawn(move || {
+        // If runtime creation fails, fall back to dropping anyway; this should be rare.
+        if let Ok(_rt) = tokio::runtime::Runtime::new() {
+            drop(value);
+        } else {
+            drop(value);
+        }
+    });
+}
+
 /// Wrapper around `Option<PoolConnection>` that, when dropped outside a Tokio context,
 /// forgets the connection instead of dropping it. This prevents sqlx's `PoolConnection::Drop`
 /// from running without a runtime (e.g. during Python GC/shutdown).
@@ -27,7 +41,9 @@ impl Drop for PoolConnectionSlot {
     fn drop(&mut self) {
         if let Some(pc) = self.0.take() {
             if tokio::runtime::Handle::try_current().is_err() {
-                std::mem::forget(pc);
+                drop_on_background_tokio(pc);
+            } else {
+                drop(pc);
             }
         }
     }
@@ -43,7 +59,9 @@ impl Drop for PoolSlot {
     fn drop(&mut self) {
         if let Some(p) = self.0.take() {
             if tokio::runtime::Handle::try_current().is_err() {
-                std::mem::forget(p);
+                drop_on_background_tokio(p);
+            } else {
+                drop(p);
             }
         }
     }
@@ -83,7 +101,11 @@ impl TakenConnectionGuard {
 impl Drop for TakenConnectionGuard {
     fn drop(&mut self) {
         if let Some((_, conn)) = self.0.take() {
-            std::mem::forget(conn);
+            if tokio::runtime::Handle::try_current().is_err() {
+                drop_on_background_tokio(conn);
+            } else {
+                drop(conn);
+            }
         }
     }
 }

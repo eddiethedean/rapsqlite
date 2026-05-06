@@ -31,7 +31,7 @@ def _ensure_extension_built() -> None:
         return
     try:
         subprocess.run(
-            [sys.executable, "-m", "maturin", "develop"],
+            [sys.executable, "-m", "maturin", "develop", "-i", sys.executable],
             cwd=repo_root,
             timeout=120,
             capture_output=True,

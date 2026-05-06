@@ -135,16 +135,14 @@ class AsyncCursor:
         """Run coro_factory() while holding connection op lock; raise ProgrammingError if busy."""
 
         async def _run() -> T:
-            try:
-                # Timeout of 1e-4s (100 microseconds) allows lock acquisition under normal
-                # conditions while still failing quickly if another operation is in progress.
-                # This is more robust than 1e-6 which could fail even for unlocked locks under load.
-                await asyncio.wait_for(self._conn._op_lock.acquire(), timeout=1e-4)
-            except asyncio.TimeoutError:
+            # Fail fast for true concurrent use, without using tiny timeouts that can
+            # spuriously trip under scheduler load.
+            if self._conn._op_lock.locked():
                 raise ProgrammingError(
                     "Concurrent operation on same connection not allowed; "
                     "one operation per connection at a time."
                 )
+            await self._conn._op_lock.acquire()
             try:
                 return await coro_factory()
             except asyncio.CancelledError:
@@ -189,24 +187,10 @@ class AsyncCursor:
             # in __aenter__; fetchall() later moves it to description, so read before fetchall
             # so 0-row SELECT has description for SQLAlchemy).
             self._cached_description = self._raw.description
-            # Buffer rows so fetchone()/fetchall() can be called later without
-            # touching the raw cursor (e.g. when SQLAlchemy adapter reads after execute).
-            self._result_buffer = await self._raw.fetchall()
-            # Fallback: raw cursor may set description lazily on first fetch; if still
-            # None but we have rows, build a minimal description so SQLAlchemy can build result.
-            if self._cached_description is None and self._result_buffer:
-                first = self._result_buffer[0]
-                n = len(first) if hasattr(first, "__len__") else 1
-                self._cached_description = tuple(
-                    (f"column_{i}", None, None, None, None, None, None)
-                    for i in range(n)
-                )
-            # Defensive: 0-row SELECT may expose description only after first read.
-            if self._cached_description is None and len(self._result_buffer) == 0:
-                self._cached_description = self._raw.description
-            # Fallback: if raw cursor still has no description for 0-row SELECT,
-            # parse column names from SQL so SQLAlchemy can build ORM keymap.
-            if self._cached_description is None and len(self._result_buffer) == 0:
+            # Do not eagerly buffer all rows here: callers may execute large SELECTs and
+            # expect fetch* to stream. We only ensure `description` is available for
+            # SQLAlchemy's 0-row SELECT metadata cases.
+            if self._cached_description is None:
                 names = _parse_select_column_names(sql)
                 if names:
                     self._cached_description = tuple(
@@ -223,17 +207,7 @@ class AsyncCursor:
             self._result_index = 0
             self._cached_description = None
             await self._raw.executemany(sql, seq_of_params)
-            # DML/DDL does not return rows; buffer so fetchall() can be called later.
-            self._result_buffer = await self._raw.fetchall()
             self._cached_description = self._raw.description
-            # Fallback when RETURNING is used with executemany (e.g. INSERTMANYVALUES).
-            if self._cached_description is None and self._result_buffer:
-                first = self._result_buffer[0]
-                n = len(first) if hasattr(first, "__len__") else 1
-                self._cached_description = tuple(
-                    (f"column_{i}", None, None, None, None, None, None)
-                    for i in range(n)
-                )
 
         await self._with_lock(_do)
 
@@ -310,16 +284,14 @@ class AsyncConnection:
         self, coro_factory: Callable[[], Coroutine[Any, Any, T]]
     ) -> T:
         """Run coro_factory() while holding op lock; raise ProgrammingError if busy."""
-        try:
-            # Timeout of 1e-4s (100 microseconds) allows lock acquisition under normal
-            # conditions while still failing quickly if another operation is in progress.
-            # This is more robust than 1e-6 which could fail even for unlocked locks under load.
-            await asyncio.wait_for(self._op_lock.acquire(), timeout=1e-4)
-        except asyncio.TimeoutError:
+        # Fail fast for true concurrent use, without using tiny timeouts that can
+        # spuriously trip under scheduler load.
+        if self._op_lock.locked():
             raise ProgrammingError(
                 "Concurrent operation on same connection not allowed; "
                 "one operation per connection at a time."
             )
+        await self._op_lock.acquire()
         try:
             return await coro_factory()
         except asyncio.CancelledError:

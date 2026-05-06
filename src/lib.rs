@@ -43,6 +43,12 @@ use row::RapRow;
 /// Python bindings for rapsqlite - True async SQLite.
 #[pymodule]
 fn _rapsqlite(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Callbacks/UDFs can be invoked by SQLite on threads which didn't originate in Python.
+    // Preparing the interpreter for multi-threaded access ensures PyO3 can safely acquire the GIL
+    // from those threads (e.g. in sqlite callback destructors).
+    #[allow(deprecated)]
+    pyo3::prepare_freethreaded_python();
+
     m.add_class::<Connection>()?;
     m.add_class::<Cursor>()?;
     m.add_class::<ExecuteContextManager>()?;

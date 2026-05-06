@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **v0.1.x**: Phase 1 — Core functionality (MVP and core features)
 - **v0.2.x**: Phase 2 — Feature-complete drop-in replacement
-- **v0.3.x**: Phase 3 — Advanced features & aiosqlite parity - **Current: v0.3.1**
+- **v0.3.x**: Phase 3 — Advanced features & aiosqlite parity - **Current: v0.3.2**
 - **v1.0.0**: Phase 4 — Production ready (stable API release)
 
 ## [1.0.0] - TBA (Phase 4: Production Ready)
@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Note: v1.0.0 release details will be added after Phase 4 completion._
 
-## [0.3.1] - Unreleased
+## [0.3.2] - Unreleased
 
 ### Changed - Structure and CI (2026-02-11)
 
