@@ -42,7 +42,6 @@ pub(crate) struct CallbackContext {
     pub trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub progress_handler: ProgressHandler,
-    pub trace_callback_ctx_ptr: Arc<StdMutex<usize>>,
     pub authorizer_callback_ctx_ptr: Arc<StdMutex<usize>>,
     pub progress_handler_ctx_ptr: Arc<StdMutex<usize>>,
 }
