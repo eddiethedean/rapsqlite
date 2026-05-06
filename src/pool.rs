@@ -7,15 +7,47 @@
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::into_future;
 use sqlx::pool::PoolConnection;
+use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::types::{ProgressHandler, UserAggregates, UserCollations, UserFunctions};
 use crate::OperationalError;
+
+fn connect_options_for_path(path: &str) -> Result<SqliteConnectOptions, sqlx::Error> {
+    if path == ":memory:" {
+        return SqliteConnectOptions::from_str("sqlite::memory:");
+    }
+
+    // Allow explicit URLs for advanced use (e.g. sqlite:file:... or sqlite://...).
+    // We intentionally do NOT treat `C:\...` as a URL.
+    if path.starts_with("sqlite:") || path.starts_with("file:") {
+        return SqliteConnectOptions::from_str(path);
+    }
+
+    // Best-effort pre-create the DB file for maximum cross-platform reliability.
+    // This avoids surprising SQLITE_CANTOPEN (code 14) errors from SQLite/SQLx
+    // in environments where create-if-missing behavior is inconsistent.
+    let p = Path::new(path);
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(p);
+
+    Ok(SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .read_only(false))
+}
 
 fn drop_on_background_tokio<T: Send + 'static>(value: T) {
     // Best-effort: dropping sqlx pools/connections can require a Tokio runtime.
@@ -245,7 +277,10 @@ pub(crate) async fn get_or_create_pool(
     if let Some(idle) = idle_secs {
         opts = opts.idle_timeout(Some(Duration::from_secs(idle)));
     }
-    let new_pool = opts.connect(&format!("sqlite:{path}")).await.map_err(|e| {
+    let conn_opts = connect_options_for_path(path).map_err(|e| {
+        OperationalError::new_err(format!("Failed to connect to database at {path}: {e}"))
+    })?;
+    let new_pool = opts.connect_with(conn_opts).await.map_err(|e| {
         OperationalError::new_err(format!("Failed to connect to database at {path}: {e}"))
     })?;
 

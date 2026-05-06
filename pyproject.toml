@@ -53,7 +53,7 @@ test = [
 
 [tool.maturin]
 module-name = "rapsqlite._rapsqlite"
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

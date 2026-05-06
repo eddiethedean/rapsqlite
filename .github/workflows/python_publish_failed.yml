@@ -21,9 +21,9 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
           command: publish
-          args: --zig -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          args: -i 3.10 --skip-existing
           manylinux: "2_17"
-          container: off
+          container: on
 
   pypi-manylinux-aarch64:
     name: PyPI manylinux (aarch64)
@@ -37,6 +37,6 @@ jobs:
         with:
           target: aarch64-unknown-linux-gnu
           command: publish
-          args: --zig -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          args: -i 3.10 --skip-existing
           manylinux: "2_28"
-          container: off
+          container: on
