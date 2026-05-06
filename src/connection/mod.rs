@@ -1014,6 +1014,17 @@ impl Connection {
                         let mut conn_guard = transaction_connection.lock().await;
                         if let Some(mut conn) = conn_guard.0.take() {
                             drop(trans_guard);
+                            #[allow(deprecated)]
+                            let trace_cb = Python::with_gil(|py| {
+                                let g = trace_callback.lock().unwrap();
+                                g.as_ref().map(|c| c.clone_ref(py))
+                            });
+                            if let Some(cb) = trace_cb {
+                                #[allow(deprecated)]
+                                Python::with_gil(|py| {
+                                    let _ = cb.bind(py).call1(("COMMIT",));
+                                });
+                            }
                             let _ = sqlx::query("COMMIT").execute(&mut *conn).await;
                             let timeout_ms = {
                                 let g = timeout.lock().unwrap();
@@ -1028,6 +1039,17 @@ impl Connection {
                                 .clone()
                                 .unwrap_or_else(|| "IMMEDIATE".to_string());
                             let begin_sql = format!("BEGIN {level}");
+                            #[allow(deprecated)]
+                            let trace_cb = Python::with_gil(|py| {
+                                let g = trace_callback.lock().unwrap();
+                                g.as_ref().map(|c| c.clone_ref(py))
+                            });
+                            if let Some(cb) = trace_cb {
+                                #[allow(deprecated)]
+                                Python::with_gil(|py| {
+                                    let _ = cb.bind(py).call1((begin_sql.as_str(),));
+                                });
+                            }
                             sqlx::query(&begin_sql)
                                 .execute(&mut *conn)
                                 .await
@@ -1144,6 +1166,17 @@ impl Connection {
                         .clone()
                         .unwrap_or_else(|| "IMMEDIATE".to_string());
                     let begin_sql = format!("BEGIN {level}");
+                    #[allow(deprecated)]
+                    let trace_cb = Python::with_gil(|py| {
+                        let g = trace_callback.lock().unwrap();
+                        g.as_ref().map(|c| c.clone_ref(py))
+                    });
+                    if let Some(cb) = trace_cb {
+                        #[allow(deprecated)]
+                        Python::with_gil(|py| {
+                            let _ = cb.bind(py).call1((begin_sql.as_str(),));
+                        });
+                    }
                     sqlx::query(&begin_sql)
                         .execute(&mut **conn)
                         .await
@@ -1247,6 +1280,17 @@ impl Connection {
                 };
 
                 // Execute COMMIT on the same connection that started the transaction
+                #[allow(deprecated)]
+                let trace_cb = Python::with_gil(|py| {
+                    let g = trace_callback.lock().unwrap();
+                    g.as_ref().map(|c| c.clone_ref(py))
+                });
+                if let Some(cb) = trace_cb {
+                    #[allow(deprecated)]
+                    Python::with_gil(|py| {
+                        let _ = cb.bind(py).call1(("COMMIT",));
+                    });
+                }
                 sqlx::query("COMMIT")
                     .execute(&mut *conn)
                     .await
@@ -1319,6 +1363,17 @@ impl Connection {
                 };
 
                 // Execute ROLLBACK on the same connection that started the transaction
+                #[allow(deprecated)]
+                let trace_cb = Python::with_gil(|py| {
+                    let g = trace_callback.lock().unwrap();
+                    g.as_ref().map(|c| c.clone_ref(py))
+                });
+                if let Some(cb) = trace_cb {
+                    #[allow(deprecated)]
+                    Python::with_gil(|py| {
+                        let _ = cb.bind(py).call1(("ROLLBACK",));
+                    });
+                }
                 sqlx::query("ROLLBACK")
                     .execute(&mut *conn)
                     .await
@@ -1858,6 +1913,19 @@ impl Connection {
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
+
+                // Python-level trace callback.
+                #[allow(deprecated)]
+                let trace_cb = Python::with_gil(|py| {
+                    let g = trace_callback.lock().unwrap();
+                    g.as_ref().map(|c| c.clone_ref(py))
+                });
+                if let Some(cb) = trace_cb {
+                    #[allow(deprecated)]
+                    Python::with_gil(|py| {
+                        let _ = cb.bind(py).call1((processed_query.as_str(),));
+                    });
+                }
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
@@ -2030,6 +2098,19 @@ impl Connection {
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
+
+                // Python-level trace callback.
+                #[allow(deprecated)]
+                let trace_cb = Python::with_gil(|py| {
+                    let g = trace_callback.lock().unwrap();
+                    g.as_ref().map(|c| c.clone_ref(py))
+                });
+                if let Some(cb) = trace_cb {
+                    #[allow(deprecated)]
+                    Python::with_gil(|py| {
+                        let _ = cb.bind(py).call1((processed_query.as_str(),));
+                    });
+                }
                 // Priority: transaction > callbacks > pool
                 let in_transaction = {
                     let g = transaction_state.lock().await;
@@ -2640,6 +2721,7 @@ impl Connection {
         let timeout = Arc::clone(&slf.timeout);
         let isolation_level = Arc::clone(&slf.isolation_level);
         let explicit_transaction = Arc::clone(&slf.explicit_transaction);
+        let trace_callback = Arc::clone(&slf.trace_callback);
         let connection: Py<Connection> = slf.into();
         Ok(TransactionContextManager {
             path,
@@ -2657,6 +2739,7 @@ impl Connection {
             timeout,
             isolation_level,
             explicit_transaction,
+            trace_callback,
         })
     }
 

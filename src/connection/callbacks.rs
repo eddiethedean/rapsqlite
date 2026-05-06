@@ -8,8 +8,8 @@ use tokio::sync::Mutex;
 use libsqlite3_sys::{
     sqlite3_aggregate_context, sqlite3_context, sqlite3_create_collation_v2,
     sqlite3_create_function_v2, sqlite3_progress_handler, sqlite3_result_error,
-    sqlite3_result_null, sqlite3_set_authorizer, sqlite3_trace_v2, sqlite3_user_data,
-    sqlite3_value, SQLITE_DENY, SQLITE_DETERMINISTIC, SQLITE_OK, SQLITE_TRACE_STMT, SQLITE_UTF8,
+    sqlite3_result_null, sqlite3_set_authorizer, sqlite3_user_data, sqlite3_value, SQLITE_DENY,
+    SQLITE_DETERMINISTIC, SQLITE_OK, SQLITE_UTF8,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyString, PyTuple};
@@ -52,9 +52,14 @@ fn drop_py_callback_ptr(ptr_usize: usize) {
     if ptr_usize == 0 {
         return;
     }
-    unsafe {
-        let _ = Box::from_raw(ptr_usize as *mut Py<PyAny>);
-    }
+    // Context pointers are Arc<Py<PyAny>> stored as raw pointers so they can be
+    // safely replaced/cleared without UAF if SQLite invokes callbacks concurrently.
+    //
+    // Dropping Py-owned values must happen with the GIL held.
+    #[allow(deprecated)]
+    Python::with_gil(|_py| unsafe {
+        drop(Arc::from_raw(ptr_usize as *const Py<PyAny>));
+    });
 }
 
 /// Set or clear the progress handler. Runs on the callback connection.
@@ -111,10 +116,13 @@ pub(crate) async fn set_progress_handler_impl(
             if progress_ctx.is_null() {
                 return 0;
             }
-            let callback_ptr = progress_ctx as *mut Py<PyAny>;
+            let callback_ptr = progress_ctx as *const Py<PyAny>;
             #[allow(deprecated)]
             Python::with_gil(|py| {
-                let callback = (*callback_ptr).clone_ref(py);
+                let arc = Arc::from_raw(callback_ptr);
+                let callback = arc.clone();
+                std::mem::forget(arc);
+                let callback = callback.clone_ref(py);
                 match callback.bind(py).call0() {
                     Ok(result) => {
                         if let Ok(should_continue) = result.extract::<bool>() {
@@ -142,8 +150,8 @@ pub(crate) async fn set_progress_handler_impl(
     };
 
     let new_ptr_usize: usize = if let Some(cb) = callback_for_progress {
-        let callback_box: Box<Py<PyAny>> = Box::new(cb);
-        Box::into_raw(callback_box) as usize
+        let arc: Arc<Py<PyAny>> = Arc::new(cb);
+        Arc::into_raw(arc) as usize
     } else {
         0
     };
@@ -196,137 +204,9 @@ pub(crate) async fn set_progress_handler_impl(
 /// Set or clear the trace callback. Runs on the callback connection.
 pub(crate) async fn set_trace_callback_impl(
     ctx: CallbackContext,
-    callback: Option<Py<PyAny>>,
+    _callback: Option<Py<PyAny>>,
 ) -> Result<(), PyErr> {
     ensure_not_closed(&ctx.closed)?;
-
-    // Ensure callback connection exists (needed to clear callbacks on SQLite)
-    ensure_callback_connection(
-        &ctx.path,
-        &ctx.pool,
-        &ctx.callback_connection,
-        &ctx.pragmas,
-        &ctx.pool_size,
-        &ctx.connection_timeout_secs,
-        &ctx.idle_timeout_secs,
-    )
-    .await?;
-
-    // Get the callback connection and access raw handle
-    let mut conn_guard = ctx.callback_connection.lock().await;
-    let conn = conn_guard
-        .0
-        .as_mut()
-        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-
-    let sqlite_conn: &mut SqliteConnection = conn;
-    let mut handle = sqlite_conn
-        .lock_handle()
-        .await
-        .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
-    let raw_db = handle.as_raw_handle().as_ptr();
-
-    // Trace callback trampoline
-    extern "C" fn trace_trampoline(
-        _trace_type: std::ffi::c_uint,
-        ctx: *mut std::ffi::c_void,
-        _p: *mut std::ffi::c_void,
-        x: *mut std::ffi::c_void,
-    ) -> std::ffi::c_int {
-        unsafe {
-            if x.is_null() || ctx.is_null() {
-                return 0;
-            }
-
-            let sql_ptr = x as *const std::ffi::c_char;
-            let sql_str: String = cstr_from_c_char_ptr(sql_ptr).to_string_lossy().into_owned();
-
-            let callback_ptr = ctx as *mut Py<PyAny>;
-
-            #[allow(deprecated)]
-            Python::with_gil(|py| {
-                let callback = (*callback_ptr).clone_ref(py);
-                if let Err(e) = callback.bind(py).call1((sql_str,)) {
-                    let _ = e;
-                }
-            });
-        }
-        0
-    }
-
-    // Set up the callback pointer for the trampoline
-    let callback_for_trace = {
-        let trace_guard = ctx.trace_callback.lock().unwrap();
-        trace_guard.as_ref().map(|c| {
-            #[allow(deprecated)]
-            Python::with_gil(|py| c.clone_ref(py))
-        })
-    };
-
-    let new_ptr_usize: usize = if let Some(cb) = callback_for_trace {
-        let callback_box: Box<Py<PyAny>> = Box::new(cb);
-        Box::into_raw(callback_box) as usize
-    } else {
-        0
-    };
-    let callback_ptr = new_ptr_usize as *mut std::ffi::c_void;
-
-    let result = unsafe {
-        sqlite3_trace_v2(
-            raw_db,
-            if callback_ptr.is_null() {
-                0
-            } else {
-                SQLITE_TRACE_STMT as u32
-            },
-            if callback_ptr.is_null() {
-                None
-            } else {
-                Some(trace_trampoline)
-            },
-            callback_ptr,
-        )
-    };
-
-    if result != SQLITE_OK {
-        // sqlite3_trace_v2 failed; free newly allocated callback (if any).
-        drop_py_callback_ptr(new_ptr_usize);
-        {
-            let mut trace_guard = ctx.trace_callback.lock().unwrap();
-            *trace_guard = None;
-        }
-        return Err(OperationalError::new_err(format!(
-            "Failed to set trace callback: SQLite error code {result}"
-        )));
-    }
-
-    // Swap pointer after success, free previous allocation if replaced/cleared.
-    let old_ptr = {
-        let mut g = ctx.trace_callback_ctx_ptr.lock().unwrap();
-        std::mem::replace(&mut *g, new_ptr_usize)
-    };
-    if old_ptr != new_ptr_usize {
-        drop_py_callback_ptr(old_ptr);
-    }
-
-    if callback.is_none() {
-        let all_cleared = !has_callbacks(
-            &ctx.load_extension_enabled,
-            &ctx.user_functions,
-            &ctx.user_aggregates,
-            &ctx.user_collations,
-            &ctx.trace_callback,
-            &ctx.authorizer_callback,
-            &ctx.progress_handler,
-        );
-        if all_cleared {
-            drop(handle);
-            drop(conn_guard);
-            let mut callback_guard = ctx.callback_connection.lock().await;
-            callback_guard.0.take();
-            return Ok(());
-        }
-    }
 
     Ok(())
 }
@@ -594,10 +474,13 @@ pub(crate) async fn set_authorizer_impl(
             } else {
                 Some(cstr_from_c_char_ptr(arg4).to_string_lossy().into_owned())
             };
-            let callback_ptr = authorizer_ctx as *mut Py<PyAny>;
+            let callback_ptr = authorizer_ctx as *const Py<PyAny>;
             #[allow(deprecated)]
             Python::with_gil(|py| {
-                let callback = (*callback_ptr).clone_ref(py);
+                let arc = Arc::from_raw(callback_ptr);
+                let callback = arc.clone();
+                std::mem::forget(arc);
+                let callback = callback.clone_ref(py);
                 let py_arg1: Py<PyAny> = match arg1_str {
                     Some(ref s) => PyString::new(py, s).into_any().unbind(),
                     None => py.None(),
@@ -634,8 +517,8 @@ pub(crate) async fn set_authorizer_impl(
     };
 
     let new_ptr_usize: usize = if let Some(cb) = callback_for_auth {
-        let callback_box: Box<Py<PyAny>> = Box::new(cb);
-        Box::into_raw(callback_box) as usize
+        let arc: Arc<Py<PyAny>> = Arc::new(cb);
+        Arc::into_raw(arc) as usize
     } else {
         0
     };

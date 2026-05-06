@@ -187,10 +187,25 @@ class AsyncCursor:
             # in __aenter__; fetchall() later moves it to description, so read before fetchall
             # so 0-row SELECT has description for SQLAlchemy).
             self._cached_description = self._raw.description
-            # Do not eagerly buffer all rows here: callers may execute large SELECTs and
-            # expect fetch* to stream. We only ensure `description` is available for
-            # SQLAlchemy's 0-row SELECT metadata cases.
-            if self._cached_description is None:
+            # Buffer rows so SQLAlchemy can consume results even if it closes the cursor
+            # before reading all rows (driver-adapter behavior).
+            self._result_buffer = await self._raw.fetchall()
+
+            # Fallback: raw cursor may set description lazily on first fetch; if still
+            # None but we have rows, build a minimal description so SQLAlchemy can build result.
+            if self._cached_description is None and self._result_buffer:
+                first = self._result_buffer[0]
+                n = len(first) if hasattr(first, "__len__") else 1
+                self._cached_description = tuple(
+                    (f"column_{i}", None, None, None, None, None, None)
+                    for i in range(n)
+                )
+            # Defensive: 0-row SELECT may expose description only after first read.
+            if self._cached_description is None and len(self._result_buffer) == 0:
+                self._cached_description = self._raw.description
+            # Fallback: if raw cursor still has no description for 0-row SELECT,
+            # parse column names from SQL so SQLAlchemy can build ORM keymap.
+            if self._cached_description is None and len(self._result_buffer) == 0:
                 names = _parse_select_column_names(sql)
                 if names:
                     self._cached_description = tuple(
@@ -208,6 +223,16 @@ class AsyncCursor:
             self._cached_description = None
             await self._raw.executemany(sql, seq_of_params)
             self._cached_description = self._raw.description
+            # DML/DDL does not return rows; buffer so fetchall() can be called later.
+            self._result_buffer = await self._raw.fetchall()
+            # Fallback when RETURNING is used with executemany (e.g. INSERTMANYVALUES).
+            if self._cached_description is None and self._result_buffer:
+                first = self._result_buffer[0]
+                n = len(first) if hasattr(first, "__len__") else 1
+                self._cached_description = tuple(
+                    (f"column_{i}", None, None, None, None, None, None)
+                    for i in range(n)
+                )
 
         await self._with_lock(_do)
 

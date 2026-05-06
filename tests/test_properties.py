@@ -173,6 +173,7 @@ async def test_transaction_atomicity(test_db, table_name, count):
         "set",
         "add",
         "asc",
+        "null",
     }
     assume(" " not in table_name)  # Avoid spaces in table names
     assume(table_name.isalnum())  # Only alphanumeric
