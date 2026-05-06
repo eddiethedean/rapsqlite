@@ -169,7 +169,7 @@ def _connection_execute_iter(
 
 Connection.execute_iter = _connection_execute_iter
 
-__version__: str = "0.3.2"
+__version__: str = "0.3.3"
 __all__: list[str] = [
     "Connection",
     "ConnectionT",

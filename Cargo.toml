@@ -1,6 +1,6 @@
 [package]
 name = "rapsqlite"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = ["RAP Project"]
 description = "True async SQLite — no fake async, no GIL stalls."
@@ -22,5 +22,6 @@ libsqlite3-sys = "0.30"
 [features]
 extension-module = ["pyo3/extension-module"]
 abi3-py310 = ["pyo3/abi3-py310"]
-default = ["extension-module", "abi3-py310"]
+generate-import-lib = ["pyo3/generate-import-lib"]
+default = ["extension-module", "abi3-py310", "generate-import-lib"]
 
