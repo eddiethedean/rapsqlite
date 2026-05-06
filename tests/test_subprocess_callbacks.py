@@ -12,7 +12,9 @@ pytestmark = [pytest.mark.unit]
 def _run_in_subprocess(code: str) -> subprocess.CompletedProcess[bytes]:
     env = os.environ.copy()
     # Ensure repo root is importable for the child process (tests run from repo root).
-    env["PYTHONPATH"] = os.getcwd() + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["PYTHONPATH"] = os.getcwd() + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
     env.setdefault("PYTHONFAULTHANDLER", "1")
     env.setdefault("RUST_BACKTRACE", "1")
     return subprocess.run(
@@ -94,4 +96,3 @@ asyncio.run(main())
 """
         p = _run_in_subprocess(code)
         assert p.returncode == 0, p.stderr.decode("utf-8", "replace")
-

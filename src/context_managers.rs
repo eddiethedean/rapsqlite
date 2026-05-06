@@ -30,6 +30,22 @@ use crate::types::{SqliteParam, TransactionState};
 use crate::utils::{is_begin_query, is_commit_or_rollback_query, is_dml_query};
 use crate::{map_sqlx_error, Connection, Cursor, OperationalError};
 
+fn maybe_trace_sql(trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>, sql: &str) {
+    let cb = {
+        let g = trace_callback.lock().unwrap();
+        g.as_ref().map(|c| {
+            #[allow(deprecated)]
+            Python::with_gil(|py| c.clone_ref(py))
+        })
+    };
+    if let Some(cb) = cb {
+        #[allow(deprecated)]
+        Python::with_gil(|py| {
+            let _ = cb.bind(py).call1((sql,));
+        });
+    }
+}
+
 /// Execute context manager returned by `Connection::execute()`.
 /// Allows `async with db.execute(...)` pattern by being both awaitable and an async context manager.
 #[pyclass]
@@ -142,6 +158,10 @@ impl ExecuteContextManager {
                         *g == TransactionState::Active
                     };
 
+                    // Python-level trace callback (avoid sqlite3_trace_v2, which can invoke
+                    // callbacks on non-Python threads).
+                    maybe_trace_sql(&trace_callback, &query);
+
                     let has_callbacks_flag = has_callbacks(
                         &load_extension_enabled,
                         &user_functions,
@@ -238,6 +258,7 @@ impl ExecuteContextManager {
                         let mut conn = conn_guard.0.take().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
+                        maybe_trace_sql(&trace_callback, "BEGIN");
                         sqlx::query("BEGIN")
                             .execute(&mut *conn)
                             .await
@@ -680,6 +701,7 @@ pub(crate) struct TransactionContextManager {
     pub(crate) timeout: Arc<StdMutex<f64>>,                 // SQLite busy_timeout in seconds
     pub(crate) isolation_level: Arc<StdMutex<Option<String>>>, // Phase 3.9: None | DEFERRED | IMMEDIATE | EXCLUSIVE
     pub(crate) explicit_transaction: Arc<Mutex<bool>>, // in_transaction() true only when explicit
+    pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
 }
 
 #[pymethods]
@@ -702,6 +724,7 @@ impl TransactionContextManager {
             let timeout = Arc::clone(&slf.borrow(py).timeout);
             let isolation_level = Arc::clone(&slf.borrow(py).isolation_level);
             let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
+            let trace_callback = Arc::clone(&slf.borrow(py).trace_callback);
             let future = async move {
                 // Implicit → explicit: if we have implicit transaction only, commit it and reuse conn for explicit.
                 {
@@ -713,6 +736,7 @@ impl TransactionContextManager {
                         let mut conn_guard = transaction_connection.lock().await;
                         if let Some(mut conn) = conn_guard.0.take() {
                             drop(trans_guard);
+                            maybe_trace_sql(&trace_callback, "COMMIT");
                             let _ = sqlx::query("COMMIT").execute(&mut *conn).await;
                             let timeout_ms = {
                                 let g = timeout.lock().unwrap();
@@ -727,6 +751,7 @@ impl TransactionContextManager {
                                 .clone()
                                 .unwrap_or_else(|| "IMMEDIATE".to_string());
                             let begin_sql = format!("BEGIN {level}");
+                            maybe_trace_sql(&trace_callback, &begin_sql);
                             sqlx::query(&begin_sql)
                                 .execute(&mut *conn)
                                 .await
@@ -803,6 +828,7 @@ impl TransactionContextManager {
                         .clone()
                         .unwrap_or_else(|| "IMMEDIATE".to_string());
                     let begin_sql = format!("BEGIN {level}");
+                    maybe_trace_sql(&trace_callback, &begin_sql);
                     sqlx::query(&begin_sql)
                         .execute(&mut *conn)
                         .await
@@ -858,6 +884,7 @@ impl TransactionContextManager {
             let transaction_state = Arc::clone(&slf.borrow(py).transaction_state);
             let transaction_connection = Arc::clone(&slf.borrow(py).transaction_connection);
             let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
+            let trace_callback = Arc::clone(&slf.borrow(py).trace_callback);
             let future = async move {
                 let mut trans_guard = transaction_state.lock().await;
                 if *trans_guard != TransactionState::Active {
@@ -869,6 +896,7 @@ impl TransactionContextManager {
                     OperationalError::new_err("Transaction connection not available")
                 })?;
                 let query = if rollback { "ROLLBACK" } else { "COMMIT" };
+                maybe_trace_sql(&trace_callback, query);
                 sqlx::query(query)
                     .execute(&mut *conn)
                     .await

@@ -23,7 +23,8 @@ fn drop_on_background_tokio<T: Send + 'static>(value: T) {
     // short-lived runtime on a background thread to run the destructor.
     std::thread::spawn(move || {
         // If runtime creation fails, fall back to dropping anyway; this should be rare.
-        if let Ok(_rt) = tokio::runtime::Runtime::new() {
+        if let Ok(rt) = tokio::runtime::Runtime::new() {
+            let _guard = rt.enter();
             drop(value);
         } else {
             drop(value);
@@ -436,7 +437,7 @@ pub(crate) fn has_callbacks(
     user_functions: &UserFunctions,
     user_aggregates: &UserAggregates,
     user_collations: &UserCollations,
-    trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
+    _trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
     authorizer_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
     progress_handler: &ProgressHandler,
 ) -> bool {
@@ -447,7 +448,6 @@ pub(crate) fn has_callbacks(
     let has_functions = !user_functions.lock().unwrap().is_empty();
     let has_aggregates = !user_aggregates.lock().unwrap().is_empty();
     let has_collations = !user_collations.lock().unwrap().is_empty();
-    let has_trace = trace_callback.lock().unwrap().is_some();
     let has_authorizer = authorizer_callback.lock().unwrap().is_some();
     let has_progress = progress_handler.lock().unwrap().is_some();
 
@@ -455,7 +455,6 @@ pub(crate) fn has_callbacks(
         || has_functions
         || has_aggregates
         || has_collations
-        || has_trace
         || has_authorizer
         || has_progress
 }
