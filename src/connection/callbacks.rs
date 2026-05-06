@@ -42,6 +42,19 @@ pub(crate) struct CallbackContext {
     pub trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub progress_handler: ProgressHandler,
+    pub trace_callback_ctx_ptr: Arc<StdMutex<usize>>,
+    pub authorizer_callback_ctx_ptr: Arc<StdMutex<usize>>,
+    pub progress_handler_ctx_ptr: Arc<StdMutex<usize>>,
+}
+
+#[inline]
+fn drop_py_callback_ptr(ptr_usize: usize) {
+    if ptr_usize == 0 {
+        return;
+    }
+    unsafe {
+        let _ = Box::from_raw(ptr_usize as *mut Py<PyAny>);
+    }
 }
 
 /// Set or clear the progress handler. Runs on the callback connection.
@@ -128,12 +141,13 @@ pub(crate) async fn set_progress_handler_impl(
         })
     };
 
-    let callback_ptr = if let Some(cb) = callback_for_progress {
+    let new_ptr_usize: usize = if let Some(cb) = callback_for_progress {
         let callback_box: Box<Py<PyAny>> = Box::new(cb);
-        Box::into_raw(callback_box) as *mut std::ffi::c_void
+        Box::into_raw(callback_box) as usize
     } else {
-        std::ptr::null_mut()
+        0
     };
+    let callback_ptr = new_ptr_usize as *mut std::ffi::c_void;
 
     unsafe {
         sqlite3_progress_handler(
@@ -146,6 +160,15 @@ pub(crate) async fn set_progress_handler_impl(
             },
             callback_ptr,
         );
+    }
+
+    // Swap pointer after SQLite install, free previous allocation if replaced/cleared.
+    let old_ptr = {
+        let mut g = ctx.progress_handler_ctx_ptr.lock().unwrap();
+        std::mem::replace(&mut *g, new_ptr_usize)
+    };
+    if old_ptr != new_ptr_usize {
+        drop_py_callback_ptr(old_ptr);
     }
 
     if callback.is_none() {
@@ -240,12 +263,13 @@ pub(crate) async fn set_trace_callback_impl(
         })
     };
 
-    let callback_ptr = if let Some(cb) = callback_for_trace {
+    let new_ptr_usize: usize = if let Some(cb) = callback_for_trace {
         let callback_box: Box<Py<PyAny>> = Box::new(cb);
-        Box::into_raw(callback_box) as *mut std::ffi::c_void
+        Box::into_raw(callback_box) as usize
     } else {
-        std::ptr::null_mut()
+        0
     };
+    let callback_ptr = new_ptr_usize as *mut std::ffi::c_void;
 
     let result = unsafe {
         sqlite3_trace_v2(
@@ -265,11 +289,8 @@ pub(crate) async fn set_trace_callback_impl(
     };
 
     if result != SQLITE_OK {
-        if !callback_ptr.is_null() {
-            unsafe {
-                let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
-            }
-        }
+        // sqlite3_trace_v2 failed; free newly allocated callback (if any).
+        drop_py_callback_ptr(new_ptr_usize);
         {
             let mut trace_guard = ctx.trace_callback.lock().unwrap();
             *trace_guard = None;
@@ -277,6 +298,15 @@ pub(crate) async fn set_trace_callback_impl(
         return Err(OperationalError::new_err(format!(
             "Failed to set trace callback: SQLite error code {result}"
         )));
+    }
+
+    // Swap pointer after success, free previous allocation if replaced/cleared.
+    let old_ptr = {
+        let mut g = ctx.trace_callback_ctx_ptr.lock().unwrap();
+        std::mem::replace(&mut *g, new_ptr_usize)
+    };
+    if old_ptr != new_ptr_usize {
+        drop_py_callback_ptr(old_ptr);
     }
 
     if callback.is_none() {
@@ -338,13 +368,6 @@ pub(crate) async fn create_collation_impl(
             let mut guard = ctx.user_collations.lock().unwrap();
             guard.remove(&name)
         };
-        if let Some(ptr) = old_ptr {
-            if ptr != 0 {
-                unsafe {
-                    let _ = Box::from_raw(ptr as *mut Py<PyAny>);
-                }
-            }
-        }
 
         let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
             OperationalError::new_err(format!("Collation name contains null byte: {e}"))
@@ -360,9 +383,22 @@ pub(crate) async fn create_collation_impl(
             )
         };
         if result != SQLITE_OK {
+            // Restore map entry on error.
+            if let Some(old_ptr) = old_ptr {
+                ctx.user_collations
+                    .lock()
+                    .unwrap()
+                    .insert(name.clone(), old_ptr);
+            }
             return Err(OperationalError::new_err(format!(
                 "Failed to remove collation '{name}': SQLite error code {result}"
             )));
+        }
+        if let Some(old_ptr) = old_ptr {
+            #[allow(deprecated)]
+            Python::with_gil(|_py| unsafe {
+                let _ = Box::from_raw(old_ptr as *mut Py<PyAny>);
+            });
         }
 
         let all_cleared = !has_callbacks(
@@ -388,11 +424,6 @@ pub(crate) async fn create_collation_impl(
     let callback_box: Box<Py<PyAny>> = Box::new(callback_for_storage);
     let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
     let callback_ptr_usize = callback_ptr as usize;
-
-    {
-        let mut guard = ctx.user_collations.lock().unwrap();
-        guard.insert(name.clone(), callback_ptr_usize);
-    }
 
     extern "C" fn collation_trampoline(
         p_arg: *mut std::ffi::c_void,
@@ -444,14 +475,6 @@ pub(crate) async fn create_collation_impl(
         }
     }
 
-    extern "C" fn collation_destructor(p_arg: *mut std::ffi::c_void) {
-        unsafe {
-            if !p_arg.is_null() {
-                let _ = Box::from_raw(p_arg as *mut Py<PyAny>);
-            }
-        }
-    }
-
     let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
         OperationalError::new_err(format!("Collation name contains null byte: {e}"))
     })?;
@@ -463,7 +486,7 @@ pub(crate) async fn create_collation_impl(
             SQLITE_UTF8,
             callback_ptr,
             Some(collation_trampoline),
-            Some(collation_destructor),
+            None,
         )
     };
 
@@ -471,13 +494,21 @@ pub(crate) async fn create_collation_impl(
         unsafe {
             let _ = Box::from_raw(callback_ptr as *mut Py<PyAny>);
         }
-        {
-            let mut guard = ctx.user_collations.lock().unwrap();
-            guard.remove(&name);
-        }
         return Err(OperationalError::new_err(format!(
             "Failed to create collation '{name}': SQLite error code {result}"
         )));
+    }
+
+    // SQLite accepted the collation; take ownership of the pointer for explicit cleanup.
+    let old_ptr = {
+        let mut guard = ctx.user_collations.lock().unwrap();
+        guard.insert(name.clone(), callback_ptr_usize)
+    };
+    if let Some(old_ptr) = old_ptr {
+        #[allow(deprecated)]
+        Python::with_gil(|_py| unsafe {
+            let _ = Box::from_raw(old_ptr as *mut Py<PyAny>);
+        });
     }
 
     Ok(())
@@ -602,12 +633,13 @@ pub(crate) async fn set_authorizer_impl(
         })
     };
 
-    let callback_ptr = if let Some(cb) = callback_for_auth {
+    let new_ptr_usize: usize = if let Some(cb) = callback_for_auth {
         let callback_box: Box<Py<PyAny>> = Box::new(cb);
-        Box::into_raw(callback_box) as *mut std::ffi::c_void
+        Box::into_raw(callback_box) as usize
     } else {
-        std::ptr::null_mut()
+        0
     };
+    let callback_ptr = new_ptr_usize as *mut std::ffi::c_void;
 
     unsafe {
         sqlite3_set_authorizer(
@@ -619,6 +651,15 @@ pub(crate) async fn set_authorizer_impl(
             },
             callback_ptr,
         );
+    }
+
+    // Swap pointer after SQLite install, free previous allocation if replaced/cleared.
+    let old_ptr = {
+        let mut g = ctx.authorizer_callback_ctx_ptr.lock().unwrap();
+        std::mem::replace(&mut *g, new_ptr_usize)
+    };
+    if old_ptr != new_ptr_usize {
+        drop_py_callback_ptr(old_ptr);
     }
 
     if callback.is_none() {
@@ -766,11 +807,13 @@ pub(crate) async fn create_function_impl(
         }
     }
     extern "C" fn udf_destructor(user_data: *mut std::ffi::c_void) {
-        unsafe {
-            if !user_data.is_null() {
-                let _ = Box::from_raw(user_data as *mut Py<PyAny>);
-            }
+        if user_data.is_null() {
+            return;
         }
+        #[allow(deprecated)]
+        Python::with_gil(|_py| unsafe {
+            let _ = Box::from_raw(user_data as *mut Py<PyAny>);
+        });
     }
 
     let trans_has_conn = {
@@ -1027,17 +1070,11 @@ pub(crate) async fn create_aggregate_impl(
     let raw_db = handle.as_raw_handle().as_ptr();
 
     if aggregate_class.is_none() {
-        let old_ptr = {
+        let old = {
             let mut guard = ctx.user_aggregates.lock().unwrap();
-            guard.remove(&name).map(|(_, ptr)| ptr)
+            guard.remove(&name)
         };
-        if let Some(ptr) = old_ptr {
-            if ptr != 0 {
-                unsafe {
-                    let _ = Box::from_raw(ptr as *mut Py<PyAny>);
-                }
-            }
-        }
+        let old_ptr = old.map(|(_, ptr)| ptr).unwrap_or(0);
 
         let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
             OperationalError::new_err(format!("Aggregate name contains null byte: {e}"))
@@ -1056,9 +1093,21 @@ pub(crate) async fn create_aggregate_impl(
             )
         };
         if result != SQLITE_OK {
+            if let Some((old_n, old_ptr_usize)) = old {
+                ctx.user_aggregates
+                    .lock()
+                    .unwrap()
+                    .insert(name.clone(), (old_n, old_ptr_usize));
+            }
             return Err(OperationalError::new_err(format!(
                 "Failed to remove aggregate '{name}': SQLite error code {result}"
             )));
+        }
+        if old_ptr != 0 {
+            #[allow(deprecated)]
+            Python::with_gil(|_py| unsafe {
+                let _ = Box::from_raw(old_ptr as *mut Py<PyAny>);
+            });
         }
 
         let all_cleared = !has_callbacks(
@@ -1085,12 +1134,13 @@ pub(crate) async fn create_aggregate_impl(
     let class_ptr = Box::into_raw(class_box) as *mut std::ffi::c_void;
     let class_ptr_usize = class_ptr as usize;
 
-    {
-        let mut guard = ctx.user_aggregates.lock().unwrap();
-        guard.insert(name.clone(), (num_params, class_ptr_usize));
+    #[repr(C)]
+    struct AggState {
+        magic: u64,
+        instance_ptr: *mut Py<PyAny>,
     }
-
-    const AGG_CTX_SIZE: i32 = 16;
+    const AGG_MAGIC: u64 = 0x_72_61_70_73_71_6C_78_01; // "rapsqlx" + version byte
+    const AGG_CTX_SIZE: i32 = std::mem::size_of::<AggState>() as i32;
 
     extern "C" fn aggregate_step(
         agg_ctx: *mut sqlite3_context,
@@ -1108,12 +1158,15 @@ pub(crate) async fn create_aggregate_impl(
             if ctx_buf.is_null() {
                 return;
             }
-            let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
-            let mut instance_ptr: *mut Py<PyAny> = std::ptr::read_unaligned(instance_ptr_ptr);
+            let state = &mut *(ctx_buf as *mut AggState);
+            if state.magic != AGG_MAGIC {
+                state.magic = AGG_MAGIC;
+                state.instance_ptr = std::ptr::null_mut();
+            }
 
             #[allow(deprecated)]
             Python::with_gil(|py| {
-                if instance_ptr.is_null() {
+                if state.instance_ptr.is_null() {
                     let class = (*class_ptr).clone_ref(py);
                     let instance = match class.call0(py) {
                         Ok(inst) => inst,
@@ -1128,11 +1181,10 @@ pub(crate) async fn create_aggregate_impl(
                         }
                     };
                     let instance_box: Box<Py<PyAny>> = Box::new(instance);
-                    instance_ptr = Box::into_raw(instance_box);
-                    std::ptr::write_unaligned(instance_ptr_ptr, instance_ptr);
+                    state.instance_ptr = Box::into_raw(instance_box);
                 }
 
-                let instance = (*instance_ptr).clone_ref(py);
+                let instance = (*state.instance_ptr).clone_ref(py);
                 let mut py_args: Vec<Py<PyAny>> = Vec::new();
                 for i in 0..argc {
                     let value_ptr = *argv.add(i as usize);
@@ -1221,17 +1273,16 @@ pub(crate) async fn create_aggregate_impl(
                 sqlite3_result_null(agg_ctx);
                 return;
             }
-            let instance_ptr_ptr = ctx_buf as *mut *mut Py<PyAny>;
-            let instance_ptr: *mut Py<PyAny> = std::ptr::read_unaligned(instance_ptr_ptr);
-            if instance_ptr.is_null() {
+            let state = &mut *(ctx_buf as *mut AggState);
+            if state.magic != AGG_MAGIC || state.instance_ptr.is_null() {
                 sqlite3_result_null(agg_ctx);
                 return;
             }
 
             #[allow(deprecated)]
             Python::with_gil(|py| {
-                let instance = Box::from_raw(instance_ptr);
-                std::ptr::write_unaligned(instance_ptr_ptr, std::ptr::null_mut::<Py<PyAny>>());
+                let instance = Box::from_raw(state.instance_ptr);
+                state.instance_ptr = std::ptr::null_mut();
 
                 let result = instance.bind(py).call_method0("finalize");
                 match result {
@@ -1251,14 +1302,6 @@ pub(crate) async fn create_aggregate_impl(
         }
     }
 
-    extern "C" fn aggregate_destructor(user_data: *mut std::ffi::c_void) {
-        unsafe {
-            if !user_data.is_null() {
-                let _ = Box::from_raw(user_data as *mut Py<PyAny>);
-            }
-        }
-    }
-
     let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
         OperationalError::new_err(format!("Aggregate name contains null byte: {e}"))
     })?;
@@ -1273,7 +1316,7 @@ pub(crate) async fn create_aggregate_impl(
             None,
             Some(aggregate_step),
             Some(aggregate_final),
-            Some(aggregate_destructor),
+            None,
         )
     };
 
@@ -1281,13 +1324,20 @@ pub(crate) async fn create_aggregate_impl(
         unsafe {
             let _ = Box::from_raw(class_ptr as *mut Py<PyAny>);
         }
-        {
-            let mut guard = ctx.user_aggregates.lock().unwrap();
-            guard.remove(&name);
-        }
         return Err(OperationalError::new_err(format!(
             "Failed to create aggregate '{name}': SQLite error code {result}"
         )));
+    }
+
+    let old = {
+        let mut guard = ctx.user_aggregates.lock().unwrap();
+        guard.insert(name.clone(), (num_params, class_ptr_usize))
+    };
+    if let Some((_, old_ptr)) = old {
+        #[allow(deprecated)]
+        Python::with_gil(|_py| unsafe {
+            let _ = Box::from_raw(old_ptr as *mut Py<PyAny>);
+        });
     }
 
     Ok(())

@@ -70,7 +70,7 @@ asyncio.run(main())
 
 **Output:** `[[1, 'Alice']]`
 
-### SQLAlchemy & Alembic (0.3.1)
+### SQLAlchemy & Alembic (0.3.2)
 
 Use the `sqlite+rapsqlite` dialect with SQLAlchemy 2.0+ for true async ORM and Core. **Alembic migrations** are fully supported with the async template (`alembic init -t async`).
 

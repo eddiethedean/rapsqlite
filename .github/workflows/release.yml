@@ -6,6 +6,35 @@ on:
       - "v*"
 
 jobs:
+  version-tag-consistency:
+    name: Version/tag consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches project versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "${TAG}" != v* ]]; then
+            echo "Expected tag like vX.Y.Z, got: ${TAG}" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "Tag version: ${VERSION}"
+
+          PYPROJECT_VERSION="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          CARGO_VERSION="$(python3 -c "import re; s=open('Cargo.toml','r',encoding='utf-8').read(); m=re.search(r'^version\\s*=\\s*\\\"([^\\\"]+)\\\"', s, re.M); print(m.group(1) if m else '')")"
+          INIT_VERSION="$(python3 -c "import re; s=open('rapsqlite/__init__.py','r',encoding='utf-8').read(); m=re.search(r\"^__version__\\s*:\\s*str\\s*=\\s*\\\"([^\\\"]+)\\\"\", s, re.M); print(m.group(1) if m else '')")"
+
+          echo "pyproject.toml: ${PYPROJECT_VERSION}"
+          echo "Cargo.toml:     ${CARGO_VERSION}"
+          echo "__init__.py:    ${INIT_VERSION}"
+
+          [[ "${PYPROJECT_VERSION}" == "${VERSION}" ]] || (echo "pyproject.toml version mismatch" >&2; exit 1)
+          [[ "${CARGO_VERSION}" == "${VERSION}" ]] || (echo "Cargo.toml version mismatch" >&2; exit 1)
+          [[ "${INIT_VERSION}" == "${VERSION}" ]] || (echo "__init__.py version mismatch" >&2; exit 1)
+
   format:
     name: Format
     runs-on: ubuntu-latest
@@ -164,7 +193,7 @@ jobs:
   publish-pypi-manylinux-x86_64:
     name: PyPI manylinux x86_64 + sdist
     runs-on: ubuntu-latest
-    needs: [format, clippy, audit, deny, python-lint, python-tests]
+    needs: [version-tag-consistency, format, clippy, audit, deny, python-lint, python-tests]
     steps:
       - uses: actions/checkout@v4
       - name: Publish to PyPI (maturin)
@@ -176,12 +205,12 @@ jobs:
           command: publish
           args: --zig -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
           manylinux: "2_17"
-          container: off
+          container: on
 
   publish-pypi-manylinux-aarch64:
     name: PyPI manylinux aarch64
     runs-on: ubuntu-24.04-arm
-    needs: [format, clippy, audit, deny, python-lint, python-tests]
+    needs: [version-tag-consistency, format, clippy, audit, deny, python-lint, python-tests]
     steps:
       - uses: actions/checkout@v4
       - name: Publish to PyPI (maturin)
@@ -198,7 +227,7 @@ jobs:
   publish-pypi-mac:
     name: PyPI macOS ${{ matrix.target }}
     runs-on: macos-latest
-    needs: [format, clippy, audit, deny, python-lint, python-tests]
+    needs: [version-tag-consistency, format, clippy, audit, deny, python-lint, python-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -217,7 +246,7 @@ jobs:
   publish-pypi-musllinux-x86_64:
     name: PyPI musllinux x86_64
     runs-on: ubuntu-latest
-    needs: [format, clippy, audit, deny, python-lint, python-tests]
+    needs: [version-tag-consistency, format, clippy, audit, deny, python-lint, python-tests]
     steps:
       - uses: actions/checkout@v4
       - name: Publish to PyPI (maturin)
@@ -228,11 +257,12 @@ jobs:
           target: x86_64-unknown-linux-musl
           command: publish
           args: --zig --compatibility musllinux_1_2 -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14 --skip-existing
+          container: on
 
   publish-pypi-musllinux-aarch64:
     name: PyPI musllinux aarch64
     runs-on: ubuntu-24.04-arm
-    needs: [format, clippy, audit, deny, python-lint, python-tests]
+    needs: [version-tag-consistency, format, clippy, audit, deny, python-lint, python-tests]
     steps:
       - uses: actions/checkout@v4
       - name: Publish to PyPI (maturin)
@@ -247,7 +277,7 @@ jobs:
   publish-pypi-windows-x86_64:
     name: PyPI Windows x86_64
     runs-on: windows-latest
-    needs: [format, clippy, audit, deny, python-lint, python-tests]
+    needs: [version-tag-consistency, format, clippy, audit, deny, python-lint, python-tests]
     steps:
       - uses: actions/checkout@v4
       - name: Publish to PyPI (maturin)
@@ -262,7 +292,7 @@ jobs:
   publish-pypi-windows-arm64:
     name: PyPI Windows aarch64
     runs-on: windows-11-arm
-    needs: [format, clippy, audit, deny, python-lint, python-tests]
+    needs: [version-tag-consistency, format, clippy, audit, deny, python-lint, python-tests]
     steps:
       - uses: actions/checkout@v4
       - name: Publish to PyPI (maturin)

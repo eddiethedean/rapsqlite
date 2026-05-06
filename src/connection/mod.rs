@@ -86,6 +86,11 @@ pub(crate) struct Connection {
     trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Trace callback
     authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Authorizer callback
     progress_handler: ProgressHandler, // (n, callback)
+    // Raw SQLite callback contexts (Box<Py<PyAny>> as void*) so we can free on replace/clear.
+    // Stored as usize for Send/Sync; 0 means none installed.
+    trace_callback_ctx_ptr: Arc<StdMutex<usize>>,
+    authorizer_callback_ctx_ptr: Arc<StdMutex<usize>>,
+    progress_handler_ctx_ptr: Arc<StdMutex<usize>>,
     // Error message security: control whether query strings are included in errors
     include_query_in_errors: Arc<StdMutex<bool>>, // If false, exclude query strings from error messages
     // SQLite busy_timeout (aiosqlite compatibility) - timeout in seconds for database locks
@@ -326,6 +331,9 @@ impl Connection {
             trace_callback: Arc::new(StdMutex::new(None)),
             authorizer_callback: Arc::new(StdMutex::new(None)),
             progress_handler: Arc::new(StdMutex::new(None)),
+            trace_callback_ctx_ptr: Arc::new(StdMutex::new(0)),
+            authorizer_callback_ctx_ptr: Arc::new(StdMutex::new(0)),
+            progress_handler_ctx_ptr: Arc::new(StdMutex::new(0)),
             include_query_in_errors: Arc::new(StdMutex::new(true)), // Default: include queries for debugging
             timeout: Arc::new(StdMutex::new(timeout)), // SQLite busy_timeout in seconds (aiosqlite compatibility)
             isolation_level: Arc::new(StdMutex::new(None)), // Phase 3.9: None | DEFERRED | IMMEDIATE | EXCLUSIVE
@@ -3067,6 +3075,9 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
+            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
+            authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
+            progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
 
         Python::attach(|py| {
@@ -3112,6 +3123,9 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
+            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
+            authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
+            progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
 
         Python::attach(|py| {
@@ -3144,6 +3158,9 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
+            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
+            authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
+            progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
         Python::attach(|py| {
             future_into_py(py, callbacks::create_collation_impl(ctx, name, callable))
@@ -3211,6 +3228,9 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
+            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
+            authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
+            progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
 
         Python::attach(|py| {
@@ -3244,6 +3264,9 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
+            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
+            authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
+            progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
         Python::attach(|py| {
             let callback_clone = callback.as_ref().map(|c| c.clone_ref(py));
@@ -3276,6 +3299,9 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
+            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
+            authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
+            progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
         Python::attach(|py| {
             let callback_clone = callback.as_ref().map(|c| c.clone_ref(py));

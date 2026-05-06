@@ -243,13 +243,14 @@ pub(crate) fn parse_connection_string(uri: &str) -> PyResult<(String, Vec<(Strin
 ///   SQLite API call (for error messages) or for the lifetime of the program
 ///   (for static strings like sqlite3_libversion())
 #[inline]
-pub(crate) unsafe fn cstr_from_c_char_ptr(ptr: *const c_char) -> &'static CStr {
+pub(crate) unsafe fn cstr_from_c_char_ptr<'a>(ptr: *const c_char) -> &'a CStr {
     CStr::from_ptr(ptr)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
 
     #[test]
     fn test_is_select_query_basic() {
@@ -320,5 +321,14 @@ mod tests {
         let (path, params) = parse_connection_string("file:///tmp/test.db?mode=ro").unwrap();
         assert_eq!(path, "/tmp/test.db");
         assert_eq!(params, vec![("mode".to_string(), "ro".to_string())]);
+    }
+
+    #[test]
+    fn test_cstr_from_c_char_ptr_roundtrip() {
+        let s = CString::new("hello").unwrap();
+        let ptr = s.as_ptr();
+        // Safety: ptr is valid for the lifetime of `s` (this scope) and is NUL-terminated.
+        let cstr = unsafe { cstr_from_c_char_ptr(ptr) };
+        assert_eq!(cstr.to_str().unwrap(), "hello");
     }
 }

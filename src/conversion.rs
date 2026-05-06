@@ -143,7 +143,6 @@ pub(crate) unsafe fn py_to_sqlite_c_result(
         let ptr = c_str.as_ptr();
         let len = c_str.as_bytes().len() as i32;
         sqlite3_result_text(ctx, ptr, len, libsqlite3_sys::SQLITE_TRANSIENT());
-        std::mem::forget(c_str);
         return Ok(());
     }
 

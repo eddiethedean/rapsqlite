@@ -1,6 +1,7 @@
 """Tests for rapsqlite.dbapi (True Async DBAPI spec)."""
 
 import asyncio
+import time
 
 import pytest
 
@@ -276,37 +277,47 @@ async def test_concurrent_connection_usage_raises(unique_table_prefix):
 
 @pytest.mark.asyncio
 async def test_cancellation_interrupts_and_connection_usable(unique_table_prefix):
-    """Cancellation aborts the query and leaves the connection usable."""
+    """Cancellation interrupts underlying SQLite work and leaves connection usable."""
     tbl = unique_table_prefix
-    conn = await dbapi.connect(":memory:")
-    await conn.execute(f"CREATE TABLE {tbl} (a INT)")
-    # Use enough rows and sleep so the task runs long enough for cancellation
-    # on slower CI (e.g. Windows) where timing can vary
-    await conn.executemany(f"INSERT INTO {tbl} VALUES (?)", [[i] for i in range(200)])
-    await conn.commit()
+    # Use a file-backed DB so we can create a deterministic lock wait.
+    # (in-memory DBs are per-connection).
+    import tempfile
 
-    async def long_select():
-        cur = await conn.execute(f"SELECT * FROM {tbl}")
-        while True:
-            row = await cur.fetchone()
-            if row is None:
-                break
-            await asyncio.sleep(
-                0.03
-            )  # ~6s total; enough for cancellation on any platform
+    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+        path = f.name
 
-    t = asyncio.create_task(long_select())
-    await asyncio.sleep(0.15)  # Let task start and process a few rows
-    t.cancel()
-    try:
-        await t
-    except asyncio.CancelledError:
-        pass  # Expected when cancel is delivered in time
-    # On Windows/slow CI the task may complete before cancel is processed; either outcome is OK
+        conn1 = await dbapi.connect(path, timeout=5.0)
+        conn2 = await dbapi.connect(path, timeout=5.0)
+        await conn1.execute(f"CREATE TABLE {tbl} (a INT)")
+        await conn1.commit()
 
-    # Connection still usable
-    cur = await conn.execute("SELECT 1")
-    row = await cur.fetchone()
-    await cur.close()
-    assert row is not None
-    await conn.close()
+        # Hold an exclusive lock so conn2 blocks inside SQLite.
+        await conn1.execute("BEGIN EXCLUSIVE")
+        started = asyncio.Event()
+
+        async def blocked_insert():
+            started.set()
+            await conn2.execute(f"INSERT INTO {tbl} VALUES (1)")
+
+        t0 = time.monotonic()
+        task = asyncio.create_task(blocked_insert())
+        await started.wait()
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        elapsed = time.monotonic() - t0
+        # If cancellation did not interrupt SQLite, we'd wait ~busy_timeout seconds.
+        assert elapsed < 1.0
+
+        # Release lock and ensure conn2 still works.
+        await conn1.execute("ROLLBACK")
+        await conn1.close()
+
+        cur = await conn2.execute("SELECT 1")
+        row = await cur.fetchone()
+        await cur.close()
+        assert row is not None
+        await conn2.close()
