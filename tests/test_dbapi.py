@@ -286,7 +286,7 @@ async def test_cancellation_interrupts_and_connection_usable(unique_table_prefix
 
     # NOTE: On Windows, NamedTemporaryFile keeps the file handle open, which prevents
     # SQLite from opening/creating the database file (error code 14).
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         path = os.path.join(d, "test.db")
         # SQLx does not reliably create the file across platforms unless it exists.
         open(path, "ab").close()

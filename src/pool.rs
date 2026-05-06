@@ -7,12 +7,9 @@
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::into_future;
 use sqlx::pool::PoolConnection;
-use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::path::Path;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -20,34 +17,36 @@ use tokio::sync::Mutex;
 use crate::types::{ProgressHandler, UserAggregates, UserCollations, UserFunctions};
 use crate::OperationalError;
 
-fn connect_options_for_path(path: &str) -> Result<SqliteConnectOptions, sqlx::Error> {
+fn sqlite_url_for_path(path: &str) -> String {
     if path == ":memory:" {
-        return SqliteConnectOptions::from_str("sqlite::memory:");
+        return "sqlite::memory:".to_string();
     }
 
-    // Allow explicit URLs for advanced use (e.g. sqlite:file:... or sqlite://...).
+    // Allow explicit URLs for advanced use.
     // We intentionally do NOT treat `C:\...` as a URL.
     if path.starts_with("sqlite:") || path.starts_with("file:") {
-        return SqliteConnectOptions::from_str(path);
+        return path.to_string();
     }
 
-    // Best-effort pre-create the DB file for maximum cross-platform reliability.
-    // This avoids surprising SQLITE_CANTOPEN (code 14) errors from SQLite/SQLx
-    // in environments where create-if-missing behavior is inconsistent.
-    let p = Path::new(path);
-    if let Some(parent) = p.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(p);
+    // Ensure we can create the DB file if missing.
+    let mode = "mode=rwc";
 
-    Ok(SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(true)
-        .read_only(false))
+    // Windows absolute path like `C:\foo\bar.db` or `C:/foo/bar.db`
+    let windows_abs = path.len() >= 3
+        && path.as_bytes()[1] == b':'
+        && (path.as_bytes()[2] == b'\\' || path.as_bytes()[2] == b'/');
+    if windows_abs {
+        let p = path.replace('\\', "/");
+        return format!("sqlite:///{}?{}", p, mode);
+    }
+
+    // POSIX absolute path: sqlite:///tmp/test.db
+    if path.starts_with('/') {
+        return format!("sqlite:///{}?{}", path.trim_start_matches('/'), mode);
+    }
+
+    // Relative path.
+    format!("sqlite:{}?{}", path, mode)
 }
 
 fn drop_on_background_tokio<T: Send + 'static>(value: T) {
@@ -278,10 +277,8 @@ pub(crate) async fn get_or_create_pool(
     if let Some(idle) = idle_secs {
         opts = opts.idle_timeout(Some(Duration::from_secs(idle)));
     }
-    let conn_opts = connect_options_for_path(path).map_err(|e| {
-        OperationalError::new_err(format!("Failed to connect to database at {path}: {e}"))
-    })?;
-    let new_pool = opts.connect_with(conn_opts).await.map_err(|e| {
+    let url = sqlite_url_for_path(path);
+    let new_pool = opts.connect(&url).await.map_err(|e| {
         OperationalError::new_err(format!("Failed to connect to database at {path}: {e}"))
     })?;
 
