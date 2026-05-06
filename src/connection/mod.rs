@@ -3402,16 +3402,11 @@ impl Connection {
                                 }
                                 statements.push(format!("{sql_stmt};"));
                             }
-                            "index" => {
-                                // Skip system indexes
-                                if !name.starts_with("sqlite_") {
-                                    statements.push(format!("{sql_stmt};"));
-                                }
-                            }
-                            "trigger" => {
+                            // Skip system indexes
+                            "index" if !name.starts_with("sqlite_") => {
                                 statements.push(format!("{sql_stmt};"));
                             }
-                            "view" => {
+                            "trigger" | "view" => {
                                 statements.push(format!("{sql_stmt};"));
                             }
                             _ => {}
