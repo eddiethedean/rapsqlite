@@ -451,10 +451,5 @@ pub(crate) fn has_callbacks(
     let has_authorizer = authorizer_callback.lock().unwrap().is_some();
     let has_progress = progress_handler.lock().unwrap().is_some();
 
-    load_ext
-        || has_functions
-        || has_aggregates
-        || has_collations
-        || has_authorizer
-        || has_progress
+    load_ext || has_functions || has_aggregates || has_collations || has_authorizer || has_progress
 }

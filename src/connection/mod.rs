@@ -88,7 +88,6 @@ pub(crate) struct Connection {
     progress_handler: ProgressHandler, // (n, callback)
     // Raw SQLite callback contexts (Box<Py<PyAny>> as void*) so we can free on replace/clear.
     // Stored as usize for Send/Sync; 0 means none installed.
-    trace_callback_ctx_ptr: Arc<StdMutex<usize>>,
     authorizer_callback_ctx_ptr: Arc<StdMutex<usize>>,
     progress_handler_ctx_ptr: Arc<StdMutex<usize>>,
     // Error message security: control whether query strings are included in errors
@@ -331,7 +330,6 @@ impl Connection {
             trace_callback: Arc::new(StdMutex::new(None)),
             authorizer_callback: Arc::new(StdMutex::new(None)),
             progress_handler: Arc::new(StdMutex::new(None)),
-            trace_callback_ctx_ptr: Arc::new(StdMutex::new(0)),
             authorizer_callback_ctx_ptr: Arc::new(StdMutex::new(0)),
             progress_handler_ctx_ptr: Arc::new(StdMutex::new(0)),
             include_query_in_errors: Arc::new(StdMutex::new(true)), // Default: include queries for debugging
@@ -3158,7 +3156,6 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
-            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
@@ -3206,7 +3203,6 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
-            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
@@ -3241,7 +3237,6 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
-            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
@@ -3311,7 +3306,6 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
-            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
@@ -3347,7 +3341,6 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
-            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
@@ -3382,7 +3375,6 @@ impl Connection {
             trace_callback: Arc::clone(&self.trace_callback),
             authorizer_callback: Arc::clone(&self.authorizer_callback),
             progress_handler: Arc::clone(&self.progress_handler),
-            trace_callback_ctx_ptr: Arc::clone(&self.trace_callback_ctx_ptr),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
         };
