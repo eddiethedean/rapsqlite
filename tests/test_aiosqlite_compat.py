@@ -1674,6 +1674,23 @@ async def test_named_parameters_dollar(test_db):
 
 
 @pytest.mark.asyncio
+async def test_named_parameters_dollar_sqlite_suffixes(test_db):
+    """SQLite $ parameters may include :: components and a parenthesized suffix."""
+    async with connect(test_db) as db:
+        rows = await db.fetch_all(
+            "SELECT $value::suffix, $other::part(extra)",
+            {"value::suffix": 42, "other::part(extra)": "ok"},
+        )
+        assert rows == [[42, "ok"]]
+
+        rows = await db.fetch_all(
+            "SELECT $value::, $other::::part, $dollar$name",
+            {"value::": 1, "other::::part": 2, "dollar$name": 3},
+        )
+        assert rows == [[1, 2, 3]]
+
+
+@pytest.mark.asyncio
 async def test_positional_parameters_question(test_db):
     """Test positional parameters with ? format."""
     async with connect(test_db) as db:

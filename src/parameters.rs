@@ -63,9 +63,14 @@ pub(crate) fn find_named_parameter_placeholders(query: &str) -> Vec<(usize, usiz
             continue;
         }
 
+        let first_name_char = |candidate: char| {
+            candidate.is_alphabetic()
+                || candidate == '_'
+                || (ch == '$' && (candidate.is_numeric() || candidate == '$'))
+        };
         let is_named_prefix = (ch == ':' || ch == '@' || ch == '$')
             && i + 1 < query_chars.len()
-            && (query_chars[i + 1].1.is_alphabetic() || query_chars[i + 1].1 == '_');
+            && first_name_char(query_chars[i + 1].1);
 
         if is_named_prefix {
             let start = byte_index;
@@ -73,11 +78,63 @@ pub(crate) fn find_named_parameter_placeholders(query: &str) -> Vec<(usize, usiz
             let mut name = String::new();
             while i < query_chars.len() {
                 let c = query_chars[i].1;
-                if c.is_alphanumeric() || c == '_' {
+                if c.is_alphanumeric() || c == '_' || (ch == '$' && c == '$') {
                     name.push(c);
                     i += 1;
                 } else {
                     break;
+                }
+            }
+
+            // SQLite permits `$` parameter names to contain `::` components and
+            // an optional parenthesized suffix, e.g. `$value::suffix(extra)`.
+            // Keep the complete token together so the dictionary key matches
+            // SQLite's parameter name (`value::suffix(extra)`).
+            if ch == '$' {
+                loop {
+                    if i + 1 >= query_chars.len()
+                        || query_chars[i].1 != ':'
+                        || query_chars[i + 1].1 != ':'
+                    {
+                        break;
+                    }
+                    name.push(':');
+                    name.push(':');
+                    i += 2;
+                    while i < query_chars.len() {
+                        let c = query_chars[i].1;
+                        if c.is_alphanumeric() || c == '_' || c == '$' {
+                            name.push(c);
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                if i < query_chars.len() && query_chars[i].1 == '(' {
+                    let suffix_start = i;
+                    let name_len_before_suffix = name.len();
+                    name.push('(');
+                    i += 1;
+                    let mut closed = false;
+                    while i < query_chars.len() {
+                        let c = query_chars[i].1;
+                        if c.is_whitespace() {
+                            break;
+                        }
+                        name.push(c);
+                        i += 1;
+                        if c == ')' {
+                            closed = true;
+                            break;
+                        }
+                    }
+                    if !closed {
+                        // SQLite only recognizes a complete parenthesized suffix.
+                        name.truncate(name_len_before_suffix);
+                        i = suffix_start;
+                    }
                 }
             }
             if !name.is_empty() {
@@ -236,6 +293,39 @@ mod tests {
         let out = find_named_parameter_placeholders("SELECT $name FROM t");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].2, "name");
+    }
+
+    #[test]
+    fn test_find_named_placeholders_dollar_components() {
+        let query = "SELECT $value::suffix, $other::part::detail FROM t";
+        let out = find_named_parameter_placeholders(query);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].2, "value::suffix");
+        assert_eq!(&query[out[0].0..out[0].1], "$value::suffix");
+        assert_eq!(out[1].2, "other::part::detail");
+        assert_eq!(&query[out[1].0..out[1].1], "$other::part::detail");
+    }
+
+    #[test]
+    fn test_find_named_placeholders_dollar_parenthesized_suffix() {
+        let query = "SELECT $value::suffix(extra) FROM t";
+        let out = find_named_parameter_placeholders(query);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].2, "value::suffix(extra)");
+        assert_eq!(&query[out[0].0..out[0].1], "$value::suffix(extra)");
+    }
+
+    #[test]
+    fn test_find_named_placeholders_dollar_empty_components_and_dollar_chars() {
+        let query = "SELECT $value::, $other::::part, $dollar$name FROM t";
+        let out = find_named_parameter_placeholders(query);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].2, "value::");
+        assert_eq!(out[1].2, "other::::part");
+        assert_eq!(out[2].2, "dollar$name");
+        assert_eq!(&query[out[0].0..out[0].1], "$value::");
+        assert_eq!(&query[out[1].0..out[1].1], "$other::::part");
+        assert_eq!(&query[out[2].0..out[2].1], "$dollar$name");
     }
 
     #[test]
