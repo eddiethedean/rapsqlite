@@ -8,6 +8,31 @@ fn is_sql_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+fn skip_sql_ignored(query: &str, mut i: usize, end: usize) -> usize {
+    let bytes = query.as_bytes();
+    loop {
+        while i < end && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i + 1 < end && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < end && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if i + 1 < end && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < end && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(end);
+            continue;
+        }
+        return i;
+    }
+}
+
 /// Find a SQL keyword outside quoted strings, quoted identifiers, and comments.
 fn find_sql_keyword(query_lower: &str, keyword: &str, from: usize) -> Option<usize> {
     let bytes = query_lower.as_bytes();
@@ -107,6 +132,21 @@ fn find_sql_byte(query: &str, from: usize, needle: u8) -> Option<usize> {
             }
             continue;
         }
+        if bytes[i] == b'-' && bytes.get(i + 1) == Some(&b'-') {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
         if bytes[i] == needle {
             return Some(i);
         }
@@ -137,6 +177,16 @@ fn matching_sql_paren(query: &str, open: usize) -> Option<usize> {
         }
         match bytes[i] {
             b'\'' | b'"' | b'`' => quote = Some(bytes[i]),
+            b'[' => {
+                while i < bytes.len() {
+                    if bytes[i] == b']' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
             b'(' => depth += 1,
             b')' => {
                 depth = depth.checked_sub(1)?;
@@ -145,6 +195,21 @@ fn matching_sql_paren(query: &str, open: usize) -> Option<usize> {
                 }
             }
             _ => {}
+        }
+        if bytes[i] == b'-' && bytes.get(i + 1) == Some(&b'-') {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
         }
         i += 1;
     }
@@ -175,6 +240,16 @@ fn split_sql_list(query: &str, start: usize, end: usize) -> Vec<(usize, usize)> 
         }
         match bytes[i] {
             b'\'' | b'"' | b'`' => quote = Some(bytes[i]),
+            b'[' => {
+                while i < end {
+                    if bytes[i] == b']' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
             b'(' => depth += 1,
             b')' => depth = depth.saturating_sub(1),
             b',' if depth == 0 => {
@@ -182,6 +257,21 @@ fn split_sql_list(query: &str, start: usize, end: usize) -> Vec<(usize, usize)> 
                 item_start = i + 1;
             }
             _ => {}
+        }
+        if bytes[i] == b'-' && i + 1 < end && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < end && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < end && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < end && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(end);
+            continue;
         }
         i += 1;
     }
@@ -198,6 +288,53 @@ fn trim_sql_range(query: &str, (mut start, mut end): (usize, usize)) -> (usize, 
         end -= 1;
     }
     (start, end)
+}
+
+fn sql_column_name(query: &str, range: (usize, usize)) -> Option<String> {
+    let bytes = query.as_bytes();
+    let (_, end) = range;
+    let start = skip_sql_ignored(query, range.0, end);
+    if start >= end {
+        return None;
+    }
+
+    let (name_start, name_end) = match bytes[start] {
+        b'"' | b'`' => {
+            let quote = bytes[start];
+            let mut i = start + 1;
+            while i < end {
+                if bytes[i] == quote {
+                    if i + 1 < end && bytes[i + 1] == quote {
+                        i += 2;
+                    } else {
+                        return Some(query[start + 1..i].to_ascii_lowercase());
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            return None;
+        }
+        b'[' => {
+            let mut i = start + 1;
+            while i < end {
+                if bytes[i] == b']' {
+                    return Some(query[start + 1..i].to_ascii_lowercase());
+                }
+                i += 1;
+            }
+            return None;
+        }
+        _ => {
+            let mut i = start;
+            while i < end && is_sql_identifier_byte(bytes[i]) {
+                i += 1;
+            }
+            (start, i)
+        }
+    };
+
+    (name_start < name_end).then(|| query[name_start..name_end].to_ascii_lowercase())
 }
 
 /// Find literal ranges belonging to sensitive columns in INSERT ... VALUES statements.
@@ -230,13 +367,7 @@ fn insert_sensitive_value_ranges(
         .into_iter()
         .enumerate()
         .filter_map(|(index, range)| {
-            let (start, end) = trim_sql_range(query, range);
-            if start == end {
-                return None;
-            }
-            let column = query[start..end]
-                .trim_matches(|ch| ch == '`' || ch == '"' || ch == '[' || ch == ']')
-                .to_ascii_lowercase();
+            let column = sql_column_name(query, range)?;
             sensitive_keywords
                 .iter()
                 .any(|keyword| *keyword == column)
@@ -491,6 +622,14 @@ mod tests {
         let out = sanitize_query(q);
         assert!(out.contains("VALUES (1, ***)"));
         assert!(!out.contains("TOPSECRET"));
+    }
+
+    #[test]
+    fn test_sanitize_query_insert_sensitive_value_with_comments() {
+        let q = "INSERT INTO users /* (comment) */ (password /* comma, */) VALUES ('TOPSECRET')";
+        let out = sanitize_query(q);
+        assert!(!out.contains("TOPSECRET"));
+        assert!(out.contains("VALUES (***)"));
     }
 
     #[test]
