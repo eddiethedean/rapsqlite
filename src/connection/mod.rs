@@ -3459,7 +3459,7 @@ impl Connection {
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
-                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
+                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'trigger' THEN 2 WHEN 'view' THEN 3 ELSE 4 END, name")
                         .fetch_all(&mut **conn)
                         .await
                         .map_err(|e| map_sqlx_error(e, &path, "SELECT FROM sqlite_master"))?
@@ -3478,7 +3478,7 @@ impl Connection {
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
-                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
+                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'trigger' THEN 2 WHEN 'view' THEN 3 ELSE 4 END, name")
                         .fetch_all(&mut **conn)
                         .await
                         .map_err(|e| map_sqlx_error(e, &path, "SELECT FROM sqlite_master"))?
@@ -3492,7 +3492,7 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name")
+                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'trigger' THEN 2 WHEN 'view' THEN 3 ELSE 4 END, name")
                         .fetch_all(&pool_clone)
                         .await
                         .map_err(|e| map_sqlx_error(e, &path, "SELECT FROM sqlite_master"))?
@@ -3500,6 +3500,9 @@ impl Connection {
 
                 // Collect table names for data dumping
                 let mut table_names = Vec::new();
+                let mut index_statements = Vec::new();
+                let mut view_statements = Vec::new();
+                let mut trigger_statements = Vec::new();
 
                 // Process schema rows
                 for row in schema_rows {
@@ -3518,10 +3521,13 @@ impl Connection {
                             }
                             // Skip system indexes
                             "index" if !name.starts_with("sqlite_") => {
-                                statements.push(format!("{sql_stmt};"));
+                                index_statements.push(format!("{sql_stmt};"));
                             }
-                            "trigger" | "view" => {
-                                statements.push(format!("{sql_stmt};"));
+                            "view" => {
+                                view_statements.push(format!("{sql_stmt};"));
+                            }
+                            "trigger" => {
+                                trigger_statements.push(format!("{sql_stmt};"));
                             }
                             _ => {}
                         }
@@ -3535,15 +3541,6 @@ impl Connection {
                 // This prevents malformed SQL and avoids identifier-based SQL injection in iterdump output.
                 fn quote_ident_part(ident: &str) -> String {
                     format!("\"{}\"", ident.replace('"', "\"\""))
-                }
-
-                // Quote potentially qualified identifiers like `schema.table` by quoting each segment.
-                fn quote_ident_path(ident: &str) -> String {
-                    ident
-                        .split('.')
-                        .map(quote_ident_part)
-                        .collect::<Vec<_>>()
-                        .join(".")
                 }
 
                 // Helper function to format value for INSERT
@@ -3571,11 +3568,10 @@ impl Connection {
                 };
 
                 // Dump data for each table
-                // Safety: table_name comes from sqlite_master (trusted source), and we use
-                // identifier quoting (quote_ident_path) which properly escapes identifiers,
-                // preventing SQL injection even if a malicious table name was created.
+                // Table names from sqlite_master are single identifiers. Dots inside a
+                // legal table name must not be interpreted as schema separators.
                 for table_name in table_names {
-                    let quoted_table = quote_ident_path(&table_name);
+                    let quoted_table = quote_ident_part(&table_name);
                     let query = format!("SELECT * FROM {quoted_table}");
                     let rows = if in_transaction {
                         let mut conn_guard = transaction_connection.lock().await;
@@ -3628,7 +3624,7 @@ impl Connection {
                         .collect();
 
                     // Generate INSERT statements
-                    let insert_table = quote_ident_path(&table_name);
+                    let insert_table = quote_ident_part(&table_name);
                     let insert_cols: Vec<String> =
                         column_names.iter().map(|c| quote_ident_part(c)).collect();
                     for row in rows {
@@ -3645,6 +3641,14 @@ impl Connection {
                         ));
                     }
                 }
+
+                // Build secondary schema objects after loading rows. Creating triggers
+                // earlier would fire them while replaying the INSERT statements and
+                // mutate data a second time. Views precede triggers so INSTEAD OF
+                // triggers can refer to their target views.
+                statements.extend(index_statements);
+                statements.extend(view_statements);
+                statements.extend(trigger_statements);
 
                 statements.push("COMMIT;".to_string());
 

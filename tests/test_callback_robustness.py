@@ -4,11 +4,12 @@ These tests cover edge cases, error scenarios, and complex usage patterns
 that might differ between rapsqlite and aiosqlite implementations.
 """
 
+import sqlite3
+
 import pytest
-
 from conftest import unlink_with_retry
-from rapsqlite import connect, DatabaseError, OperationalError
 
+from rapsqlite import DatabaseError, OperationalError, connect
 
 # ============================================================================
 # create_function robust tests
@@ -712,6 +713,33 @@ async def test_iterdump_quotes_identifiers(tmp_path):
             raise
         rows = await db.fetch_all('SELECT "col space", "a""b" FROM "weird ""name"""')
         assert rows == [["hello", 1]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow
+async def test_iterdump_restores_indexes_and_dotted_table_names(tmp_path):
+    src_db = tmp_path / "src-dotted.db"
+    dst_db = tmp_path / "dst-dotted.db"
+    src_db.touch()
+
+    async with connect(str(src_db)) as db:
+        await db.execute('CREATE TABLE "a.b" (value TEXT)')
+        await db.execute('CREATE INDEX idx_dotted_value ON "a.b" (value)')
+        await db.execute('INSERT INTO "a.b" VALUES (?)', ["restored"])
+        dump = await db.iterdump()
+
+    table_pos = next(
+        i for i, line in enumerate(dump) if line.startswith("CREATE TABLE")
+    )
+    index_pos = next(
+        i for i, line in enumerate(dump) if line.startswith("CREATE INDEX")
+    )
+    assert table_pos < index_pos
+
+    with sqlite3.connect(dst_db) as restored:
+        restored.executescript("\n".join(dump))
+        rows = restored.execute('SELECT value FROM "a.b"').fetchall()
+    assert rows == [("restored",)]
 
 
 @pytest.mark.asyncio
