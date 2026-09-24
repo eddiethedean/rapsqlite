@@ -10,6 +10,7 @@ use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -129,6 +130,14 @@ impl TakenConnectionGuard {
     ) -> Option<(Arc<Mutex<PoolConnectionSlot>>, PoolConnection<sqlx::Sqlite>)> {
         self.0.take()
     }
+
+    /// Close and release the held connection instead of restoring it to its slot.
+    pub(crate) fn discard(&mut self) {
+        if let Some((_, mut conn)) = self.0.take() {
+            conn.close_on_drop();
+            drop(conn);
+        }
+    }
 }
 
 impl Drop for TakenConnectionGuard {
@@ -147,11 +156,151 @@ impl Drop for TakenConnectionGuard {
 /// Connection objects to the same path can acquire connections.
 const SHARED_POOL_MIN_CONNECTIONS: u32 = 25;
 
-/// Global registry: path -> PoolSlot. Connections to the same path share one pool.
-/// PoolSlot forgets the pool when dropped without Tokio (safe at process exit).
-fn global_registry() -> &'static StdMutex<HashMap<String, PoolSlot>> {
-    static REGISTRY: OnceLock<StdMutex<HashMap<String, PoolSlot>>> = OnceLock::new();
+/// A registry entry stays alive while at least one Connection uses this identity.
+#[derive(Default)]
+struct RegisteredPool {
+    pool: PoolSlot,
+    users: usize,
+    configured_max_connections: Option<u32>,
+}
+
+/// Per-Connection slot for retaining one pooled connection across operations.
+#[derive(Clone)]
+pub(crate) struct SessionConnectionSlot {
+    slot: Arc<Mutex<PoolConnectionSlot>>,
+}
+
+impl SessionConnectionSlot {
+    fn new() -> Self {
+        Self {
+            slot: Arc::new(Mutex::new(PoolConnectionSlot::default())),
+        }
+    }
+
+    pub(crate) async fn lock(&self) -> tokio::sync::OwnedMutexGuard<PoolConnectionSlot> {
+        Arc::clone(&self.slot).lock_owned().await
+    }
+}
+
+/// Holds a logical Connection's session slot for one operation. Return the lease
+/// to SQLx when the operation finishes so idle Connection wrappers do not consume
+/// the pool's bounded capacity.
+pub(crate) struct SessionConnectionGuard {
+    guard: tokio::sync::OwnedMutexGuard<PoolConnectionSlot>,
+}
+
+impl Deref for SessionConnectionGuard {
+    type Target = PoolConnectionSlot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for SessionConnectionGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for SessionConnectionGuard {
+    fn drop(&mut self) {
+        self.guard.0.take();
+    }
+}
+
+/// Global registry: database identity -> shared pool and active Connection count.
+fn global_registry() -> &'static StdMutex<HashMap<String, RegisteredPool>> {
+    static REGISTRY: OnceLock<StdMutex<HashMap<String, RegisteredPool>>> = OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Keeps a registry entry alive for one Connection and removes it when that
+/// connection closes or is dropped. PoolSlot handles drops outside Tokio.
+pub(crate) struct PoolRegistryLease {
+    identity: Option<String>,
+}
+
+impl PoolRegistryLease {
+    pub(crate) fn new(identity: String) -> (Self, SessionConnectionSlot) {
+        let mut registry = global_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = registry.entry(identity.clone()).or_default();
+        entry.users += 1;
+        (
+            Self {
+                identity: Some(identity.clone()),
+            },
+            SessionConnectionSlot::new(),
+        )
+    }
+
+    /// Configure the shared pool before first use. The first explicit pool size
+    /// wins; once the SQLx pool exists, its actual maximum is authoritative.
+    pub(crate) fn configure_pool_size(&self, requested: Option<usize>) {
+        let Some(identity) = self.identity.as_ref() else {
+            return;
+        };
+        let mut registry = global_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = registry.get_mut(identity) else {
+            return;
+        };
+        if entry.pool.0.is_none() && entry.configured_max_connections.is_none() {
+            if let Some(size) = requested {
+                entry.configured_max_connections = Some(size.max(1).min(u32::MAX as usize) as u32);
+            }
+        }
+    }
+
+    pub(crate) fn identity(&self) -> Option<&str> {
+        self.identity.as_deref()
+    }
+
+    pub(crate) fn release(&mut self) {
+        let Some(identity) = self.identity.take() else {
+            return;
+        };
+        let mut registry = global_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove = if let Some(entry) = registry.get_mut(&identity) {
+            entry.users = entry.users.saturating_sub(1);
+            entry.users == 0
+        } else {
+            false
+        };
+        if remove {
+            registry.remove(&identity);
+        }
+    }
+}
+
+impl Drop for PoolRegistryLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Close and remove the pool held by a registry entry after its last Connection closes.
+pub(crate) async fn close_registered_pool_if_last(identity: &str) {
+    let pool = {
+        let mut registry = global_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = registry.get_mut(identity) else {
+            return;
+        };
+        if entry.users > 1 {
+            return;
+        }
+        entry.pool.0.take()
+    };
+    if let Some(pool) = pool {
+        pool.close().await;
+    }
 }
 
 /// Create a helpful error message for pool acquisition failures.
@@ -250,7 +399,7 @@ pub(crate) async fn get_or_create_pool(
     // Check global registry for an existing pool for this path.
     let from_registry = {
         let reg = registry.lock().unwrap();
-        reg.get(path).and_then(|s| s.0.clone())
+        reg.get(path).and_then(|entry| entry.pool.0.clone())
     };
     if let Some(shared_clone) = from_registry {
         let mut pool_guard = pool.lock().await;
@@ -259,9 +408,22 @@ pub(crate) async fn get_or_create_pool(
     }
 
     // No pool for this path: create one, then register or use existing (race).
-    let max_conn = {
+    let requested_max = {
         let g = pool_size.lock().unwrap();
-        (g.unwrap_or(1).max(1)) as u32
+        match *g {
+            Some(configured) => configured.max(1).min(u32::MAX as usize) as u32,
+            None => SHARED_POOL_MIN_CONNECTIONS,
+        }
+    };
+    let max_conn = {
+        let mut reg = global_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = reg.entry(path.to_string()).or_default();
+        if entry.configured_max_connections.is_none() {
+            entry.configured_max_connections = Some(requested_max);
+        }
+        entry.configured_max_connections.unwrap_or(requested_max)
     };
     let timeout_secs = {
         let g = connection_timeout_secs.lock().unwrap();
@@ -271,8 +433,6 @@ pub(crate) async fn get_or_create_pool(
         let g = idle_timeout_secs.lock().unwrap();
         *g
     };
-    // Shared pool must support many concurrent connections to the same path.
-    let max_conn = max_conn.max(SHARED_POOL_MIN_CONNECTIONS);
     let mut opts = SqlitePoolOptions::new().max_connections(max_conn);
     let timeout = timeout_secs.unwrap_or(30);
     opts = opts.acquire_timeout(Duration::from_secs(timeout));
@@ -300,10 +460,11 @@ pub(crate) async fn get_or_create_pool(
 
     let to_use = {
         let mut reg = registry.lock().unwrap();
-        if let Some(existing) = reg.get(path).and_then(|s| s.0.clone()) {
+        let entry = reg.entry(path.to_string()).or_default();
+        if let Some(existing) = entry.pool.0.clone() {
             Some(existing)
         } else {
-            reg.insert(path.to_string(), PoolSlot(Some(new_pool.clone())));
+            entry.pool.0 = Some(new_pool.clone());
             None
         }
     };
@@ -431,46 +592,47 @@ pub(crate) async fn execute_init_hook_if_needed(
 /// Ensure the Connection has a session connection from the pool (acquire and store if None).
 /// Used to reuse one connection per Connection for many queries when not in a transaction
 /// and not using callbacks, matching aiosqlite behavior and improving concurrent-read performance.
-pub(crate) async fn ensure_session_connection(
+pub(crate) async fn lock_session_connection(
     path: &str,
     pool: &Arc<Mutex<PoolSlot>>,
-    session_connection: &Arc<Mutex<PoolConnectionSlot>>,
+    session_connection: &SessionConnectionSlot,
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: &Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
     idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
-) -> Result<(), PyErr> {
+) -> Result<SessionConnectionGuard, PyErr> {
     let mut guard = session_connection.lock().await;
+    let pool_clone = get_or_create_pool(
+        path,
+        pool,
+        pragmas,
+        pool_size,
+        connection_timeout_secs,
+        idle_timeout_secs,
+    )
+    .await?;
     if guard.0.is_none() {
-        let pool_clone = get_or_create_pool(
-            path,
-            pool,
-            pragmas,
-            pool_size,
-            connection_timeout_secs,
-            idle_timeout_secs,
-        )
-        .await?;
         let pool_size_val = *pool_size.lock().unwrap();
         let timeout_val = *connection_timeout_secs.lock().unwrap();
         let conn =
             acquire_with_pragmas(&pool_clone, pragmas, path, pool_size_val, timeout_val).await?;
         guard.0 = Some(conn);
+    } else if let Some(conn) = guard.0.as_mut() {
+        let pragmas_list = pragmas.lock().unwrap().clone();
+        apply_pragmas_to_connection(conn, &pragmas_list, path).await?;
     }
-    Ok(())
+    Ok(SessionConnectionGuard { guard })
 }
 
 /// Release the session connection (return to pool). Call on close() and when starting a transaction.
-pub(crate) async fn release_session_connection(
-    session_connection: &Arc<Mutex<PoolConnectionSlot>>,
-) {
+pub(crate) async fn release_session_connection(session_connection: &SessionConnectionSlot) {
     let mut guard = session_connection.lock().await;
     let _ = guard.0.take();
 }
 
 /// Check if any callbacks are currently set.
 pub(crate) fn has_callbacks(
-    load_extension_enabled: &Arc<StdMutex<bool>>,
+    callback_connection_required: &Arc<StdMutex<bool>>,
     user_functions: &UserFunctions,
     user_aggregates: &UserAggregates,
     user_collations: &UserCollations,
@@ -481,7 +643,7 @@ pub(crate) fn has_callbacks(
     // Safety: StdMutex::lock() only fails if the mutex is poisoned (another thread panicked).
     // In Python's GIL context and with proper error handling, this is extremely unlikely.
     // These are read-only operations, so unwrap() is acceptable.
-    let load_ext = *load_extension_enabled.lock().unwrap();
+    let load_ext = *callback_connection_required.lock().unwrap();
     let has_functions = !user_functions.lock().unwrap().is_empty();
     let has_aggregates = !user_aggregates.lock().unwrap().is_empty();
     let has_collations = !user_collations.lock().unwrap().is_empty();

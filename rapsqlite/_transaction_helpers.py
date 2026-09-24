@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Any
 
 
@@ -25,25 +26,25 @@ async def transaction_retry(
     last_err: Exception | None = None
     delay = initial_delay
     for attempt in range(max_retries):
+        began = False
         try:
             await conn.begin()
-            try:
-                coro = work() if callable(work) else work
-                result = await coro
-                await conn.commit()
-                return result
-            except Exception as e:  # noqa: PERF203 - explicit rollback path
-                await conn.rollback()
-                last_err = e
-                msg = str(e).lower()
-                if "busy" in msg or "locked" in msg:
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(min(delay, max_delay))
-                        delay = min(delay * 2, max_delay)
-                        continue
-                raise
+            began = True
+            coro = work() if callable(work) else work
+            result = await coro
+            await conn.commit()
+            began = False
+            return result
         except Exception as e:
             last_err = e
+            if began:
+                with suppress(Exception):
+                    await conn.rollback()
+            msg = str(e).lower()
+            if ("busy" in msg or "locked" in msg) and attempt < max_retries - 1:
+                await asyncio.sleep(min(delay, max_delay))
+                delay = min(delay * 2, max_delay)
+                continue
             raise
     # If max_retries is 0, we never enter the loop, so raise the last error or a helpful message.
     if last_err is not None:

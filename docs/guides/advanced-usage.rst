@@ -75,13 +75,13 @@ Monitoring
 Pool metrics
 ~~~~~~~~~~~
 
-``Connection.pool_metrics()`` returns a dict with pool usage: ``size`` (total connections), ``num_idle`` (idle), and ``in_use`` (active). Use it to observe pool health in production:
+``Connection.pool_metrics()`` returns a dict with pool usage: ``size`` (total connections), ``num_idle`` (idle), ``in_use`` (active), and ``max_connections`` (configured maximum). Use it to observe pool health in production:
 
 .. code-block:: python
 
    async with connect("app.db") as conn:
        metrics = await conn.pool_metrics()
-       # e.g. {"size": 5, "num_idle": 3, "in_use": 2}
+       # e.g. {"size": 5, "num_idle": 3, "in_use": 2, "max_connections": 8}
        logger.info("pool %s", metrics)
        # Or expose via a /metrics endpoint for Prometheus, etc.
 
@@ -90,7 +90,8 @@ Metrics export (Prometheus / custom)
 
 Use the optional helper **``pool_metrics_gauges(conn)``** to get pool metrics as a dict of
 gauge names suitable for Prometheus or a custom metrics endpoint. It returns
-``rapsqlite_pool_size``, ``rapsqlite_pool_num_idle``, and ``rapsqlite_pool_in_use``.
+``rapsqlite_pool_size``, ``rapsqlite_pool_num_idle``, ``rapsqlite_pool_in_use``, and
+``rapsqlite_pool_max_connections``.
 Import it from ``rapsqlite`` and call it with your connection:
 
 .. code-block:: python

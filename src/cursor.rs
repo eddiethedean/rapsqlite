@@ -8,12 +8,13 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
-use crate::connection::ensure_not_closed;
+use crate::connection::{
+    discard_callback_connection, ensure_not_closed, rebind_callbacks, CallbackContext,
+};
 use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{
-    acquire_with_pragmas, ensure_callback_connection, get_or_create_pool, has_callbacks,
-    PoolConnectionSlot, PoolSlot,
+    has_callbacks, lock_session_connection, PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{
@@ -43,8 +44,10 @@ struct CursorFetchContext {
     text_factory: Arc<StdMutex<Option<Py<PyAny>>>>,
     transaction_state: Arc<Mutex<TransactionState>>,
     transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
+    session_connection: SessionConnectionSlot,
     callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    load_extension_enabled: Arc<StdMutex<bool>>,
+    callback_connection_required: Arc<StdMutex<bool>>,
+    callback_context: CallbackContext,
     user_functions: UserFunctions,
     user_aggregates: UserAggregates,
     user_collations: UserCollations,
@@ -54,6 +57,7 @@ struct CursorFetchContext {
     description: Arc<StdMutex<Option<Py<PyAny>>>>,
     pending_description: Arc<StdMutex<Option<Py<PyAny>>>>,
     row_factory_override: Arc<StdMutex<Option<Py<PyAny>>>>,
+    cursor_closed: Arc<StdMutex<bool>>,
     adapters: Adapters,
     converters: Converters,
     include_query_in_errors: bool,
@@ -64,6 +68,11 @@ struct CursorFetchContext {
 /// acquires the appropriate connection, runs the query, converts rows with row_factory/text_factory,
 /// and sets results + pending_description + current_index. If the query does not return rows, sets empty results.
 async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), PyErr> {
+    if *ctx.cursor_closed.lock().unwrap() {
+        return Err(ProgrammingError::new_err(
+            "Cannot operate on a closed cursor.",
+        ));
+    }
     ensure_not_closed(&ctx.closed)?;
     let needs_fetch = ctx.results.lock().unwrap().is_none();
     if !needs_fetch {
@@ -108,7 +117,7 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
         g.is_active()
     };
     let has_callbacks_flag = has_callbacks(
-        &ctx.load_extension_enabled,
+        &ctx.callback_connection_required,
         &ctx.user_functions,
         &ctx.user_aggregates,
         &ctx.user_collations,
@@ -116,6 +125,14 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
         &ctx.authorizer_callback,
         &ctx.progress_handler,
     );
+    let _callback_operation_guard = if has_callbacks_flag {
+        Some(ctx.callback_context.callback_operation_lock.lock().await)
+    } else {
+        None
+    };
+    if has_callbacks_flag && !in_transaction {
+        rebind_callbacks(ctx.callback_context.clone()).await?;
+    }
 
     let rows = if in_transaction {
         let mut conn_guard = ctx.transaction_connection.lock().await;
@@ -132,53 +149,42 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
         )
         .await?
     } else if has_callbacks_flag {
-        ensure_callback_connection(
+        let rows_result = {
+            let mut conn_guard = ctx.callback_connection.lock().await;
+            let conn = conn_guard
+                .0
+                .as_mut()
+                .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+            bind_and_fetch_all_on_connection(
+                &processed_query,
+                &processed_params,
+                conn,
+                &ctx.path,
+                ctx.include_query_in_errors,
+            )
+            .await
+        };
+        discard_callback_connection(&ctx.callback_context).await;
+        rows_result?
+    } else {
+        let mut conn_guard = lock_session_connection(
             &ctx.path,
             &ctx.pool,
-            &ctx.callback_connection,
+            &ctx.session_connection,
             &ctx.pragmas,
             &ctx.pool_size,
             &ctx.connection_timeout_secs,
             &ctx.idle_timeout_secs,
         )
         .await?;
-        let mut conn_guard = ctx.callback_connection.lock().await;
         let conn = conn_guard
             .0
             .as_mut()
-            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+            .ok_or_else(|| OperationalError::new_err("Session connection not available"))?;
         bind_and_fetch_all_on_connection(
             &processed_query,
             &processed_params,
             conn,
-            &ctx.path,
-            ctx.include_query_in_errors,
-        )
-        .await?
-    } else {
-        let pool_clone = get_or_create_pool(
-            &ctx.path,
-            &ctx.pool,
-            &ctx.pragmas,
-            &ctx.pool_size,
-            &ctx.connection_timeout_secs,
-            &ctx.idle_timeout_secs,
-        )
-        .await?;
-        let pool_size_val = *ctx.pool_size.lock().unwrap();
-        let timeout_val = *ctx.connection_timeout_secs.lock().unwrap();
-        let mut conn = acquire_with_pragmas(
-            &pool_clone,
-            &ctx.pragmas,
-            &ctx.path,
-            pool_size_val,
-            timeout_val,
-        )
-        .await?;
-        bind_and_fetch_all_on_connection(
-            &processed_query,
-            &processed_params,
-            &mut conn,
             &ctx.path,
             ctx.include_query_in_errors,
         )
@@ -250,8 +256,10 @@ pub(crate) struct Cursor {
     // Transaction and callback state for proper connection priority
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
     pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
+    pub(crate) session_connection: SessionConnectionSlot,
     pub(crate) callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
+    pub(crate) callback_connection_required: Arc<StdMutex<bool>>,
+    pub(crate) callback_context: CallbackContext,
     pub(crate) user_functions: UserFunctions,
     pub(crate) user_aggregates: UserAggregates,
     pub(crate) user_collations: UserCollations,
@@ -269,6 +277,7 @@ pub(crate) struct Cursor {
     pub(crate) lastrowid: Arc<StdMutex<i64>>,
     pub(crate) rowcount: Arc<StdMutex<i64>>,
     pub(crate) row_factory_override: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) cursor_closed: Arc<StdMutex<bool>>,
     pub(crate) closed: Arc<StdMutex<bool>>,
 }
 
@@ -292,8 +301,10 @@ impl Cursor {
             text_factory: Arc::clone(&self.text_factory),
             transaction_state: Arc::clone(&self.transaction_state),
             transaction_connection: Arc::clone(&self.transaction_connection),
+            session_connection: self.session_connection.clone(),
             callback_connection: Arc::clone(&self.callback_connection),
-            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            callback_connection_required: Arc::clone(&self.callback_connection_required),
+            callback_context: self.callback_context.clone(),
             user_functions: Arc::clone(&self.user_functions),
             user_aggregates: Arc::clone(&self.user_aggregates),
             user_collations: Arc::clone(&self.user_collations),
@@ -303,6 +314,7 @@ impl Cursor {
             description: Arc::clone(&self.description),
             pending_description: Arc::clone(&self.pending_description),
             row_factory_override: Arc::clone(&self.row_factory_override),
+            cursor_closed: Arc::clone(&self.cursor_closed),
             adapters: Arc::clone(&self.adapters),
             converters: Arc::clone(&self.converters),
             include_query_in_errors: *self.include_query_in_errors.lock().unwrap(),
@@ -345,6 +357,11 @@ impl Cursor {
         query: String,
         parameters: Vec<Vec<Py<PyAny>>>,
     ) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         self.query = query.clone();
         Python::attach(|py| {
             let conn = self.connection.bind(py);
@@ -453,6 +470,11 @@ impl Cursor {
 
     /// Fetch one row.
     fn fetchone(&self) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
@@ -501,6 +523,11 @@ impl Cursor {
 
     /// Fetch all rows.
     fn fetchall(&self) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
@@ -578,6 +605,11 @@ impl Cursor {
     /// When size is omitted, uses cursor.arraysize (default 1).
     #[pyo3(signature = (size = None))]
     fn fetchmany(&self, size: Option<usize>) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
@@ -635,6 +667,7 @@ impl Cursor {
 
     /// Close the cursor (Phase 3.9). Clears cached results and resets state.
     fn close(&self) -> PyResult<Py<PyAny>> {
+        *self.cursor_closed.lock().unwrap() = true;
         let results = Arc::clone(&self.results);
         let current_index = Arc::clone(&self.current_index);
         let description = Arc::clone(&self.description);
@@ -681,6 +714,11 @@ impl Cursor {
 
     /// Execute a script containing multiple SQL statements separated by semicolons.
     fn executescript(&self, script: String) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
@@ -689,8 +727,10 @@ impl Cursor {
         let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        let session_connection = self.session_connection.clone();
         let callback_connection = Arc::clone(&self.callback_connection);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self.callback_connection_required);
+        let callback_context = self.callback_context.clone();
         let user_functions = Arc::clone(&self.user_functions);
         let user_aggregates = Arc::clone(&self.user_aggregates);
         let user_collations = Arc::clone(&self.user_collations);
@@ -772,7 +812,7 @@ impl Cursor {
                 };
 
                 let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -780,6 +820,11 @@ impl Cursor {
                     &authorizer_callback,
                     &progress_handler,
                 );
+                let _callback_operation_guard = if has_callbacks_flag {
+                    Some(callback_context.callback_operation_lock.lock().await)
+                } else {
+                    None
+                };
 
                 // Execute each statement sequentially
                 for statement in statements {
@@ -797,59 +842,41 @@ impl Cursor {
                         )
                         .await?;
                     } else if has_callbacks_flag {
-                        ensure_callback_connection(
+                        rebind_callbacks(callback_context.clone()).await?;
+                        let result = {
+                            let mut conn_guard = callback_connection.lock().await;
+                            let conn = conn_guard.0.as_mut().ok_or_else(|| {
+                                OperationalError::new_err("Callback connection not available")
+                            })?;
+                            bind_and_execute_on_connection(
+                                &statement,
+                                &[],
+                                conn,
+                                &path,
+                                include_query_in_errors,
+                            )
+                            .await
+                        };
+                        discard_callback_connection(&callback_context).await;
+                        result?;
+                    } else {
+                        let mut conn_guard = lock_session_connection(
                             &path,
                             &pool,
-                            &callback_connection,
+                            &session_connection,
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
                             &idle_timeout_secs,
                         )
                         .await?;
-
-                        let mut conn_guard = callback_connection.lock().await;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Callback connection not available")
+                            OperationalError::new_err("Session connection not available")
                         })?;
                         bind_and_execute_on_connection(
                             &statement,
                             &[],
                             conn,
-                            &path,
-                            include_query_in_errors,
-                        )
-                        .await?;
-                    } else {
-                        let pool_clone = get_or_create_pool(
-                            &path,
-                            &pool,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut conn = acquire_with_pragmas(
-                            &pool_clone,
-                            &pragmas,
-                            &path,
-                            pool_size_val,
-                            timeout_val,
-                        )
-                        .await?;
-                        bind_and_execute_on_connection(
-                            &statement,
-                            &[],
-                            &mut conn,
                             &path,
                             include_query_in_errors,
                         )

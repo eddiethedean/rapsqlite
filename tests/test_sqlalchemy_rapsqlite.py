@@ -269,6 +269,16 @@ async def test_core_zero_row_select_result(
 
 
 @pytest.mark.asyncio
+async def test_core_result_preserves_select_alias(
+    async_engine_sqlite: AsyncEngine,
+) -> None:
+    async with async_engine_sqlite.connect() as conn:
+        result = await conn.execute(text("SELECT 123 AS meaningful_name"))
+        assert list(result.keys()) == ["meaningful_name"]
+        assert result.fetchone() == (123,)
+
+
+@pytest.mark.asyncio
 @pytest.mark.sqlalchemy_core
 @pytest.mark.edge_case
 async def test_core_scalars_first_and_one_or_none_zero_rows(
