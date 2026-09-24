@@ -1683,6 +1683,12 @@ async def test_named_parameters_dollar_sqlite_suffixes(test_db):
         )
         assert rows == [[42, "ok"]]
 
+        rows = await db.fetch_all(
+            "SELECT $value::, $other::::part, $dollar$name",
+            {"value::": 1, "other::::part": 2, "dollar$name": 3},
+        )
+        assert rows == [[1, 2, 3]]
+
 
 @pytest.mark.asyncio
 async def test_positional_parameters_question(test_db):

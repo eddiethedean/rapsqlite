@@ -64,7 +64,9 @@ pub(crate) fn find_named_parameter_placeholders(query: &str) -> Vec<(usize, usiz
         }
 
         let first_name_char = |candidate: char| {
-            candidate.is_alphabetic() || candidate == '_' || (ch == '$' && candidate.is_numeric())
+            candidate.is_alphabetic()
+                || candidate == '_'
+                || (ch == '$' && (candidate.is_numeric() || candidate == '$'))
         };
         let is_named_prefix = (ch == ':' || ch == '@' || ch == '$')
             && i + 1 < query_chars.len()
@@ -76,7 +78,7 @@ pub(crate) fn find_named_parameter_placeholders(query: &str) -> Vec<(usize, usiz
             let mut name = String::new();
             while i < query_chars.len() {
                 let c = query_chars[i].1;
-                if c.is_alphanumeric() || c == '_' {
+                if c.is_alphanumeric() || c == '_' || (ch == '$' && c == '$') {
                     name.push(c);
                     i += 1;
                 } else {
@@ -96,26 +98,17 @@ pub(crate) fn find_named_parameter_placeholders(query: &str) -> Vec<(usize, usiz
                     {
                         break;
                     }
-                    let component_start = i;
-                    let name_len_before_component = name.len();
                     name.push(':');
                     name.push(':');
                     i += 2;
-                    let component_name_start = i;
                     while i < query_chars.len() {
                         let c = query_chars[i].1;
-                        if c.is_alphanumeric() || c == '_' {
+                        if c.is_alphanumeric() || c == '_' || c == '$' {
                             name.push(c);
                             i += 1;
                         } else {
                             break;
                         }
-                    }
-                    if i == component_name_start {
-                        // Do not consume an incomplete `::` component.
-                        name.truncate(name_len_before_component);
-                        i = component_start;
-                        break;
                     }
                 }
 
@@ -127,6 +120,9 @@ pub(crate) fn find_named_parameter_placeholders(query: &str) -> Vec<(usize, usiz
                     let mut closed = false;
                     while i < query_chars.len() {
                         let c = query_chars[i].1;
+                        if c.is_whitespace() {
+                            break;
+                        }
                         name.push(c);
                         i += 1;
                         if c == ')' {
@@ -317,6 +313,19 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].2, "value::suffix(extra)");
         assert_eq!(&query[out[0].0..out[0].1], "$value::suffix(extra)");
+    }
+
+    #[test]
+    fn test_find_named_placeholders_dollar_empty_components_and_dollar_chars() {
+        let query = "SELECT $value::, $other::::part, $dollar$name FROM t";
+        let out = find_named_parameter_placeholders(query);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].2, "value::");
+        assert_eq!(out[1].2, "other::::part");
+        assert_eq!(out[2].2, "dollar$name");
+        assert_eq!(&query[out[0].0..out[0].1], "$value::");
+        assert_eq!(&query[out[1].0..out[1].1], "$other::::part");
+        assert_eq!(&query[out[2].0..out[2].1], "$dollar$name");
     }
 
     #[test]
