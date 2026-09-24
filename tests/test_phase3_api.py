@@ -1,5 +1,9 @@
 """Tests for Phase 3.9 API additions: execute_fetchall, execute_insert, Cursor props, close."""
 
+import asyncio
+import threading
+import time
+
 import pytest
 from conftest import skip_if_no_phase3
 
@@ -421,6 +425,60 @@ async def test_interrupt(test_db):
         await db.create_function("f", 1, lambda x: x)
         await db.interrupt()
         await db.create_function("f", 1, None)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_after_callback_transaction_context(test_db):
+    """A completed callback transaction does not leave a stale interrupt handle."""
+    async with connect(test_db) as db:
+        await db.create_function("identity", 1, lambda value: value)
+        async with db.transaction():
+            pass
+        await db.interrupt()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_after_callback_raw_transaction_sql(test_db):
+    """Raw callback-backed BEGIN/COMMIT does not leave a stale interrupt handle."""
+    async with connect(test_db) as db:
+        await db.create_function("identity", 1, lambda value: value)
+        await db.execute("BEGIN")
+        await db.execute("COMMIT")
+        await db.interrupt()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_transaction", [False, True])
+async def test_interrupt_active_callback_query(test_db, in_transaction):
+    """interrupt() reaches callback-backed queries without waiting on their slot lock."""
+    started = threading.Event()
+
+    def slow(value):
+        started.set()
+        time.sleep(0.001)
+        return value
+
+    query = """
+        WITH RECURSIVE n(x) AS (
+            VALUES (1) UNION ALL SELECT x + 1 FROM n WHERE x < 100000
+        )
+        SELECT slow(x) FROM n
+    """
+
+    async with connect(test_db) as db:
+        await db.create_function("slow", 1, slow)
+        if in_transaction:
+            await db.begin()
+
+        task = asyncio.create_task(db.fetch_all(query))
+        assert await asyncio.to_thread(started.wait, 5)
+        await db.interrupt()
+
+        with pytest.raises(Exception, match="interrupted"):
+            await task
+
+        if in_transaction:
+            await db.rollback()
 
 
 @pytest.mark.asyncio

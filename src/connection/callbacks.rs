@@ -2,12 +2,13 @@
 //! set_trace_callback, set_authorizer, set_progress_handler). Single responsibility: manage
 //! callback connection and SQLite C API for these operations.
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::sync::Mutex;
 
 use libsqlite3_sys::{
     sqlite3_aggregate_context, sqlite3_context, sqlite3_create_collation_v2,
-    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free,
+    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free, sqlite3_interrupt,
     sqlite3_load_extension, sqlite3_progress_handler, sqlite3_result_error, sqlite3_result_null,
     sqlite3_set_authorizer, sqlite3_user_data, sqlite3_value, SQLITE_DENY, SQLITE_DETERMINISTIC,
     SQLITE_OK, SQLITE_UTF8,
@@ -54,6 +55,77 @@ pub(crate) struct CallbackContext {
     pub skip_release: bool,
 }
 
+struct ActiveHandle {
+    raw_db: usize,
+    active: StdMutex<bool>,
+}
+
+impl ActiveHandle {
+    fn new(raw_db: usize) -> Self {
+        Self {
+            raw_db,
+            active: StdMutex::new(true),
+        }
+    }
+
+    fn deactivate(&self) {
+        if let Ok(mut active) = self.active.lock() {
+            *active = false;
+        }
+    }
+
+    fn interrupt(&self) -> bool {
+        let Ok(active) = self.active.lock() else {
+            return false;
+        };
+        if !*active {
+            return false;
+        }
+        unsafe { sqlite3_interrupt(self.raw_db as *mut libsqlite3_sys::sqlite3) };
+        true
+    }
+}
+
+fn active_handles() -> &'static StdMutex<HashMap<usize, Arc<ActiveHandle>>> {
+    static ACTIVE_HANDLES: OnceLock<StdMutex<HashMap<usize, Arc<ActiveHandle>>>> = OnceLock::new();
+    ACTIVE_HANDLES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn callback_slot_key(slot: &Arc<Mutex<PoolConnectionSlot>>) -> usize {
+    Arc::as_ptr(slot) as usize
+}
+
+/// Interrupt a callback operation associated with a slot, if one is active.
+/// The per-handle lock synchronizes this call with connection teardown.
+pub(crate) fn interrupt_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>) -> bool {
+    let handle = active_handles()
+        .lock()
+        .ok()
+        .and_then(|handles| handles.get(&callback_slot_key(slot)).cloned());
+    handle.is_some_and(|handle| handle.interrupt())
+}
+
+fn register_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>, raw_db: usize) {
+    let new_handle = Arc::new(ActiveHandle::new(raw_db));
+    let old_handle = active_handles()
+        .lock()
+        .ok()
+        .and_then(|mut handles| handles.insert(callback_slot_key(slot), Arc::clone(&new_handle)));
+    if let Some(old_handle) = old_handle {
+        old_handle.deactivate();
+    }
+}
+
+pub(crate) fn clear_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>) {
+    let old_handle = active_handles()
+        .lock()
+        .ok()
+        .and_then(|mut handles| handles.remove(&callback_slot_key(slot)));
+    if let Some(old_handle) = old_handle {
+        old_handle.deactivate();
+    }
+}
+
 /// Destroy a callback-bound physical connection before returning it to the
 /// pool. SQLite callbacks are handle-local; closing the handle prevents them
 /// from leaking into a different logical Connection that reuses the pool.
@@ -61,6 +133,7 @@ pub(crate) async fn discard_callback_connection(ctx: &CallbackContext) {
     if ctx.skip_release {
         return;
     }
+    clear_active_handle(&ctx.callback_connection);
     let mut guard = ctx.callback_connection.lock().await;
     if let Some(conn) = guard.0.as_mut() {
         conn.close_on_drop();
@@ -1492,6 +1565,11 @@ async fn rebind_callbacks_inner(ctx: CallbackContext) -> Result<(), PyErr> {
             "Failed to configure extension loading: SQLite error code {result}"
         )));
     }
+
+    // Keep the handle address available while callers execute on this checked-out
+    // callback connection. sqlite3_interrupt() may be called concurrently without
+    // waiting for the callback-connection mutex held by that operation.
+    register_active_handle(&ctx.callback_connection, raw_db as usize);
 
     Ok(())
 }
