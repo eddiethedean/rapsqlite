@@ -2894,7 +2894,7 @@ impl Connection {
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let session_connection = Arc::clone(&self_.session_connection);
+        let session_connection = self_.session_connection.clone();
         let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);

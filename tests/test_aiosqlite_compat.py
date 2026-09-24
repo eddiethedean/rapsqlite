@@ -339,6 +339,56 @@ async def test_set_progress_handler_callback_n_order(test_db):
 
 
 @pytest.mark.asyncio
+async def test_clear_progress_handler_during_transaction(test_db):
+    """Clearing a progress handler unregisters it from the transaction handle."""
+    query = """
+        WITH RECURSIVE n(x) AS (
+            VALUES (1) UNION ALL SELECT x + 1 FROM n WHERE x < 5000
+        )
+        SELECT sum(x) FROM n
+    """
+    async with connect(test_db) as db:
+        calls = []
+
+        def progress_callback():
+            calls.append(1)
+            return True
+
+        await db.set_progress_handler(1, progress_callback)
+        await db.begin()
+        await db.fetch_all(query)
+        assert calls
+
+        calls.clear()
+        await db.set_progress_handler(1, None)
+        await db.fetch_all(query)
+        assert calls == []
+        await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_clear_authorizer_during_transaction(test_db):
+    """Clearing an authorizer unregisters it from the transaction handle."""
+    async with connect(test_db) as db:
+        calls = []
+
+        def authorizer(action, arg1, arg2, arg3, arg4):
+            calls.append((action, arg1, arg2, arg3, arg4))
+            return 0  # SQLITE_OK
+
+        await db.set_authorizer(authorizer)
+        await db.begin()
+        await db.execute("CREATE TABLE before_clear (value INTEGER)")
+        assert calls
+
+        calls.clear()
+        await db.set_authorizer(None)
+        await db.execute("CREATE TABLE after_clear (value INTEGER)")
+        assert calls == []
+        await db.rollback()
+
+
+@pytest.mark.asyncio
 async def test_create_function(test_db):
     """Test custom SQL functions."""
     async with connect(test_db) as db:
