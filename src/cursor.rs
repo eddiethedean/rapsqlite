@@ -60,6 +60,7 @@ struct CursorFetchContext {
     cursor_closed: Arc<StdMutex<bool>>,
     adapters: Adapters,
     converters: Converters,
+    include_query_in_errors: bool,
     closed: Arc<StdMutex<bool>>,
 }
 
@@ -81,52 +82,35 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
         *ctx.results.lock().unwrap() = Some(Vec::new());
         return Ok(());
     }
-    let (processed_query, processed_params) = if let (Some(q), Some(p)) =
-        (ctx.processed_query.as_ref(), ctx.processed_params.as_ref())
-    {
-        (q.clone(), p.clone())
-    } else {
-        #[allow(deprecated)]
-        Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
-            let params_guard = ctx.parameters.lock().unwrap();
-            if let Some(ref params_py) = *params_guard {
-                let params_bound = params_py.bind(py);
-                if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                    let (proc_query, param_values) =
-                        process_named_parameters(py, &ctx.query, dict, Some(&ctx.adapters))?;
-                    if param_values.is_empty()
-                        && (ctx.query.contains(':')
-                            || ctx.query.contains('@')
-                            || ctx.query.contains('$'))
-                    {
-                        return Err(ProgrammingError::new_err(format!(
-                            "Named parameters found in query but none extracted. Query: '{}', Processed: '{}'",
-                            ctx.query, proc_query
-                        )));
+    let (processed_query, processed_params) =
+        if let (Some(q), Some(p)) = (ctx.processed_query.as_ref(), ctx.processed_params.as_ref()) {
+            (q.clone(), p.clone())
+        } else {
+            #[allow(deprecated)]
+            Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
+                let params_guard = ctx.parameters.lock().unwrap();
+                if let Some(ref params_py) = *params_guard {
+                    let params_bound = params_py.bind(py);
+                    if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
+                        let (proc_query, param_values) =
+                            process_named_parameters(py, &ctx.query, dict, Some(&ctx.adapters))?;
+                        return Ok((proc_query, param_values));
                     }
-                    if !proc_query.contains('?') && ctx.query.contains(':') {
-                        return Err(ProgrammingError::new_err(format!(
-                            "Query had named parameters but processed query has no ? placeholders. Original: '{}', Processed: '{}'",
-                            ctx.query, proc_query
-                        )));
+                    if let Ok(list) = params_bound.cast::<PyList>() {
+                        let param_values =
+                            process_positional_parameters(py, list, Some(&ctx.adapters))?;
+                        return Ok((ctx.query.clone(), param_values));
                     }
-                    return Ok((proc_query, param_values));
+                    let param = SqliteParam::apply_adapters_then_from_py(
+                        py,
+                        params_bound,
+                        Some(&ctx.adapters),
+                    )?;
+                    return Ok((ctx.query.clone(), vec![param]));
                 }
-                if let Ok(list) = params_bound.cast::<PyList>() {
-                    let param_values =
-                        process_positional_parameters(py, list, Some(&ctx.adapters))?;
-                    return Ok((ctx.query.clone(), param_values));
-                }
-                let param = SqliteParam::apply_adapters_then_from_py(
-                    py,
-                    params_bound,
-                    Some(&ctx.adapters),
-                )?;
-                return Ok((ctx.query.clone(), vec![param]));
-            }
-            Ok((ctx.query.clone(), Vec::new()))
-        })?
-    };
+                Ok((ctx.query.clone(), Vec::new()))
+            })?
+        };
 
     let in_transaction = {
         let g = ctx.transaction_state.lock().await;
@@ -156,8 +140,14 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
             .0
             .as_mut()
             .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
-        bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &ctx.path)
-            .await?
+        bind_and_fetch_all_on_connection(
+            &processed_query,
+            &processed_params,
+            conn,
+            &ctx.path,
+            ctx.include_query_in_errors,
+        )
+        .await?
     } else if has_callbacks_flag {
         let rows_result = {
             let mut conn_guard = ctx.callback_connection.lock().await;
@@ -165,8 +155,14 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
                 .0
                 .as_mut()
                 .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-            bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &ctx.path)
-                .await
+            bind_and_fetch_all_on_connection(
+                &processed_query,
+                &processed_params,
+                conn,
+                &ctx.path,
+                ctx.include_query_in_errors,
+            )
+            .await
         };
         discard_callback_connection(&ctx.callback_context).await;
         rows_result?
@@ -185,8 +181,14 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
             .0
             .as_mut()
             .ok_or_else(|| OperationalError::new_err("Session connection not available"))?;
-        bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &ctx.path)
-            .await?
+        bind_and_fetch_all_on_connection(
+            &processed_query,
+            &processed_params,
+            conn,
+            &ctx.path,
+            ctx.include_query_in_errors,
+        )
+        .await?
     };
 
     #[allow(deprecated)]
@@ -263,6 +265,7 @@ pub(crate) struct Cursor {
     pub(crate) user_collations: UserCollations,
     pub(crate) adapters: Adapters,
     pub(crate) converters: Converters,
+    pub(crate) include_query_in_errors: Arc<StdMutex<bool>>,
     pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub(crate) progress_handler: ProgressHandler,
@@ -314,6 +317,7 @@ impl Cursor {
             cursor_closed: Arc::clone(&self.cursor_closed),
             adapters: Arc::clone(&self.adapters),
             converters: Arc::clone(&self.converters),
+            include_query_in_errors: *self.include_query_in_errors.lock().unwrap(),
             closed: Arc::clone(&self.closed),
         }
     }
@@ -734,6 +738,7 @@ impl Cursor {
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         let closed = Arc::clone(&self.closed);
+        let include_query_in_errors = *self.include_query_in_errors.lock().unwrap();
 
         Python::attach(|py| {
             let future = async move {
@@ -828,7 +833,14 @@ impl Cursor {
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
-                        bind_and_execute_on_connection(&statement, &[], conn, &path).await?;
+                        bind_and_execute_on_connection(
+                            &statement,
+                            &[],
+                            conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await?;
                     } else if has_callbacks_flag {
                         rebind_callbacks(callback_context.clone()).await?;
                         let result = {
@@ -836,7 +848,14 @@ impl Cursor {
                             let conn = conn_guard.0.as_mut().ok_or_else(|| {
                                 OperationalError::new_err("Callback connection not available")
                             })?;
-                            bind_and_execute_on_connection(&statement, &[], conn, &path).await
+                            bind_and_execute_on_connection(
+                                &statement,
+                                &[],
+                                conn,
+                                &path,
+                                include_query_in_errors,
+                            )
+                            .await
                         };
                         discard_callback_connection(&callback_context).await;
                         result?;
@@ -854,7 +873,14 @@ impl Cursor {
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
-                        bind_and_execute_on_connection(&statement, &[], conn, &path).await?;
+                        bind_and_execute_on_connection(
+                            &statement,
+                            &[],
+                            conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await?;
                     }
                 }
 

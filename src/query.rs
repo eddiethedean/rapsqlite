@@ -193,6 +193,7 @@ pub(crate) async fn bind_and_execute_on_connection(
     params: &[SqliteParam],
     conn: &mut PoolConnection<sqlx::Sqlite>,
     path: &str,
+    include_query: bool,
 ) -> Result<sqlx::sqlite::SqliteQueryResult, PyErr> {
     // Use &mut **conn to access the underlying connection that implements Executor
     let result = match params.len() {
@@ -225,7 +226,7 @@ pub(crate) async fn bind_and_execute_on_connection(
         }
     };
 
-    result.map_err(|e| crate::map_sqlx_error(e, path, query))
+    result.map_err(|e| crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query))
 }
 
 /// Helper to bind multiple parameters to a query and execute on a connection.
@@ -244,13 +245,15 @@ pub(crate) async fn bind_and_fetch_all_on_connection(
     params: &[SqliteParam],
     conn: &mut PoolConnection<sqlx::Sqlite>,
     path: &str,
+    include_query: bool,
 ) -> Result<Vec<sqlx::sqlite::SqliteRow>, PyErr> {
-    let query_builder =
-        build_bound_query(query, params).map_err(|e| crate::map_sqlx_error(e, path, query))?;
+    let query_builder = build_bound_query(query, params).map_err(|e| {
+        crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query)
+    })?;
     query_builder
         .fetch_all(&mut **conn)
         .await
-        .map_err(|e| crate::map_sqlx_error(e, path, query))
+        .map_err(|e| crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query))
 }
 
 /// Helper to bind parameters and fetch one row on a specific connection.
@@ -259,13 +262,15 @@ pub(crate) async fn bind_and_fetch_one_on_connection(
     params: &[SqliteParam],
     conn: &mut PoolConnection<sqlx::Sqlite>,
     path: &str,
+    include_query: bool,
 ) -> Result<sqlx::sqlite::SqliteRow, PyErr> {
-    let query_builder =
-        build_bound_query(query, params).map_err(|e| crate::map_sqlx_error(e, path, query))?;
+    let query_builder = build_bound_query(query, params).map_err(|e| {
+        crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query)
+    })?;
     query_builder
         .fetch_one(&mut **conn)
         .await
-        .map_err(|e| crate::map_sqlx_error(e, path, query))
+        .map_err(|e| crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query))
 }
 
 /// Helper to bind parameters and fetch optional row on a specific connection.
@@ -274,11 +279,13 @@ pub(crate) async fn bind_and_fetch_optional_on_connection(
     params: &[SqliteParam],
     conn: &mut PoolConnection<sqlx::Sqlite>,
     path: &str,
+    include_query: bool,
 ) -> Result<Option<sqlx::sqlite::SqliteRow>, PyErr> {
-    let query_builder =
-        build_bound_query(query, params).map_err(|e| crate::map_sqlx_error(e, path, query))?;
+    let query_builder = build_bound_query(query, params).map_err(|e| {
+        crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query)
+    })?;
     query_builder
         .fetch_optional(&mut **conn)
         .await
-        .map_err(|e| crate::map_sqlx_error(e, path, query))
+        .map_err(|e| crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query))
 }

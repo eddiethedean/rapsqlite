@@ -9,21 +9,70 @@ use crate::types::{Adapters, SqliteParam};
 /// Returns (start_byte, end_byte, name) for each :name, @name, or $name.
 pub(crate) fn find_named_parameter_placeholders(query: &str) -> Vec<(usize, usize, String)> {
     let mut param_placeholders: Vec<(usize, usize, String)> = Vec::new();
-    let query_chars: Vec<char> = query.chars().collect();
+    let query_chars: Vec<(usize, char)> = query.char_indices().collect();
     let mut i = 0;
 
     while i < query_chars.len() {
-        let ch = query_chars[i];
+        let (byte_index, ch) = query_chars[i];
+
+        // Ignore text that SQLite treats as quoted content or a comment. Named
+        // parameter-looking text there is literal SQL, not a bind parameter.
+        if ch == '\'' || ch == '"' || ch == '`' {
+            let quote = ch;
+            i += 1;
+            while i < query_chars.len() {
+                if query_chars[i].1 == quote {
+                    // SQL escapes quote characters by doubling them.
+                    if i + 1 < query_chars.len() && query_chars[i + 1].1 == quote {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '[' {
+            i += 1;
+            while i < query_chars.len() {
+                if query_chars[i].1 == ']' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '-' && i + 1 < query_chars.len() && query_chars[i + 1].1 == '-' {
+            i += 2;
+            while i < query_chars.len() && query_chars[i].1 != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '/' && i + 1 < query_chars.len() && query_chars[i + 1].1 == '*' {
+            i += 2;
+            while i + 1 < query_chars.len()
+                && !(query_chars[i].1 == '*' && query_chars[i + 1].1 == '/')
+            {
+                i += 1;
+            }
+            i = (i + 2).min(query_chars.len());
+            continue;
+        }
+
         let is_named_prefix = (ch == ':' || ch == '@' || ch == '$')
             && i + 1 < query_chars.len()
-            && (query_chars[i + 1].is_alphabetic() || query_chars[i + 1] == '_');
+            && (query_chars[i + 1].1.is_alphabetic() || query_chars[i + 1].1 == '_');
 
         if is_named_prefix {
-            let start = i;
+            let start = byte_index;
             i += 1;
             let mut name = String::new();
             while i < query_chars.len() {
-                let c = query_chars[i];
+                let c = query_chars[i].1;
                 if c.is_alphanumeric() || c == '_' {
                     name.push(c);
                     i += 1;
@@ -32,7 +81,11 @@ pub(crate) fn find_named_parameter_placeholders(query: &str) -> Vec<(usize, usiz
                 }
             }
             if !name.is_empty() {
-                param_placeholders.push((start, i, name));
+                let end = query_chars
+                    .get(i)
+                    .map(|(byte_index, _)| *byte_index)
+                    .unwrap_or(query.len());
+                param_placeholders.push((start, end, name));
             }
         } else {
             i += 1;

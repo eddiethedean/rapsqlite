@@ -72,6 +72,7 @@ impl ExecuteContextManager {
             let is_select = slf.borrow(py).is_select;
             let returns_result_rows = slf.borrow(py).returns_result_rows;
             let state = slf.borrow(py).state.clone();
+            let include_query_in_errors = *state.include_query_in_errors.lock().unwrap();
             let callback_context = state.callback_context.clone();
             let path = state.path.clone();
             let pool = Arc::clone(&state.pool);
@@ -202,13 +203,19 @@ impl ExecuteContextManager {
                                 &param_values,
                                 conn,
                                 &path,
+                                include_query_in_errors,
                             )
                             .await?;
                             DmlOutcome::Fetched(rows)
                         } else {
-                            let r =
-                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
-                                    .await?;
+                            let r = bind_and_execute_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                                include_query_in_errors,
+                            )
+                            .await?;
                             DmlOutcome::Executed(r)
                         }
                     } else if has_callbacks_flag && is_begin_query(&query) {
@@ -229,9 +236,14 @@ impl ExecuteContextManager {
                         let mut conn = conn_guard.0.take().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
-                        let result =
-                            bind_and_execute_on_connection(&query, &param_values, &mut conn, &path)
-                                .await?;
+                        let result = bind_and_execute_on_connection(
+                            &query,
+                            &param_values,
+                            &mut conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await?;
                         {
                             let mut g = transaction_state.lock().await;
                             *g = TransactionState::Active;
@@ -290,13 +302,19 @@ impl ExecuteContextManager {
                                 &param_values,
                                 conn,
                                 &path,
+                                include_query_in_errors,
                             )
                             .await?;
                             DmlOutcome::Fetched(rows)
                         } else {
-                            let r =
-                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
-                                    .await?;
+                            let r = bind_and_execute_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                                include_query_in_errors,
+                            )
+                            .await?;
                             DmlOutcome::Executed(r)
                         }
                     } else if has_callbacks_flag {
@@ -305,13 +323,25 @@ impl ExecuteContextManager {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         let outcome_result = if use_fetch_for_returning {
-                            bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
-                                .await
-                                .map(DmlOutcome::Fetched)
+                            bind_and_fetch_all_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                                include_query_in_errors,
+                            )
+                            .await
+                            .map(DmlOutcome::Fetched)
                         } else {
-                            bind_and_execute_on_connection(&query, &param_values, conn, &path)
-                                .await
-                                .map(DmlOutcome::Executed)
+                            bind_and_execute_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                                include_query_in_errors,
+                            )
+                            .await
+                            .map(DmlOutcome::Executed)
                         };
                         drop(conn_guard);
                         crate::connection::discard_callback_connection(&callback_context).await;
@@ -337,13 +367,19 @@ impl ExecuteContextManager {
                                 &param_values,
                                 conn,
                                 &path,
+                                include_query_in_errors,
                             )
                             .await?;
                             DmlOutcome::Fetched(rows)
                         } else {
-                            let r =
-                                bind_and_execute_on_connection(&query, &param_values, conn, &path)
-                                    .await?;
+                            let r = bind_and_execute_on_connection(
+                                &query,
+                                &param_values,
+                                conn,
+                                &path,
+                                include_query_in_errors,
+                            )
+                            .await?;
                             DmlOutcome::Executed(r)
                         }
                     } else {
@@ -388,6 +424,7 @@ impl ExecuteContextManager {
                                 &param_values,
                                 &mut conn,
                                 &path,
+                                include_query_in_errors,
                             )
                             .await?;
                             DmlOutcome::Fetched(rows)
@@ -397,6 +434,7 @@ impl ExecuteContextManager {
                                 &param_values,
                                 &mut conn,
                                 &path,
+                                include_query_in_errors,
                             )
                             .await?;
                             DmlOutcome::Executed(r)
@@ -570,15 +608,27 @@ impl ExecuteContextManager {
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
-                        bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
+                        bind_and_fetch_all_on_connection(
+                            &query,
+                            &param_values,
+                            conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await?
                     } else if has_callbacks_flag {
                         let mut conn_guard = callback_connection.lock().await;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
-                        let rows_result =
-                            bind_and_fetch_all_on_connection(&query, &param_values, conn, &path)
-                                .await;
+                        let rows_result = bind_and_fetch_all_on_connection(
+                            &query,
+                            &param_values,
+                            conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await;
                         drop(conn_guard);
                         crate::connection::discard_callback_connection(&callback_context).await;
                         rows_result?
@@ -596,7 +646,14 @@ impl ExecuteContextManager {
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
-                        bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
+                        bind_and_fetch_all_on_connection(
+                            &query,
+                            &param_values,
+                            conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await?
                     };
                     #[allow(deprecated)]
                     let _ = Python::with_gil(|py| -> PyResult<()> {

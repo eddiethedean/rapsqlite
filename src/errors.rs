@@ -10,8 +10,9 @@ use crate::exceptions::{DatabaseError, IntegrityError, OperationalError, Program
 /// This is a best-effort sanitization. For production use with highly sensitive data,
 /// consider setting `include_query_in_errors=False` to exclude queries entirely.
 fn sanitize_query(query: &str) -> String {
-    let mut sanitized = query.to_string();
-    let query_lower = query.to_lowercase();
+    // ASCII lowercasing preserves UTF-8 byte lengths, so offsets still refer to
+    // the original query even when it contains non-ASCII text.
+    let query_lower = query.to_ascii_lowercase();
 
     // Simple pattern matching for common sensitive fields
     // Note: This is basic sanitization - full regex would be better but requires
@@ -29,56 +30,65 @@ fn sanitize_query(query: &str) -> String {
         "auth-token",
     ];
 
-    for keyword in sensitive_keywords.iter() {
-        // Find the keyword in the query (case-insensitive)
-        if let Some(pos) = query_lower.find(keyword) {
-            // Try to find the value after '=' and replace it
-            // This is a simplified approach - full regex would be more accurate
-            if let Some(eq_pos) = query[pos..].find('=') {
-                let start = pos + eq_pos + 1;
-                // Skip whitespace after '='
-                let start = query[start..]
-                    .find(|c: char| !c.is_whitespace())
-                    .map(|i| start + i)
-                    .unwrap_or(start);
+    let mut ranges = Vec::new();
+    for keyword in sensitive_keywords {
+        let mut search_from = 0;
+        while let Some(relative_pos) = query_lower[search_from..].find(keyword) {
+            let pos = search_from + relative_pos;
+            let after_keyword = pos + keyword.len();
+            if let Some(relative_eq) = query[after_keyword..].find('=') {
+                let after_eq = after_keyword + relative_eq + 1;
+                let start = query[after_eq..]
+                    .char_indices()
+                    .find(|(_, ch)| !ch.is_whitespace())
+                    .map(|(offset, _)| after_eq + offset)
+                    .unwrap_or(query.len());
 
-                let end = if start < query.len() {
-                    // Use unwrap_or to handle empty slice edge case
-                    let first = match query[start..].chars().next() {
-                        Some(c) => c,
-                        None => {
-                            // Empty slice, nothing to sanitize
-                            continue;
-                        }
-                    };
-                    if first == '\'' || first == '"' {
-                        // Quoted value: find matching closing quote
-                        let rest = &query[start + first.len_utf8()..];
-                        if let Some(close) = rest.find(first) {
-                            start + first.len_utf8() + close + first.len_utf8()
-                        } else {
-                            query.len()
+                if start < query.len() {
+                    let first = query[start..].chars().next().unwrap();
+                    let end = if first == '\'' || first == '"' {
+                        let rest_start = start + first.len_utf8();
+                        let mut scan_from = rest_start;
+                        loop {
+                            let Some(relative_quote) = query[scan_from..].find(first) else {
+                                break query.len();
+                            };
+                            let quote_at = scan_from + relative_quote;
+                            let after_quote = quote_at + first.len_utf8();
+                            if query[after_quote..].starts_with(first) {
+                                // SQL escapes a quote inside a literal by doubling it.
+                                scan_from = after_quote + first.len_utf8();
+                            } else {
+                                break after_quote;
+                            }
                         }
                     } else {
-                        // Find the end of the value (space, comma, or end of string)
                         query[start..]
-                            .find(|c: char| {
-                                c == ' ' || c == ',' || c == ';' || c == '\n' || c == '\r'
-                            })
-                            .map(|i| start + i)
+                            .find(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';')
+                            .map(|offset| start + offset)
                             .unwrap_or(query.len())
+                    };
+                    if end > start {
+                        ranges.push((start, end));
                     }
-                } else {
-                    start
-                };
-
-                if end > start {
-                    sanitized.replace_range(start..end, "***");
                 }
             }
+            search_from = after_keyword;
         }
     }
 
+    ranges.sort_unstable();
+    let mut sanitized = String::with_capacity(query.len());
+    let mut copied_to = 0;
+    for (start, end) in ranges {
+        if start < copied_to {
+            continue;
+        }
+        sanitized.push_str(&query[copied_to..start]);
+        sanitized.push_str("***");
+        copied_to = end;
+    }
+    sanitized.push_str(&query[copied_to..]);
     sanitized
 }
 
@@ -91,6 +101,17 @@ pub(crate) fn map_sqlx_error(e: sqlx::Error, path: &str, query: &str) -> PyErr {
     // Always sanitize queries to remove sensitive information
     let sanitized_query = sanitize_query(query);
     map_sqlx_error_with_query_visibility(e, path, &sanitized_query, true)
+}
+
+/// Map sqlx error while respecting the connection's query visibility setting.
+pub(crate) fn map_sqlx_error_with_visibility(
+    e: sqlx::Error,
+    path: &str,
+    query: &str,
+    include_query: bool,
+) -> PyErr {
+    let sanitized_query = sanitize_query(query);
+    map_sqlx_error_with_query_visibility(e, path, &sanitized_query, include_query)
 }
 
 /// Map sqlx error to appropriate Python exception with query visibility control.
@@ -135,10 +156,19 @@ pub(crate) fn map_sqlx_error_with_query_visibility(
 }
 
 /// Map raw SQLite result code + message to Python exception (for use from non-Python threads).
-pub(crate) fn map_sqlite_error_from_msg(path: &str, query: &str, rc: i32, msg: &str) -> PyErr {
+pub(crate) fn map_sqlite_error_from_msg(
+    path: &str,
+    query: &str,
+    rc: i32,
+    msg: &str,
+    include_query: bool,
+) -> PyErr {
     let sanitized = sanitize_query(query);
-    let error_msg =
-        format!("Failed to execute query on database {path}: {msg}\nQuery: {sanitized}");
+    let error_msg = if include_query {
+        format!("Failed to execute query on database {path}: {msg}\nQuery: {sanitized}")
+    } else {
+        format!("Failed to execute query on database {path}: {msg}")
+    };
     let primary = rc & 0xff;
     match primary {
         libsqlite3_sys::SQLITE_CONSTRAINT => IntegrityError::new_err(error_msg),
