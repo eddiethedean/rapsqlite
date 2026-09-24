@@ -1537,6 +1537,11 @@ impl Connection {
         let cursor = Python::with_gil(|py| -> PyResult<Py<Cursor>> {
             if let Some(c) = cursor_arg {
                 let mut c_ref = c.borrow_mut(py);
+                if *c_ref.cursor_closed.lock().unwrap() {
+                    return Err(ProgrammingError::new_err(
+                        "Cannot operate on a closed cursor.",
+                    ));
+                }
                 c_ref.query = original_query.clone();
                 *c_ref.parameters.lock().unwrap() = params_for_cursor;
                 c_ref.processed_query = Some(processed_query.clone());
@@ -1583,6 +1588,7 @@ impl Connection {
                     lastrowid: Arc::new(StdMutex::new(-1)),
                     rowcount: Arc::new(StdMutex::new(-1)),
                     row_factory_override: Arc::new(StdMutex::new(None)),
+                    cursor_closed: Arc::new(StdMutex::new(false)),
                     closed: Arc::clone(&closed),
                 };
                 Py::new(py, new_cursor)
@@ -2645,6 +2651,7 @@ impl Connection {
             lastrowid: Arc::new(StdMutex::new(-1)),
             rowcount: Arc::new(StdMutex::new(-1)),
             row_factory_override: Arc::new(StdMutex::new(None)),
+            cursor_closed: Arc::new(StdMutex::new(false)),
             closed,
         })
     }
@@ -2711,6 +2718,7 @@ impl Connection {
             lastrowid: Arc::new(StdMutex::new(-1)),
             rowcount: Arc::new(StdMutex::new(-1)),
             row_factory_override: Arc::new(StdMutex::new(None)),
+            cursor_closed: Arc::new(StdMutex::new(false)),
             closed,
         })
     }
