@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 /// Detect if a query is a SELECT query (for determining execution strategy).
 pub(crate) fn is_select_query(query: &str) -> bool {
-    let trimmed = query.trim().to_uppercase();
+    let trimmed = first_statement_after_comments(query).to_uppercase();
     trimmed.starts_with("SELECT") || trimmed.starts_with("WITH")
 }
 
@@ -15,7 +15,7 @@ pub(crate) fn is_select_query(query: &str) -> bool {
 /// Used so that INSERT/UPDATE/DELETE with RETURNING are executed and fetched like SELECT,
 /// e.g. for SQLAlchemy's insertmanyvalues / ORM identity fetch.
 pub(crate) fn returns_result_rows(query: &str) -> bool {
-    let trimmed = query.trim().to_uppercase();
+    let trimmed = first_statement_after_comments(query).to_uppercase();
     if trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") {
         return true;
     }
@@ -30,20 +30,41 @@ pub(crate) fn returns_result_rows(query: &str) -> bool {
 
 /// True for INSERT/UPDATE/DELETE only. Used to avoid implicit transaction for DDL (CREATE, etc.).
 pub(crate) fn is_dml_query(query: &str) -> bool {
-    let trimmed = query.trim().to_uppercase();
+    let trimmed = first_statement_after_comments(query).to_uppercase();
     trimmed.starts_with("INSERT") || trimmed.starts_with("UPDATE") || trimmed.starts_with("DELETE")
 }
 
 /// True if the query is a transaction control statement (BEGIN, COMMIT, ROLLBACK).
 /// Used to sync rapsqlite's transaction_state when SQLAlchemy sends these as raw SQL.
 pub(crate) fn is_begin_query(query: &str) -> bool {
-    query.trim().to_uppercase().starts_with("BEGIN")
+    first_statement_after_comments(query)
+        .to_uppercase()
+        .starts_with("BEGIN")
 }
 
 /// True if the query is COMMIT or ROLLBACK.
 pub(crate) fn is_commit_or_rollback_query(query: &str) -> bool {
-    let trimmed = query.trim().to_uppercase();
+    let trimmed = first_statement_after_comments(query).to_uppercase();
     trimmed.starts_with("COMMIT") || trimmed.starts_with("ROLLBACK")
+}
+
+/// Remove whitespace and leading SQL comments before classifying the statement.
+fn first_statement_after_comments(mut query: &str) -> &str {
+    loop {
+        query = query.trim_start();
+        if let Some(rest) = query.strip_prefix("--") {
+            query = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or("");
+            continue;
+        }
+        if let Some(rest) = query.strip_prefix("/*") {
+            let Some(end) = rest.find("*/") else {
+                return "";
+            };
+            query = &rest[end + 2..];
+            continue;
+        }
+        return query;
+    }
 }
 
 /// Normalize a SQL query by removing extra whitespace and standardizing formatting.

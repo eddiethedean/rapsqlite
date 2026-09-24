@@ -50,6 +50,7 @@ pub(crate) struct SchemaContext {
     pub progress_handler: ProgressHandler,
     pub init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub init_hook_called: Arc<StdMutex<bool>>,
+    pub include_query_in_errors: Arc<StdMutex<bool>>,
     pub closed: Arc<StdMutex<bool>>,
     pub connection_self: Py<Connection>,
 }
@@ -61,6 +62,7 @@ pub(crate) async fn run_introspection_query(
     query: &str,
 ) -> Result<Vec<sqlx::sqlite::SqliteRow>, PyErr> {
     ensure_not_closed(&ctx.closed)?;
+    let include_query_in_errors = *ctx.include_query_in_errors.lock().unwrap();
 
     let in_transaction = {
         let g = ctx.transaction_state.lock().await;
@@ -99,7 +101,8 @@ pub(crate) async fn run_introspection_query(
             .0
             .as_mut()
             .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
-        bind_and_fetch_all_on_connection(query, &[], conn, &ctx.path).await?
+        bind_and_fetch_all_on_connection(query, &[], conn, &ctx.path, include_query_in_errors)
+            .await?
     } else if has_callbacks_flag {
         ensure_callback_connection(
             &ctx.path,
@@ -116,7 +119,8 @@ pub(crate) async fn run_introspection_query(
             .0
             .as_mut()
             .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-        bind_and_fetch_all_on_connection(query, &[], conn, &ctx.path).await?
+        bind_and_fetch_all_on_connection(query, &[], conn, &ctx.path, include_query_in_errors)
+            .await?
     } else {
         let pool_clone = get_or_create_pool(
             &ctx.path,
@@ -141,7 +145,8 @@ pub(crate) async fn run_introspection_query(
             timeout_val,
         )
         .await?;
-        bind_and_fetch_all_on_connection(query, &[], &mut conn, &ctx.path).await?
+        bind_and_fetch_all_on_connection(query, &[], &mut conn, &ctx.path, include_query_in_errors)
+            .await?
     };
 
     Ok(rows)

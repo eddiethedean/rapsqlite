@@ -153,6 +153,7 @@ pub(crate) struct ConnectionExecutionState {
     pub(crate) last_changes: Arc<Mutex<u64>>,
     pub(crate) timeout: Arc<StdMutex<f64>>,
     pub(crate) isolation_level: Arc<StdMutex<Option<String>>>,
+    pub(crate) include_query_in_errors: Arc<StdMutex<bool>>,
     pub(crate) closed: Arc<StdMutex<bool>>,
     pub(crate) explicit_transaction: Arc<Mutex<bool>>,
 }
@@ -198,6 +199,7 @@ impl Connection {
             progress_handler: Arc::clone(&self_.progress_handler),
             init_hook: Arc::clone(&self_.init_hook),
             init_hook_called: Arc::clone(&self_.init_hook_called),
+            include_query_in_errors: Arc::clone(&self_.include_query_in_errors),
             closed: Arc::clone(&self_.closed),
             connection_self: self_.into(),
         }
@@ -1498,6 +1500,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
+        let include_query_in_errors = Arc::clone(&self_.include_query_in_errors);
         let connection_self: Py<Connection> = self_.into();
 
         // Raise immediately if connection is closed (cursor.execute() on closed connection, etc.)
@@ -1574,6 +1577,7 @@ impl Connection {
                     user_collations: Arc::clone(&user_collations),
                     adapters: Arc::clone(&adapters),
                     converters: Arc::clone(&converters),
+                    include_query_in_errors: Arc::clone(&include_query_in_errors),
                     trace_callback: Arc::clone(&trace_callback),
                     authorizer_callback: Arc::clone(&authorizer_callback),
                     progress_handler: Arc::clone(&progress_handler),
@@ -1632,6 +1636,7 @@ impl Connection {
                 last_changes: Arc::clone(&last_changes),
                 timeout,
                 isolation_level,
+                include_query_in_errors: Arc::clone(&include_query_in_errors),
                 closed,
                 explicit_transaction: Arc::clone(&explicit_transaction),
             };
@@ -1679,6 +1684,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let _timeout = Arc::clone(&self_.timeout);
         let adapters = Arc::clone(&self_.adapters);
+        let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         let connection_self = self_.into();
 
         // Process all parameter sets
@@ -1751,9 +1757,14 @@ impl Connection {
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Transaction connection not available")
                         })?;
-                        let result =
-                            bind_and_execute_on_connection(&query, param_values, conn, &path)
-                                .await?;
+                        let result = bind_and_execute_on_connection(
+                            &query,
+                            param_values,
+                            conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await?;
                         total_changes += result.rows_affected();
                         last_row_id = result.last_insert_rowid();
                         drop(conn_guard);
@@ -1777,9 +1788,14 @@ impl Connection {
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
-                        let result =
-                            bind_and_execute_on_connection(&query, param_values, conn, &path)
-                                .await?;
+                        let result = bind_and_execute_on_connection(
+                            &query,
+                            param_values,
+                            conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await?;
                         total_changes += result.rows_affected();
                         last_row_id = result.last_insert_rowid();
                         drop(conn_guard);
@@ -1911,6 +1927,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
+        let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         let connection_self = self_.into();
 
         // Process parameters (sync; Python::with_gil acceptable here)
@@ -1975,8 +1992,14 @@ impl Connection {
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
-                    bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
+                    bind_and_fetch_all_on_connection(
+                        &processed_query,
+                        &param_values,
+                        conn,
+                        &path,
+                        include_query_in_errors,
+                    )
+                    .await?
                 } else if has_callbacks_flag {
                     // Ensure callback connection exists
                     ensure_callback_connection(
@@ -1995,8 +2018,14 @@ impl Connection {
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
-                    bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
+                    bind_and_fetch_all_on_connection(
+                        &processed_query,
+                        &param_values,
+                        conn,
+                        &path,
+                        include_query_in_errors,
+                    )
+                    .await?
                 } else {
                     ensure_session_connection(
                         &path,
@@ -2012,8 +2041,14 @@ impl Connection {
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Session connection not available")
                     })?;
-                    bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
+                    bind_and_fetch_all_on_connection(
+                        &processed_query,
+                        &param_values,
+                        conn,
+                        &path,
+                        include_query_in_errors,
+                    )
+                    .await?
                 };
 
                 // Convert rows using row_factory
@@ -2099,6 +2134,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
+        let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         let connection_self = self_.into();
 
         // Process parameters (sync; Python::with_gil acceptable here)
@@ -2160,8 +2196,14 @@ impl Connection {
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
-                    bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
+                    bind_and_fetch_one_on_connection(
+                        &processed_query,
+                        &param_values,
+                        conn,
+                        &path,
+                        include_query_in_errors,
+                    )
+                    .await?
                 } else if has_callbacks_flag {
                     // Ensure callback connection exists
                     ensure_callback_connection(
@@ -2180,8 +2222,14 @@ impl Connection {
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
-                    bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
+                    bind_and_fetch_one_on_connection(
+                        &processed_query,
+                        &param_values,
+                        conn,
+                        &path,
+                        include_query_in_errors,
+                    )
+                    .await?
                 } else {
                     let pool_clone = get_or_create_pool(
                         &path,
@@ -2213,6 +2261,7 @@ impl Connection {
                         &param_values,
                         &mut conn,
                         &path,
+                        include_query_in_errors,
                     )
                     .await?
                 };
@@ -2299,6 +2348,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
+        let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         let connection_self = self_.into();
 
         // Process parameters (sync; Python::with_gil acceptable here)
@@ -2352,6 +2402,7 @@ impl Connection {
                         &param_values,
                         conn,
                         &path,
+                        include_query_in_errors,
                     )
                     .await?
                 } else if has_callbacks_flag {
@@ -2377,6 +2428,7 @@ impl Connection {
                         &param_values,
                         conn,
                         &path,
+                        include_query_in_errors,
                     )
                     .await?
                 } else {
@@ -2410,6 +2462,7 @@ impl Connection {
                         &param_values,
                         &mut conn,
                         &path,
+                        include_query_in_errors,
                     )
                     .await?
                 };
@@ -2461,6 +2514,7 @@ impl Connection {
         let last_changes = Arc::clone(&self_.last_changes);
         let adapters = Arc::clone(&self_.adapters);
 
+        let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         #[allow(deprecated)]
         let (processed_query, param_values) =
             Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
@@ -2514,8 +2568,14 @@ impl Connection {
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
-                        bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
-                            .await?
+                        bind_and_execute_on_connection(
+                            &processed_query,
+                            &param_values,
+                            conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await?
                     } else {
                         let pool_clone = get_or_create_pool(
                             &path,
@@ -2547,6 +2607,7 @@ impl Connection {
                             &param_values,
                             &mut conn,
                             &path,
+                            include_query_in_errors,
                         )
                         .await?
                     }
@@ -2555,8 +2616,14 @@ impl Connection {
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
-                    bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
+                    bind_and_execute_on_connection(
+                        &processed_query,
+                        &param_values,
+                        conn,
+                        &path,
+                        include_query_in_errors,
+                    )
+                    .await?
                 };
 
                 let rowid = result.last_insert_rowid();
@@ -2611,6 +2678,7 @@ impl Connection {
         let closed = Arc::clone(&slf.closed);
         let adapters = Arc::clone(&slf.adapters);
         let converters = Arc::clone(&slf.converters);
+        let include_query_in_errors = Arc::clone(&slf.include_query_in_errors);
         Ok(Cursor {
             connection: slf.into(),
             query: String::new(),
@@ -2636,6 +2704,7 @@ impl Connection {
             user_collations,
             adapters,
             converters,
+            include_query_in_errors,
             trace_callback,
             authorizer_callback,
             progress_handler,
@@ -2677,6 +2746,7 @@ impl Connection {
         let closed = Arc::clone(&slf.closed);
         let adapters = Arc::clone(&slf.adapters);
         let converters = Arc::clone(&slf.converters);
+        let include_query_in_errors = Arc::clone(&slf.include_query_in_errors);
         Ok(Cursor {
             connection: slf.into(),
             query,
@@ -2702,6 +2772,7 @@ impl Connection {
             user_collations,
             adapters,
             converters,
+            include_query_in_errors,
             trace_callback,
             authorizer_callback,
             progress_handler,
