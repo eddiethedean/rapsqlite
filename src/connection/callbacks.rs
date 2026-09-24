@@ -128,7 +128,7 @@ pub(crate) async fn set_progress_handler_impl(
             &ctx.authorizer_callback,
             &ctx.progress_handler,
         );
-        if all_cleared {
+        if all_cleared && !ctx.skip_release {
             discard_callback_connection(&ctx).await;
             return Ok(());
         }
@@ -481,7 +481,7 @@ pub(crate) async fn set_authorizer_impl(
             &ctx.authorizer_callback,
             &ctx.progress_handler,
         );
-        if all_cleared {
+        if all_cleared && !ctx.skip_release {
             discard_callback_connection(&ctx).await;
             return Ok(());
         }
