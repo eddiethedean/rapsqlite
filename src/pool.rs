@@ -153,47 +153,23 @@ struct RegisteredPool {
     pool: PoolSlot,
     users: usize,
     configured_max_connections: Option<u32>,
-    next_session_slot: usize,
-    session_slots: Vec<Arc<Mutex<PoolConnectionSlot>>>,
 }
 
-/// Handle to a session slot selected from the shared registry. Resolving it on
-/// each lock means a pool-size change before first use updates every live wrapper.
+/// Per-Connection slot for retaining one pooled connection across operations.
 #[derive(Clone)]
 pub(crate) struct SessionConnectionSlot {
-    identity: String,
-    session_slot_index: usize,
-    fallback: Arc<Mutex<PoolConnectionSlot>>,
+    slot: Arc<Mutex<PoolConnectionSlot>>,
 }
 
 impl SessionConnectionSlot {
-    fn new(
-        identity: String,
-        session_slot_index: usize,
-        fallback: Arc<Mutex<PoolConnectionSlot>>,
-    ) -> Self {
+    fn new() -> Self {
         Self {
-            identity,
-            session_slot_index,
-            fallback,
+            slot: Arc::new(Mutex::new(PoolConnectionSlot::default())),
         }
     }
 
     pub(crate) async fn lock(&self) -> tokio::sync::OwnedMutexGuard<PoolConnectionSlot> {
-        let slot = {
-            let registry = global_registry()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry
-                .get(&self.identity)
-                .map(|entry| {
-                    Arc::clone(
-                        &entry.session_slots[self.session_slot_index % entry.session_slots.len()],
-                    )
-                })
-                .unwrap_or_else(|| Arc::clone(&self.fallback))
-        };
-        slot.lock_owned().await
+        Arc::clone(&self.slot).lock_owned().await
     }
 }
 
@@ -216,26 +192,16 @@ impl PoolRegistryLease {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = registry.entry(identity.clone()).or_default();
         entry.users += 1;
-        ensure_session_slots(
-            entry,
-            entry
-                .configured_max_connections
-                .unwrap_or(SHARED_POOL_MIN_CONNECTIONS),
-        );
-        let session_slot_index = entry.next_session_slot;
-        entry.next_session_slot += 1;
-        let fallback =
-            Arc::clone(&entry.session_slots[session_slot_index % entry.session_slots.len()]);
         (
             Self {
                 identity: Some(identity.clone()),
             },
-            SessionConnectionSlot::new(identity, session_slot_index, fallback),
+            SessionConnectionSlot::new(),
         )
     }
 
-    /// Configure the shared slot set before first use. The first explicit pool
-    /// size wins; once the SQLx pool exists, its actual maximum is authoritative.
+    /// Configure the shared pool before first use. The first explicit pool size
+    /// wins; once the SQLx pool exists, its actual maximum is authoritative.
     pub(crate) fn configure_pool_size(&self, requested: Option<usize>) {
         let Some(identity) = self.identity.as_ref() else {
             return;
@@ -249,32 +215,12 @@ impl PoolRegistryLease {
         if entry.pool.0.is_none() && entry.configured_max_connections.is_none() {
             if let Some(size) = requested {
                 entry.configured_max_connections = Some(size.max(1).min(u32::MAX as usize) as u32);
-                ensure_session_slots(entry, entry.configured_max_connections.unwrap());
             }
-        }
-        if entry.session_slots.is_empty() {
-            ensure_session_slots(
-                entry,
-                entry
-                    .configured_max_connections
-                    .unwrap_or(SHARED_POOL_MIN_CONNECTIONS),
-            );
         }
     }
 
     pub(crate) fn identity(&self) -> Option<&str> {
         self.identity.as_deref()
-    }
-
-    pub(crate) fn is_last_user(&self) -> bool {
-        let Some(identity) = self.identity.as_ref() else {
-            return true;
-        };
-        global_registry()
-            .lock()
-            .unwrap()
-            .get(identity)
-            .is_none_or(|entry| entry.users <= 1)
     }
 
     pub(crate) fn release(&mut self) {
@@ -296,16 +242,6 @@ impl PoolRegistryLease {
     }
 }
 
-fn ensure_session_slots(entry: &mut RegisteredPool, count: u32) {
-    let count = count.max(1) as usize;
-    if entry.session_slots.len() == count || entry.pool.0.is_some() {
-        return;
-    }
-    entry.session_slots = (0..count)
-        .map(|_| Arc::new(Mutex::new(PoolConnectionSlot::default())))
-        .collect();
-}
-
 impl Drop for PoolRegistryLease {
     fn drop(&mut self) {
         self.release();
@@ -313,26 +249,19 @@ impl Drop for PoolRegistryLease {
 }
 
 /// Close and remove the pool held by a registry entry after its last Connection closes.
-pub(crate) async fn close_registered_pool(identity: &str) {
-    let (pool, session_slots) = {
+pub(crate) async fn close_registered_pool_if_last(identity: &str) {
+    let pool = {
         let mut registry = global_registry()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        registry
-            .get_mut(identity)
-            .map_or((None, Vec::new()), |entry| {
-                (
-                    entry.pool.0.take(),
-                    entry.session_slots.iter().map(Arc::clone).collect(),
-                )
-            })
+        let Some(entry) = registry.get_mut(identity) else {
+            return;
+        };
+        if entry.users > 1 {
+            return;
+        }
+        entry.pool.0.take()
     };
-    // Closed wrappers may have left session connections in any shared slot.
-    // Return every idle session connection before waiting for the SQLx pool.
-    for slot in session_slots {
-        let mut guard = slot.lock().await;
-        guard.0.take();
-    }
     if let Some(pool) = pool {
         pool.close().await;
     }
@@ -455,7 +384,6 @@ pub(crate) async fn get_or_create_pool(
         let entry = reg.entry(path.to_string()).or_default();
         if entry.configured_max_connections.is_none() {
             entry.configured_max_connections = Some(requested_max);
-            ensure_session_slots(entry, requested_max);
         }
         entry.configured_max_connections.unwrap_or(requested_max)
     };
