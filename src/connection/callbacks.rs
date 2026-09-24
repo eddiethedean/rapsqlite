@@ -2,7 +2,8 @@
 //! set_trace_callback, set_authorizer, set_progress_handler). Single responsibility: manage
 //! callback connection and SQLite C API for these operations.
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::sync::Mutex;
 
 use libsqlite3_sys::{
@@ -54,6 +55,36 @@ pub(crate) struct CallbackContext {
     pub skip_release: bool,
 }
 
+fn active_handles() -> &'static StdMutex<HashMap<usize, usize>> {
+    static ACTIVE_HANDLES: OnceLock<StdMutex<HashMap<usize, usize>>> = OnceLock::new();
+    ACTIVE_HANDLES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn callback_slot_key(slot: &Arc<Mutex<PoolConnectionSlot>>) -> usize {
+    Arc::as_ptr(slot) as usize
+}
+
+/// Return the raw SQLite handle currently associated with a callback slot.
+/// The slot's owner keeps the physical connection alive while the handle is used.
+pub(crate) fn active_handle_for(slot: &Arc<Mutex<PoolConnectionSlot>>) -> Option<usize> {
+    active_handles()
+        .lock()
+        .ok()
+        .and_then(|handles| handles.get(&callback_slot_key(slot)).copied())
+}
+
+fn register_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>, raw_db: usize) {
+    if let Ok(mut handles) = active_handles().lock() {
+        handles.insert(callback_slot_key(slot), raw_db);
+    }
+}
+
+pub(crate) fn clear_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>) {
+    if let Ok(mut handles) = active_handles().lock() {
+        handles.remove(&callback_slot_key(slot));
+    }
+}
+
 /// Destroy a callback-bound physical connection before returning it to the
 /// pool. SQLite callbacks are handle-local; closing the handle prevents them
 /// from leaking into a different logical Connection that reuses the pool.
@@ -61,6 +92,7 @@ pub(crate) async fn discard_callback_connection(ctx: &CallbackContext) {
     if ctx.skip_release {
         return;
     }
+    clear_active_handle(&ctx.callback_connection);
     let mut guard = ctx.callback_connection.lock().await;
     if let Some(conn) = guard.0.as_mut() {
         conn.close_on_drop();
@@ -1492,6 +1524,11 @@ async fn rebind_callbacks_inner(ctx: CallbackContext) -> Result<(), PyErr> {
             "Failed to configure extension loading: SQLite error code {result}"
         )));
     }
+
+    // Keep the handle address available while callers execute on this checked-out
+    // callback connection. sqlite3_interrupt() may be called concurrently without
+    // waiting for the callback-connection mutex held by that operation.
+    register_active_handle(&ctx.callback_connection, raw_db as usize);
 
     Ok(())
 }

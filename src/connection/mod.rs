@@ -925,6 +925,7 @@ impl Connection {
 
                 // Clear callback connection (callbacks are cleared, connection returns to pool)
                 {
+                    callbacks::clear_active_handle(&callback_connection);
                     let mut callback_guard = callback_connection.lock().await;
                     callback_guard.0.take();
                 }
@@ -939,6 +940,7 @@ impl Connection {
                         *ex_guard
                     };
                     drop(trans_guard);
+                    callbacks::clear_active_handle(&transaction_connection);
                     let mut conn_guard = transaction_connection.lock().await;
                     if let Some(mut conn) = conn_guard.0.take() {
                         let sql = if is_explicit {
@@ -1012,6 +1014,7 @@ impl Connection {
                     *progress_guard = None;
                 }
                 {
+                    callbacks::clear_active_handle(&callback_connection);
                     let mut callback_guard = callback_connection.lock().await;
                     callback_guard.0.take();
                 }
@@ -1020,6 +1023,7 @@ impl Connection {
                 let trans_guard = transaction_state.lock().await;
                 if *trans_guard == TransactionState::Active {
                     drop(trans_guard);
+                    callbacks::clear_active_handle(&transaction_connection);
                     let mut conn_guard = transaction_connection.lock().await;
                     if let Some(mut conn) = conn_guard.0.take() {
                         // Rollback the transaction on the same connection
@@ -1311,6 +1315,7 @@ impl Connection {
         let callback_operation_lock = Arc::clone(&self.callback_operation_lock);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        let callback_connection = Arc::clone(&self.callback_connection);
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
         let callback_connection_required = Arc::clone(&self.callback_connection_required);
         let user_functions = Arc::clone(&self.user_functions);
@@ -1340,6 +1345,8 @@ impl Connection {
                 );
 
                 // Retrieve the stored transaction connection; if missing, treat as no-op (DBAPI compat)
+                callbacks::clear_active_handle(&callback_connection);
+                callbacks::clear_active_handle(&transaction_connection);
                 let mut conn_guard = transaction_connection.lock().await;
                 let mut conn = match conn_guard.0.take() {
                     Some(c) => c,
@@ -1391,6 +1398,7 @@ impl Connection {
         let callback_operation_lock = Arc::clone(&self.callback_operation_lock);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
+        let callback_connection = Arc::clone(&self.callback_connection);
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
         // Callback registrations are rebound to a checked-out handle on the next operation.
         let callback_connection_required = Arc::clone(&self.callback_connection_required);
@@ -1421,6 +1429,8 @@ impl Connection {
                 );
 
                 // Retrieve the stored transaction connection; if missing, treat as no-op (DBAPI compat)
+                callbacks::clear_active_handle(&callback_connection);
+                callbacks::clear_active_handle(&transaction_connection);
                 let mut conn_guard = transaction_connection.lock().await;
                 let mut conn = match conn_guard.0.take() {
                     Some(c) => c,
@@ -2894,7 +2904,7 @@ impl Connection {
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let session_connection = Arc::clone(&self_.session_connection);
+        let session_connection = self_.session_connection.clone();
         let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
@@ -3032,6 +3042,7 @@ impl Connection {
     /// no-op when no callbacks are configured.
     fn interrupt(&self) -> PyResult<Py<PyAny>> {
         let callback_connection = Arc::clone(&self.callback_connection);
+        let transaction_connection = Arc::clone(&self.transaction_connection);
         let callback_connection_required = Arc::clone(&self.callback_connection_required);
         let user_functions = Arc::clone(&self.user_functions);
         let user_aggregates = Arc::clone(&self.user_aggregates);
@@ -3054,6 +3065,17 @@ impl Connection {
                 ) {
                     return Ok(());
                 }
+
+                // The query task holds the callback/transaction slot mutex while it
+                // executes. Read the registered raw handle before attempting that
+                // mutex so interrupt() can reach an in-flight SQLite operation.
+                if let Some(raw_db) = callbacks::active_handle_for(&transaction_connection)
+                    .or_else(|| callbacks::active_handle_for(&callback_connection))
+                {
+                    unsafe { sqlite3_interrupt(raw_db as *mut libsqlite3_sys::sqlite3) };
+                    return Ok(());
+                }
+
                 let Ok(mut conn_guard) = callback_connection.try_lock() else {
                     return Ok(());
                 };
