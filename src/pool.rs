@@ -544,10 +544,10 @@ pub(crate) async fn execute_init_hook_if_needed(
     }
 
     // Check if init_hook is set and call it if needed
-    // Note: Python::with_gil is used here because this is a sync helper function
+    // Note: Python::attach is used here because this is a sync helper function
     // called from async contexts. The deprecation warning is acceptable here.
     #[allow(deprecated)]
-    let hook_opt: Option<Py<PyAny>> = Python::with_gil(|py| {
+    let hook_opt: Option<Py<PyAny>> = Python::attach(|py| {
         let guard = init_hook.lock().unwrap();
         guard.as_ref().map(|h| h.clone_ref(py))
     });
@@ -560,10 +560,10 @@ pub(crate) async fn execute_init_hook_if_needed(
         }
 
         // Call the hook with the Connection object and await the coroutine
-        // Note: Python::with_gil is used here because this is a sync helper function
+        // Note: Python::attach is used here because this is a sync helper function
         // called from async contexts. The deprecation warning is acceptable here.
         #[allow(deprecated)]
-        let coro_future = Python::with_gil(|py| -> PyResult<_> {
+        let coro_future = Python::attach(|py| -> PyResult<_> {
             let hook_bound = hook.bind(py);
             let conn_bound = connection.bind(py);
 

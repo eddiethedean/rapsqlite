@@ -91,7 +91,7 @@ async fn run_introspection_query_with_params(
     }
 
     #[allow(deprecated)]
-    let connection_for_hook = Python::with_gil(|py| ctx.connection_self.clone_ref(py));
+    let connection_for_hook = Python::attach(|py| ctx.connection_self.clone_ref(py));
     execute_init_hook_if_needed(&ctx.init_hook, &ctx.init_hook_called, connection_for_hook).await?;
 
     let has_callbacks_flag = has_callbacks(
@@ -187,7 +187,7 @@ pub(crate) async fn get_tables(ctx: SchemaContext, name: Option<String>) -> PyRe
     let rows = run_introspection_query(&ctx, &query).await?;
 
     #[allow(deprecated)]
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+    Python::attach(|py| -> PyResult<Py<PyAny>> {
         let result_list = PyList::empty(py);
         for row in rows.iter() {
             if let Ok(table_name) = row.try_get::<String, _>(0) {
@@ -205,7 +205,7 @@ pub(crate) async fn get_table_info(ctx: SchemaContext, table_name: String) -> Py
     let rows = run_introspection_query(&ctx, &query).await?;
 
     #[allow(deprecated)]
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+    Python::attach(|py| -> PyResult<Py<PyAny>> {
         let result_list = PyList::empty(py);
         for row in rows.iter() {
             let dict = PyDict::new(py);
@@ -255,7 +255,7 @@ pub(crate) async fn get_indexes(
     let rows = run_introspection_query(&ctx, &query).await?;
 
     #[allow(deprecated)]
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+    Python::attach(|py| -> PyResult<Py<PyAny>> {
         let result_list = PyList::empty(py);
         for row in rows.iter() {
             let dict = PyDict::new(py);
@@ -299,7 +299,7 @@ pub(crate) async fn get_foreign_keys(
     .await?;
 
     #[allow(deprecated)]
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+    Python::attach(|py| -> PyResult<Py<PyAny>> {
         let result_list = PyList::empty(py);
         for row in rows.iter() {
             let dict = PyDict::new(py);
@@ -347,7 +347,7 @@ pub(crate) async fn get_views(ctx: SchemaContext, name: Option<String>) -> PyRes
     let rows = run_introspection_query(&ctx, &query).await?;
 
     #[allow(deprecated)]
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+    Python::attach(|py| -> PyResult<Py<PyAny>> {
         let result_list = PyList::empty(py);
         for row in rows.iter() {
             if let Ok(view_name) = row.try_get::<String, _>(0) {
@@ -365,7 +365,7 @@ pub(crate) async fn get_index_list(ctx: SchemaContext, table_name: String) -> Py
     let rows = run_introspection_query(&ctx, &query).await?;
 
     #[allow(deprecated)]
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+    Python::attach(|py| -> PyResult<Py<PyAny>> {
         let result_list = PyList::empty(py);
         for row in rows.iter() {
             let dict = PyDict::new(py);
@@ -402,7 +402,7 @@ pub(crate) async fn get_index_info(ctx: SchemaContext, index_name: String) -> Py
     .await?;
 
     #[allow(deprecated)]
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+    Python::attach(|py| -> PyResult<Py<PyAny>> {
         let result_list = PyList::empty(py);
         for row in rows.iter() {
             let dict = PyDict::new(py);
@@ -428,7 +428,7 @@ pub(crate) async fn get_table_xinfo(ctx: SchemaContext, table_name: String) -> P
     let rows = run_introspection_query(&ctx, &query).await?;
 
     #[allow(deprecated)]
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+    Python::attach(|py| -> PyResult<Py<PyAny>> {
         let result_list = PyList::empty(py);
         for row in rows.iter() {
             let dict = PyDict::new(py);
@@ -503,7 +503,7 @@ pub(crate) async fn get_schema(
     }
 
     #[allow(deprecated)]
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+    Python::attach(|py| -> PyResult<Py<PyAny>> {
         let schema_dict = PyDict::new(py);
         if let Some(ref tbl_name) = table_name {
             if let Some((_, info_rows, indexes_rows, fk_rows)) = tables_info.first() {

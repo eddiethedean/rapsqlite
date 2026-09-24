@@ -172,7 +172,7 @@ fn drop_py_callback_ptr(ptr_usize: usize) {
     //
     // Dropping Py-owned values must happen with the GIL held.
     #[allow(deprecated)]
-    Python::with_gil(|_py| unsafe {
+    Python::attach(|_py| unsafe {
         drop(Arc::from_raw(ptr_usize as *const Py<PyAny>));
     });
 }
@@ -241,7 +241,7 @@ pub(crate) async fn set_progress_handler_impl(
             }
             let callback_ptr = progress_ctx as *const Py<PyAny>;
             #[allow(deprecated)]
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let arc = Arc::from_raw(callback_ptr);
                 let callback = arc.clone();
                 std::mem::forget(arc);
@@ -268,7 +268,7 @@ pub(crate) async fn set_progress_handler_impl(
         let progress_guard = ctx.progress_handler.lock().unwrap();
         progress_guard.as_ref().map(|(_, cb)| {
             #[allow(deprecated)]
-            Python::with_gil(|py| cb.clone_ref(py))
+            Python::attach(|py| cb.clone_ref(py))
         })
     };
 
@@ -410,7 +410,7 @@ pub(crate) async fn create_collation_impl(
         }
         if let Some(old_ptr) = old_ptr {
             #[allow(deprecated)]
-            Python::with_gil(|_py| unsafe {
+            Python::attach(|_py| unsafe {
                 let _ = Box::from_raw(old_ptr as *mut Py<PyAny>);
             });
         }
@@ -434,7 +434,7 @@ pub(crate) async fn create_collation_impl(
     }
 
     #[allow(deprecated)]
-    let callback_for_storage = Python::with_gil(|py| callable.as_ref().unwrap().clone_ref(py));
+    let callback_for_storage = Python::attach(|py| callable.as_ref().unwrap().clone_ref(py));
     let callback_box: Box<Py<PyAny>> = Box::new(callback_for_storage);
     let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
     let callback_ptr_usize = callback_ptr as usize;
@@ -466,7 +466,7 @@ pub(crate) async fn create_collation_impl(
             };
 
             #[allow(deprecated)]
-            let result = Python::with_gil(|py| {
+            let result = Python::attach(|py| {
                 let callback_ptr = p_arg as *mut Py<PyAny>;
                 let callback = (*callback_ptr).clone_ref(py);
                 let s1_py = PyString::new(py, s1);
@@ -520,7 +520,7 @@ pub(crate) async fn create_collation_impl(
     };
     if let Some(old_ptr) = old_ptr {
         #[allow(deprecated)]
-        Python::with_gil(|_py| unsafe {
+        Python::attach(|_py| unsafe {
             let _ = Box::from_raw(old_ptr as *mut Py<PyAny>);
         });
     }
@@ -621,7 +621,7 @@ pub(crate) async fn set_authorizer_impl(
             };
             let callback_ptr = authorizer_ctx as *const Py<PyAny>;
             #[allow(deprecated)]
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let arc = Arc::from_raw(callback_ptr);
                 let callback = arc.clone();
                 std::mem::forget(arc);
@@ -657,7 +657,7 @@ pub(crate) async fn set_authorizer_impl(
         let auth_guard = ctx.authorizer_callback.lock().unwrap();
         auth_guard.as_ref().map(|c| {
             #[allow(deprecated)]
-            Python::with_gil(|py| c.clone_ref(py))
+            Python::attach(|py| c.clone_ref(py))
         })
     };
 
@@ -743,7 +743,7 @@ pub(crate) async fn create_function_impl(
             }
             let callback_ptr = user_data as *mut Py<PyAny>;
             #[allow(deprecated)]
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let callback = (*callback_ptr).clone_ref(py);
                 let mut py_args: Vec<Py<PyAny>> = Vec::new();
                 for i in 0..argc {
@@ -847,7 +847,7 @@ pub(crate) async fn create_function_impl(
             return;
         }
         #[allow(deprecated)]
-        Python::with_gil(|_py| unsafe {
+        Python::attach(|_py| unsafe {
             let _ = Box::from_raw(user_data as *mut Py<PyAny>);
         });
     }
@@ -916,7 +916,7 @@ pub(crate) async fn create_function_impl(
                 SQLITE_UTF8
             };
             #[allow(deprecated)]
-            let callback_for_storage = Python::with_gil(|py| func.as_ref().unwrap().clone_ref(py));
+            let callback_for_storage = Python::attach(|py| func.as_ref().unwrap().clone_ref(py));
             {
                 let mut funcs_guard = ctx.user_functions.lock().unwrap();
                 funcs_guard.insert(name.clone(), (nargs, deterministic, callback_for_storage));
@@ -925,7 +925,7 @@ pub(crate) async fn create_function_impl(
                 OperationalError::new_err(format!("Function name contains null byte: {e}"))
             })?;
             #[allow(deprecated)]
-            let callback = Python::with_gil(|py| func.as_ref().unwrap().clone_ref(py));
+            let callback = Python::attach(|py| func.as_ref().unwrap().clone_ref(py));
             let callback_box: Box<Py<PyAny>> = Box::new(callback);
             let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
             let result = unsafe {
@@ -1032,7 +1032,7 @@ pub(crate) async fn create_function_impl(
             SQLITE_UTF8
         };
         #[allow(deprecated)]
-        let callback_for_storage = Python::with_gil(|py| func.as_ref().unwrap().clone_ref(py));
+        let callback_for_storage = Python::attach(|py| func.as_ref().unwrap().clone_ref(py));
         {
             let mut funcs_guard = ctx.user_functions.lock().unwrap();
             funcs_guard.insert(name.clone(), (nargs, deterministic, callback_for_storage));
@@ -1041,7 +1041,7 @@ pub(crate) async fn create_function_impl(
             OperationalError::new_err(format!("Function name contains null byte: {e}"))
         })?;
         #[allow(deprecated)]
-        let callback = Python::with_gil(|py| func.as_ref().unwrap().clone_ref(py));
+        let callback = Python::attach(|py| func.as_ref().unwrap().clone_ref(py));
         let callback_box: Box<Py<PyAny>> = Box::new(callback);
         let callback_ptr = Box::into_raw(callback_box) as *mut std::ffi::c_void;
         let result = unsafe {
@@ -1155,7 +1155,7 @@ pub(crate) async fn create_aggregate_impl(
         }
         if old_ptr != 0 {
             #[allow(deprecated)]
-            Python::with_gil(|_py| unsafe {
+            Python::attach(|_py| unsafe {
                 let _ = Box::from_raw(old_ptr as *mut Py<PyAny>);
             });
         }
@@ -1179,7 +1179,7 @@ pub(crate) async fn create_aggregate_impl(
     }
 
     #[allow(deprecated)]
-    let class_for_storage = Python::with_gil(|py| aggregate_class.as_ref().unwrap().clone_ref(py));
+    let class_for_storage = Python::attach(|py| aggregate_class.as_ref().unwrap().clone_ref(py));
     let class_box: Box<Py<PyAny>> = Box::new(class_for_storage);
     let class_ptr = Box::into_raw(class_box) as *mut std::ffi::c_void;
     let class_ptr_usize = class_ptr as usize;
@@ -1215,7 +1215,7 @@ pub(crate) async fn create_aggregate_impl(
             }
 
             #[allow(deprecated)]
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 if state.instance_ptr.is_null() {
                     let class = (*class_ptr).clone_ref(py);
                     let instance = match class.call0(py) {
@@ -1330,7 +1330,7 @@ pub(crate) async fn create_aggregate_impl(
             }
 
             #[allow(deprecated)]
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let instance = Box::from_raw(state.instance_ptr);
                 state.instance_ptr = std::ptr::null_mut();
 
@@ -1385,7 +1385,7 @@ pub(crate) async fn create_aggregate_impl(
     };
     if let Some((_, old_ptr)) = old {
         #[allow(deprecated)]
-        Python::with_gil(|_py| unsafe {
+        Python::attach(|_py| unsafe {
             let _ = Box::from_raw(old_ptr as *mut Py<PyAny>);
         });
     }
@@ -1425,7 +1425,7 @@ async fn rebind_callbacks_inner(ctx: CallbackContext) -> Result<(), PyErr> {
     let functions = {
         let guard = ctx.user_functions.lock().unwrap();
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             guard
                 .iter()
                 .map(|(name, (nargs, deterministic, callback))| {
@@ -1448,7 +1448,7 @@ async fn rebind_callbacks_inner(ctx: CallbackContext) -> Result<(), PyErr> {
     let aggregates = {
         let guard = ctx.user_aggregates.lock().unwrap();
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             guard
                 .iter()
                 .map(|(name, (nargs, class_ptr))| unsafe {
@@ -1468,7 +1468,7 @@ async fn rebind_callbacks_inner(ctx: CallbackContext) -> Result<(), PyErr> {
     let collations = {
         let guard = ctx.user_collations.lock().unwrap();
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             guard
                 .iter()
                 .map(|(name, callback_ptr)| unsafe {
@@ -1487,7 +1487,7 @@ async fn rebind_callbacks_inner(ctx: CallbackContext) -> Result<(), PyErr> {
     let authorizer = {
         let guard = ctx.authorizer_callback.lock().unwrap();
         #[allow(deprecated)]
-        Python::with_gil(|py| guard.as_ref().map(|callback| callback.clone_ref(py)))
+        Python::attach(|py| guard.as_ref().map(|callback| callback.clone_ref(py)))
     };
     if let Some(callback) = authorizer {
         set_authorizer_impl(batch_ctx.clone(), Some(callback)).await?;
@@ -1496,7 +1496,7 @@ async fn rebind_callbacks_inner(ctx: CallbackContext) -> Result<(), PyErr> {
     let progress = {
         let guard = ctx.progress_handler.lock().unwrap();
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             guard
                 .as_ref()
                 .map(|(n, callback)| (*n, callback.clone_ref(py)))

@@ -87,7 +87,7 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
             (q.clone(), p.clone())
         } else {
             #[allow(deprecated)]
-            Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
+            Python::attach(|py| -> PyResult<(String, Vec<SqliteParam>)> {
                 let params_guard = ctx.parameters.lock().unwrap();
                 if let Some(ref params_py) = *params_guard {
                     let params_bound = params_py.bind(py);
@@ -192,7 +192,7 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
     };
 
     #[allow(deprecated)]
-    let cached_results = Python::with_gil(|py| -> PyResult<Vec<Py<PyAny>>> {
+    let cached_results = Python::attach(|py| -> PyResult<Vec<Py<PyAny>>> {
         let tf_guard = ctx.text_factory.lock().unwrap();
         let tf_opt = tf_guard.as_ref();
         let mut vec = Vec::new();
@@ -224,7 +224,7 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
     *ctx.results.lock().unwrap() = Some(cached_results);
     if let Some(first) = rows.first() {
         #[allow(deprecated)]
-        let desc = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+        let desc = Python::attach(|py| -> PyResult<Py<PyAny>> {
             let t = build_description_tuple(py, first)?;
             Ok(t.unbind().into())
         })?;
@@ -338,8 +338,8 @@ impl Cursor {
         drop(self_); // release borrow so Connection.execute can borrow_mut the cursor
         Python::attach(move |py| {
             let conn = connection.bind(py);
-            let self_py: Py<Cursor> = unsafe { Py::<PyAny>::from_borrowed_ptr(py, ptr) }
-                .cast_bound::<Cursor>(py)?
+            let self_py: Py<Cursor> = unsafe { Bound::<PyAny>::from_borrowed_ptr(py, ptr) }
+                .cast::<Cursor>()?
                 .clone()
                 .unbind();
             let result = if let Some(p) = params_py {
@@ -483,7 +483,7 @@ impl Cursor {
             let future = async move {
                 ensure_cursor_results_cached(&ctx).await?;
                 #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                Python::attach(|py| -> PyResult<Py<PyAny>> {
                     {
                         let mut desc_guard = ctx.description.lock().unwrap();
                         if desc_guard.is_none() {
@@ -505,9 +505,9 @@ impl Cursor {
                     *index_guard += 1;
                     let o_guard = ctx.row_factory_override.lock().unwrap();
                     if let Some(ref f) = *o_guard {
-                        if let Ok(s) = f.bind(py).downcast::<PyString>() {
+                        if let Ok(s) = f.bind(py).cast::<PyString>() {
                             if s.to_str().is_ok_and(|n| n == "tuple") {
-                                if let Ok(list) = row.downcast_bound::<PyList>(py) {
+                                if let Ok(list) = row.cast_bound::<PyList>(py) {
                                     let items: Vec<pyo3::Bound<'_, PyAny>> = list.iter().collect();
                                     row = PyTuple::new(py, items)?.into_any().unbind();
                                 }
@@ -541,9 +541,7 @@ impl Cursor {
                 return Python::attach(|py| -> PyResult<Py<PyAny>> {
                     let future = async move {
                         #[allow(deprecated)]
-                        Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-                            Ok(PyList::empty(py).into())
-                        })
+                        Python::attach(|py| -> PyResult<Py<PyAny>> { Ok(PyList::empty(py).into()) })
                     };
                     future_into_py(py, future).map(|bound| bound.unbind())
                 });
@@ -554,7 +552,7 @@ impl Cursor {
             let future = async move {
                 ensure_cursor_results_cached(&ctx).await?;
                 #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                Python::attach(|py| -> PyResult<Py<PyAny>> {
                     {
                         let mut desc_guard = ctx.description.lock().unwrap();
                         if desc_guard.is_none() {
@@ -576,7 +574,7 @@ impl Cursor {
                         .as_ref()
                         .and_then(|f| {
                             f.bind(py)
-                                .downcast::<PyString>()
+                                .cast::<PyString>()
                                 .ok()
                                 .and_then(|s| s.to_str().ok().filter(|n| *n == "tuple"))
                         })
@@ -584,7 +582,7 @@ impl Cursor {
                     for row in &results_vec[start..] {
                         let mut r = row.clone_ref(py);
                         if use_tuple {
-                            if let Ok(list) = r.downcast_bound::<PyList>(py) {
+                            if let Ok(list) = r.cast_bound::<PyList>(py) {
                                 let items: Vec<pyo3::Bound<'_, PyAny>> = list.iter().collect();
                                 r = PyTuple::new(py, items)?.into_any().unbind();
                             }
@@ -619,7 +617,7 @@ impl Cursor {
             let future = async move {
                 ensure_cursor_results_cached(&ctx).await?;
                 #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                Python::attach(|py| -> PyResult<Py<PyAny>> {
                     {
                         let mut desc_guard = ctx.description.lock().unwrap();
                         if desc_guard.is_none() {
@@ -641,7 +639,7 @@ impl Cursor {
                         .as_ref()
                         .and_then(|f| {
                             f.bind(py)
-                                .downcast::<PyString>()
+                                .cast::<PyString>()
                                 .ok()
                                 .and_then(|s| s.to_str().ok().filter(|n| *n == "tuple"))
                         })
@@ -650,7 +648,7 @@ impl Cursor {
                     for row in &results_vec[start..end] {
                         let mut r = row.clone_ref(py);
                         if use_tuple {
-                            if let Ok(list) = r.downcast_bound::<PyList>(py) {
+                            if let Ok(list) = r.cast_bound::<PyList>(py) {
                                 let items: Vec<pyo3::Bound<'_, PyAny>> = list.iter().collect();
                                 r = PyTuple::new(py, items)?.into_any().unbind();
                             }
@@ -906,7 +904,7 @@ impl Cursor {
         Python::attach(|py| {
             let future = async move {
                 #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                Python::attach(|py| -> PyResult<Py<PyAny>> {
                     // Lazy description: set from pending on first iteration
                     {
                         let mut desc_guard = description.lock().unwrap();
@@ -928,9 +926,9 @@ impl Cursor {
                             *index_guard += 1;
                             let o_guard = row_factory_override.lock().unwrap();
                             if let Some(ref f) = *o_guard {
-                                if let Ok(s) = f.bind(py).downcast::<PyString>() {
+                                if let Ok(s) = f.bind(py).cast::<PyString>() {
                                     if s.to_str().is_ok_and(|n| n == "tuple") {
-                                        if let Ok(list) = row.downcast_bound::<PyList>(py) {
+                                        if let Ok(list) = row.cast_bound::<PyList>(py) {
                                             let items: Vec<pyo3::Bound<'_, PyAny>> =
                                                 list.iter().collect();
                                             row = PyTuple::new(py, items)?.into_any().unbind();
