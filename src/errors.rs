@@ -48,10 +48,20 @@ fn sanitize_query(query: &str) -> String {
                     let first = query[start..].chars().next().unwrap();
                     let end = if first == '\'' || first == '"' {
                         let rest_start = start + first.len_utf8();
-                        query[rest_start..]
-                            .find(first)
-                            .map(|close| rest_start + close + first.len_utf8())
-                            .unwrap_or(query.len())
+                        let mut scan_from = rest_start;
+                        loop {
+                            let Some(relative_quote) = query[scan_from..].find(first) else {
+                                break query.len();
+                            };
+                            let quote_at = scan_from + relative_quote;
+                            let after_quote = quote_at + first.len_utf8();
+                            if query[after_quote..].starts_with(first) {
+                                // SQL escapes a quote inside a literal by doubling it.
+                                scan_from = after_quote + first.len_utf8();
+                            } else {
+                                break after_quote;
+                            }
+                        }
                     } else {
                         query[start..]
                             .find(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';')

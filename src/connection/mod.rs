@@ -24,7 +24,7 @@ use libsqlite3_sys::{
 
 use crate::context_managers::next_savepoint_name;
 use crate::conversion::row_to_py_with_factory;
-use crate::errors::map_sqlx_error;
+use crate::errors::{map_sqlx_error, map_sqlx_error_with_visibility};
 use crate::parameters::process_parameters;
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
@@ -2862,6 +2862,7 @@ impl Connection {
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let session_connection = Arc::clone(&self_.session_connection);
+        let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
@@ -2921,7 +2922,14 @@ impl Connection {
                         sqlx::query(&pragma_query)
                             .execute(&mut **conn)
                             .await
-                            .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
+                            .map_err(|e| {
+                                map_sqlx_error_with_visibility(
+                                    e,
+                                    &path,
+                                    &pragma_query,
+                                    include_query_in_errors,
+                                )
+                            })?;
                         return Ok(());
                     }
                 }
@@ -2931,7 +2939,14 @@ impl Connection {
                         sqlx::query(&pragma_query)
                             .execute(&mut **conn)
                             .await
-                            .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
+                            .map_err(|e| {
+                                map_sqlx_error_with_visibility(
+                                    e,
+                                    &path,
+                                    &pragma_query,
+                                    include_query_in_errors,
+                                )
+                            })?;
                         return Ok(());
                     }
                 }
@@ -2962,7 +2977,14 @@ impl Connection {
                 sqlx::query(&pragma_query)
                     .execute(&mut *conn)
                     .await
-                    .map_err(|e| map_sqlx_error(e, &path, &pragma_query))?;
+                    .map_err(|e| {
+                        map_sqlx_error_with_visibility(
+                            e,
+                            &path,
+                            &pragma_query,
+                            include_query_in_errors,
+                        )
+                    })?;
 
                 Ok(())
             };

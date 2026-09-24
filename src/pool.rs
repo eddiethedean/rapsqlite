@@ -201,7 +201,9 @@ pub(crate) async fn apply_pragmas_to_connection(
         sqlx::query(&pragma_query)
             .execute(&mut **conn)
             .await
-            .map_err(|e| crate::map_sqlx_error(e, path, &pragma_query))?;
+            .map_err(|e| {
+                crate::errors::map_sqlx_error_with_visibility(e, path, &pragma_query, false)
+            })?;
     }
     Ok(())
 }
@@ -291,7 +293,9 @@ pub(crate) async fn get_or_create_pool(
         sqlx::query(&pragma_query)
             .execute(&new_pool)
             .await
-            .map_err(|e| crate::map_sqlx_error(e, path, &pragma_query))?;
+            .map_err(|e| {
+                crate::errors::map_sqlx_error_with_visibility(e, path, &pragma_query, false)
+            })?;
     }
 
     let to_use = {
