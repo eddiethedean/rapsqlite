@@ -5,7 +5,9 @@
 mod backup;
 mod callbacks;
 mod schema;
-pub(crate) use callbacks::{discard_callback_connection, rebind_callbacks, CallbackContext};
+pub(crate) use callbacks::{
+    clear_active_handle, discard_callback_connection, rebind_callbacks, CallbackContext,
+};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt, PyList, PyString};
@@ -1135,10 +1137,15 @@ impl Connection {
                                     let _ = cb.bind(py).call1((begin_sql.as_str(),));
                                 });
                             }
-                            sqlx::query(&begin_sql)
+                            let begin_result = sqlx::query(&begin_sql)
                                 .execute(&mut *conn)
                                 .await
-                                .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
+                                .map_err(|e| map_sqlx_error(e, &path, &begin_sql));
+                            if let Err(error) = begin_result {
+                                callbacks::clear_active_handle(&callback_connection);
+                                callbacks::clear_active_handle(&transaction_connection);
+                                return Err(error);
+                            }
                             conn_guard.0 = Some(conn);
                             let mut tguard = transaction_state.lock().await;
                             *tguard = TransactionState::Active;

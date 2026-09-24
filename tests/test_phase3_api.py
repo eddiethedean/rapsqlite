@@ -428,6 +428,16 @@ async def test_interrupt(test_db):
 
 
 @pytest.mark.asyncio
+async def test_interrupt_after_callback_transaction_context(test_db):
+    """A completed callback transaction does not leave a stale interrupt handle."""
+    async with connect(test_db) as db:
+        await db.create_function("identity", 1, lambda value: value)
+        async with db.transaction():
+            pass
+        await db.interrupt()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("in_transaction", [False, True])
 async def test_interrupt_active_callback_query(test_db, in_transaction):
     """interrupt() reaches callback-backed queries without waiting on their slot lock."""

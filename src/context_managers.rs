@@ -16,7 +16,9 @@ pub(crate) fn next_savepoint_name() -> String {
     format!("sp_{}", SAVEPOINT_COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-use crate::connection::{ensure_not_closed, CallbackContext, ConnectionExecutionState};
+use crate::connection::{
+    clear_active_handle, ensure_not_closed, CallbackContext, ConnectionExecutionState,
+};
 use crate::conversion::{
     build_description_empty_result, build_description_tuple, row_to_py_with_factory,
 };
@@ -819,10 +821,15 @@ impl TransactionContextManager {
                                 .unwrap_or_else(|| "IMMEDIATE".to_string());
                             let begin_sql = format!("BEGIN {level}");
                             maybe_trace_sql(&trace_callback, &begin_sql);
-                            sqlx::query(&begin_sql)
+                            let begin_result = sqlx::query(&begin_sql)
                                 .execute(&mut *conn)
                                 .await
-                                .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
+                                .map_err(|e| map_sqlx_error(e, &path, &begin_sql));
+                            if let Err(error) = begin_result {
+                                clear_active_handle(&callback_context.callback_connection);
+                                clear_active_handle(&transaction_connection);
+                                return Err(error);
+                            }
                             conn_guard.0 = Some(conn);
                             let mut trans_guard = transaction_state.lock().await;
                             *trans_guard = TransactionState::Active;
@@ -936,6 +943,8 @@ impl TransactionContextManager {
 
                 // On failure, release the reservation.
                 if result.is_err() {
+                    clear_active_handle(&callback_context.callback_connection);
+                    clear_active_handle(&transaction_connection);
                     let mut trans_guard = transaction_state.lock().await;
                     *trans_guard = TransactionState::None;
                     let mut ex_guard = explicit_transaction.lock().await;
@@ -986,6 +995,8 @@ impl TransactionContextManager {
                     // No-op when !Active (match Connection.commit/rollback; sqlite3/aiosqlite compat)
                     return Ok(());
                 }
+                clear_active_handle(&callback_context.callback_connection);
+                clear_active_handle(&transaction_connection);
                 let mut conn_guard = transaction_connection.lock().await;
                 let mut conn = conn_guard.0.take().ok_or_else(|| {
                     OperationalError::new_err("Transaction connection not available")
