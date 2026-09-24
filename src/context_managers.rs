@@ -475,9 +475,9 @@ impl ExecuteContextManager {
                             let mut ex_guard = explicit_transaction.lock().await;
                             *ex_guard = false;
                         }
+                        clear_active_handle(&callback_connection);
+                        clear_active_handle(&transaction_connection);
                         if has_callbacks_flag {
-                            clear_active_handle(&callback_connection);
-                            clear_active_handle(&transaction_connection);
                             let mut conn_guard = transaction_connection.lock().await;
                             if let Some(mut conn) = conn_guard.0.take() {
                                 conn.close_on_drop();
