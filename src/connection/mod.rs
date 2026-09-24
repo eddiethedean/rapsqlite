@@ -3500,6 +3500,9 @@ impl Connection {
 
                 // Collect table names for data dumping
                 let mut table_names = Vec::new();
+                let mut index_statements = Vec::new();
+                let mut view_statements = Vec::new();
+                let mut trigger_statements = Vec::new();
 
                 // Process schema rows
                 for row in schema_rows {
@@ -3518,10 +3521,13 @@ impl Connection {
                             }
                             // Skip system indexes
                             "index" if !name.starts_with("sqlite_") => {
-                                statements.push(format!("{sql_stmt};"));
+                                index_statements.push(format!("{sql_stmt};"));
                             }
-                            "trigger" | "view" => {
-                                statements.push(format!("{sql_stmt};"));
+                            "view" => {
+                                view_statements.push(format!("{sql_stmt};"));
+                            }
+                            "trigger" => {
+                                trigger_statements.push(format!("{sql_stmt};"));
                             }
                             _ => {}
                         }
@@ -3635,6 +3641,14 @@ impl Connection {
                         ));
                     }
                 }
+
+                // Build secondary schema objects after loading rows. Creating triggers
+                // earlier would fire them while replaying the INSERT statements and
+                // mutate data a second time. Views precede triggers so INSTEAD OF
+                // triggers can refer to their target views.
+                statements.extend(index_statements);
+                statements.extend(view_statements);
+                statements.extend(trigger_statements);
 
                 statements.push("COMMIT;".to_string());
 
