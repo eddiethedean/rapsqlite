@@ -10,6 +10,7 @@ use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -170,6 +171,36 @@ impl SessionConnectionSlot {
 
     pub(crate) async fn lock(&self) -> tokio::sync::OwnedMutexGuard<PoolConnectionSlot> {
         Arc::clone(&self.slot).lock_owned().await
+    }
+}
+
+/// Holds a logical Connection's session slot for one operation. A one-connection
+/// pool cannot keep an idle connection pinned to every logical Connection, so
+/// return that lease to SQLx when the operation finishes.
+pub(crate) struct SessionConnectionGuard {
+    guard: tokio::sync::OwnedMutexGuard<PoolConnectionSlot>,
+    release_when_unlocked: bool,
+}
+
+impl Deref for SessionConnectionGuard {
+    type Target = PoolConnectionSlot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for SessionConnectionGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for SessionConnectionGuard {
+    fn drop(&mut self) {
+        if self.release_when_unlocked {
+            self.guard.0.take();
+        }
     }
 }
 
@@ -560,18 +591,19 @@ pub(crate) async fn lock_session_connection(
     pool_size: &Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
     idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
-) -> Result<tokio::sync::OwnedMutexGuard<PoolConnectionSlot>, PyErr> {
+) -> Result<SessionConnectionGuard, PyErr> {
     let mut guard = session_connection.lock().await;
+    let pool_clone = get_or_create_pool(
+        path,
+        pool,
+        pragmas,
+        pool_size,
+        connection_timeout_secs,
+        idle_timeout_secs,
+    )
+    .await?;
+    let release_when_unlocked = pool_clone.options().get_max_connections() == 1;
     if guard.0.is_none() {
-        let pool_clone = get_or_create_pool(
-            path,
-            pool,
-            pragmas,
-            pool_size,
-            connection_timeout_secs,
-            idle_timeout_secs,
-        )
-        .await?;
         let pool_size_val = *pool_size.lock().unwrap();
         let timeout_val = *connection_timeout_secs.lock().unwrap();
         let conn =
@@ -581,7 +613,10 @@ pub(crate) async fn lock_session_connection(
         let pragmas_list = pragmas.lock().unwrap().clone();
         apply_pragmas_to_connection(conn, &pragmas_list, path).await?;
     }
-    Ok(guard)
+    Ok(SessionConnectionGuard {
+        guard,
+        release_when_unlocked,
+    })
 }
 
 /// Release the session connection (return to pool). Call on close() and when starting a transaction.
