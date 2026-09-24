@@ -1285,6 +1285,8 @@ impl Connection {
 
                 if result.is_err() {
                     // Restore any taken connection and clear transaction state/connection.
+                    callbacks::clear_active_handle(&callback_connection);
+                    callbacks::clear_active_handle(&transaction_connection);
                     let mut trans_guard = transaction_state.lock().await;
                     *trans_guard = TransactionState::None;
                     let mut ex_guard = explicit_transaction.lock().await;
