@@ -13,7 +13,7 @@ use crate::pool::{
 };
 use crate::query::bind_and_fetch_all_on_connection;
 use crate::types::{
-    ProgressHandler, TransactionState, UserAggregates, UserCollations, UserFunctions,
+    ProgressHandler, SqliteParam, TransactionState, UserAggregates, UserCollations, UserFunctions,
 };
 use crate::OperationalError;
 
@@ -61,6 +61,14 @@ pub(crate) async fn run_introspection_query(
     ctx: &SchemaContext,
     query: &str,
 ) -> Result<Vec<sqlx::sqlite::SqliteRow>, PyErr> {
+    run_introspection_query_with_params(ctx, query, &[]).await
+}
+
+async fn run_introspection_query_with_params(
+    ctx: &SchemaContext,
+    query: &str,
+    params: &[SqliteParam],
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, PyErr> {
     ensure_not_closed(&ctx.closed)?;
 
     let in_transaction = {
@@ -105,7 +113,7 @@ pub(crate) async fn run_introspection_query(
             .0
             .as_mut()
             .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
-        bind_and_fetch_all_on_connection(query, &[], conn, &ctx.path).await?
+        bind_and_fetch_all_on_connection(query, params, conn, &ctx.path).await?
     } else if has_callbacks_flag {
         super::rebind_callbacks(ctx.callback_context.clone()).await?;
         let rows_result = {
@@ -114,7 +122,7 @@ pub(crate) async fn run_introspection_query(
                 .0
                 .as_mut()
                 .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-            bind_and_fetch_all_on_connection(query, &[], conn, &ctx.path).await
+            bind_and_fetch_all_on_connection(query, params, conn, &ctx.path).await
         };
         super::discard_callback_connection(&ctx.callback_context).await;
         rows_result?
@@ -142,7 +150,7 @@ pub(crate) async fn run_introspection_query(
             timeout_val,
         )
         .await?;
-        bind_and_fetch_all_on_connection(query, &[], &mut conn, &ctx.path).await?
+        bind_and_fetch_all_on_connection(query, params, &mut conn, &ctx.path).await?
     };
 
     Ok(rows)
@@ -266,9 +274,12 @@ pub(crate) async fn get_foreign_keys(
     ctx: SchemaContext,
     table_name: String,
 ) -> PyResult<Py<PyAny>> {
-    let quoted = quote_pragma_identifier(&table_name);
-    let query = format!("PRAGMA foreign_key_list({quoted})");
-    let rows = run_introspection_query(&ctx, &query).await?;
+    let rows = run_introspection_query_with_params(
+        &ctx,
+        "SELECT * FROM pragma_foreign_key_list(?)",
+        &[SqliteParam::Text(table_name)],
+    )
+    .await?;
 
     #[allow(deprecated)]
     Python::with_gil(|py| -> PyResult<Py<PyAny>> {
@@ -366,9 +377,12 @@ pub(crate) async fn get_index_list(ctx: SchemaContext, table_name: String) -> Py
 
 /// get_index_info: PRAGMA index_info (seqno, cid, name).
 pub(crate) async fn get_index_info(ctx: SchemaContext, index_name: String) -> PyResult<Py<PyAny>> {
-    let quoted = quote_pragma_identifier(&index_name);
-    let query = format!("PRAGMA index_info({quoted})");
-    let rows = run_introspection_query(&ctx, &query).await?;
+    let rows = run_introspection_query_with_params(
+        &ctx,
+        "SELECT * FROM pragma_index_info(?)",
+        &[SqliteParam::Text(index_name)],
+    )
+    .await?;
 
     #[allow(deprecated)]
     Python::with_gil(|py| -> PyResult<Py<PyAny>> {
@@ -388,11 +402,6 @@ pub(crate) async fn get_index_info(ctx: SchemaContext, index_name: String) -> Py
         }
         Ok(result_list.into())
     })
-}
-
-/// Quote a table or index name used as a PRAGMA identifier.
-fn quote_pragma_identifier(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// get_table_xinfo: PRAGMA table_xinfo (cid, name, type, notnull, dflt_value, pk, hidden).
