@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import builtins as _builtins
 import re
 import time
 from collections.abc import Callable
 from typing import Any, cast
-
-import builtins as _builtins
 
 try:  # pragma: no cover - mirrors __init__ fallback logic
     import _rapsqlite as _ext
@@ -20,6 +19,69 @@ if getattr(_ext, "ValueError", None) is not None:
     ValueError = _ext.ValueError
 else:
     ValueError = _builtins.ValueError
+
+
+def _normalize_parameters(parameters: Any | None) -> list[Any]:
+    """Treat only lists and tuples as positional parameter sequences."""
+    if parameters is None:
+        return []
+    if isinstance(parameters, (list, tuple)):
+        return list(parameters)
+    return [parameters]
+
+
+_IN_PLACEHOLDER_RE = re.compile(r"\bIN\s*\(\s*\?\s*\)", re.IGNORECASE)
+
+
+def _sql_code_mask(sql: str) -> list[bool]:
+    """Mark SQL code characters, excluding quoted strings/identifiers and comments."""
+    code = [True] * len(sql)
+    i = 0
+    while i < len(sql):
+        char = sql[i]
+        if char in ("'", '"', "`", "["):
+            closing = "]" if char == "[" else char
+            code[i] = False
+            i += 1
+            while i < len(sql):
+                code[i] = False
+                if sql[i] == closing:
+                    if closing != "]" and i + 1 < len(sql) and sql[i + 1] == closing:
+                        code[i + 1] = False
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if sql.startswith("--", i):
+            end = sql.find("\n", i + 2)
+            end = len(sql) if end < 0 else end
+            code[i:end] = [False] * (end - i)
+            i = end
+            continue
+        if sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            end = len(sql) if end < 0 else end + 2
+            code[i:end] = [False] * (end - i)
+            i = end
+            continue
+        i += 1
+    return code
+
+
+def _full_scan_targets(details: list[str]) -> list[str]:
+    """Extract table names from SQLite's full-scan EXPLAIN QUERY PLAN details."""
+    targets: list[str] = []
+    for detail in details:
+        match = re.match(r"^\s*SCAN\s+(?:TABLE\s+)?(.+?)\s*$", detail, re.IGNORECASE)
+        if not match:
+            continue
+        target = match.group(1).split(None, 1)[0]
+        if target.upper() in {"CONSTANT", "SUBQUERY", "MATERIALIZE", "CO-ROUTINE"}:
+            continue
+        targets.append(target)
+    return targets
 
 
 async def timed_fetch_all(
@@ -47,7 +109,7 @@ def execute_iter(
     sql: str,
     parameters: Any | None = None,
     chunk_size: int | None = None,
-) -> "_StreamChunksIterator":
+) -> _StreamChunksIterator:
     """Return an async iterator that yields rows in chunks (streaming / memory-efficient).
 
     Uses LIMIT/OFFSET under the hood so memory stays bounded by chunk_size.
@@ -72,7 +134,9 @@ async def paginate(
     """
     sql_clean = sql.strip().rstrip(";")
     wrapped = f"SELECT * FROM ({sql_clean}) LIMIT ? OFFSET ?"
-    params = list(parameters) if parameters is not None else []
+    if page_size <= 0:
+        raise ValueError("page_size must be greater than zero")
+    params = _normalize_parameters(parameters)
     rows = await conn.fetch_all(wrapped, params + [page_size, offset])
     return cast(list[list[Any]], rows)
 
@@ -93,11 +157,12 @@ async def analyze_query_plan(
         else:
             details.append(str(row))
     detail_str = " ".join(details).upper()
+    full_scan_targets = _full_scan_targets(details)
     return {
         "rows": rows,
         "details": details,
         "uses_index": "USING INDEX" in detail_str or "INDEX" in detail_str,
-        "table_scan": "SCAN TABLE" in detail_str or "TABLE SCAN" in detail_str,
+        "table_scan": bool(full_scan_targets) or "TABLE SCAN" in detail_str,
     }
 
 
@@ -114,24 +179,22 @@ async def suggest_indexes(
     suggestions: list[dict[str, Any]] = []
     seen_tables: set[str] = set()
 
-    for detail in analysis.get("details", []):
-        detail_upper = str(detail).upper()
-        # SCAN TABLE tablename or SCAN TABLE tablename AS alias
-        match = re.search(r"SCAN\s+TABLE\s+(\w+)", detail_upper, re.IGNORECASE)
-        if match:
-            table = match.group(1)
-            if table not in seen_tables:
-                seen_tables.add(table)
-                suggestions.append(
-                    {
-                        "table": table,
-                        "column": "",
-                        "suggestion": (
-                            f"CREATE INDEX idx_{table}_<columns> ON {table}(<columns>) "
-                            "-- add columns used in WHERE, ORDER BY, or JOIN"
-                        ),
-                    }
-                )
+    for table in _full_scan_targets(
+        [str(detail) for detail in analysis.get("details", [])]
+    ):
+        if table.casefold() in seen_tables:
+            continue
+        seen_tables.add(table.casefold())
+        suggestions.append(
+            {
+                "table": table,
+                "column": "",
+                "suggestion": (
+                    f"CREATE INDEX idx_{table}_<columns> ON {table}(<columns>) "
+                    "-- add columns used in WHERE, ORDER BY, or JOIN"
+                ),
+            }
+        )
 
     return suggestions
 
@@ -146,17 +209,16 @@ def in_clause_query(
             "in_clause_query requires at least one value; IN () is invalid in SQLite"
         )
     placeholders = ",".join("?" * len(values))
-    new_sql = re.sub(
-        r"\bIN\s*\(\s*\?\s*\)",
-        f"IN ({placeholders})",
-        sql,
-        count=1,
-        flags=re.IGNORECASE,
+    code = _sql_code_mask(sql)
+    match = next(
+        (m for m in _IN_PLACEHOLDER_RE.finditer(sql) if all(code[m.start() : m.end()])),
+        None,
     )
-    if new_sql == sql:
+    if match is None:
         raise ValueError(
             "in_clause_query: sql must contain 'IN (?)' placeholder; found no match"
         )
+    new_sql = sql[: match.start()] + f"IN ({placeholders})" + sql[match.end() :]
     return (new_sql, list(values))
 
 
@@ -170,7 +232,7 @@ def rows_to_dicts(
     col_list = list(columns)
     result: list[dict[str, Any]] = []
     for row in rows:
-        if hasattr(row, "keys") and callable(getattr(row, "keys")):
+        if hasattr(row, "keys") and callable(row.keys):
             result.append(dict(row))
         else:
             row_iter = row if isinstance(row, (list, tuple)) else list(row)
@@ -190,16 +252,18 @@ class _StreamChunksIterator:
     ) -> None:
         self._conn = conn
         self._sql = sql.strip().rstrip(";")
-        self._params = list(parameters) if parameters is not None else []
+        self._params = _normalize_parameters(parameters)
         try:
             default_chunk = getattr(conn, "iter_chunk_size", 64)
             default_chunk = int(default_chunk) if default_chunk is not None else 64
         except (TypeError, ValueError):
             default_chunk = 64
         self._chunk_size = int(chunk_size) if chunk_size is not None else default_chunk
+        if self._chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than zero")
         self._offset = 0
 
-    def __aiter__(self) -> "_StreamChunksIterator":
+    def __aiter__(self) -> _StreamChunksIterator:
         return self
 
     async def __anext__(self) -> list[list[Any]]:
