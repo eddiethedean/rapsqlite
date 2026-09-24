@@ -5,6 +5,7 @@
 mod backup;
 mod callbacks;
 mod schema;
+pub(crate) use callbacks::{discard_callback_connection, rebind_callbacks, CallbackContext};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt, PyList, PyString};
@@ -18,8 +19,8 @@ use tokio::sync::Mutex;
 
 // libsqlite3-sys for raw SQLite C API access
 use libsqlite3_sys::{
-    sqlite3_enable_load_extension, sqlite3_free, sqlite3_interrupt, sqlite3_libversion_number,
-    sqlite3_load_extension, sqlite3_total_changes, SQLITE_OK,
+    sqlite3_free, sqlite3_interrupt, sqlite3_libversion_number, sqlite3_load_extension,
+    sqlite3_total_changes, SQLITE_OK,
 };
 
 use crate::context_managers::next_savepoint_name;
@@ -27,9 +28,10 @@ use crate::conversion::row_to_py_with_factory;
 use crate::errors::map_sqlx_error;
 use crate::parameters::process_parameters;
 use crate::pool::{
-    acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
-    execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
-    PoolConnectionSlot, PoolSlot,
+    acquire_with_pragmas, apply_pragmas_to_connection, close_registered_pool_if_last,
+    execute_init_hook_if_needed, get_or_create_pool, has_callbacks, lock_session_connection,
+    release_session_connection, PoolConnectionSlot, PoolRegistryLease, PoolSlot,
+    SessionConnectionSlot,
 };
 use crate::query::{
     bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
@@ -53,6 +55,7 @@ use crate::{InterfaceError, InternalError, OperationalError};
 #[pyclass]
 pub(crate) struct Connection {
     path: String,
+    pool_registry_lease: Arc<StdMutex<Option<PoolRegistryLease>>>,
     pool: Arc<Mutex<PoolSlot>>,
     transaction_state: Arc<Mutex<TransactionState>>,
     // Store the connection used for active transaction
@@ -77,8 +80,11 @@ pub(crate) struct Connection {
     query_cache: Arc<StdMutex<HashMap<String, u64>>>, // normalized_query -> usage_count
     // Callback infrastructure (Phase 2.7)
     callback_connection: Arc<Mutex<PoolConnectionSlot>>, // Dedicated connection for callbacks
-    load_extension_enabled: Arc<StdMutex<bool>>,         // Track load_extension state
-    user_functions: UserFunctions,                       // name -> (nargs, callback)
+    callback_operation_lock: Arc<Mutex<()>>,
+    callback_connection_required: Arc<StdMutex<bool>>, // Callback handle needed for extensions or callbacks
+    extension_loading_allowed: Arc<StdMutex<bool>>,
+    loaded_extensions: Arc<StdMutex<Vec<String>>>,
+    user_functions: UserFunctions,   // name -> (nargs, callback)
     user_aggregates: UserAggregates, // name -> (num_params, user_data ptr for cleanup)
     user_collations: UserCollations, // name -> user_data ptr for cleanup on remove
     adapters: Adapters,              // (type, callable) for register_adapter
@@ -105,7 +111,7 @@ pub(crate) struct Connection {
     closed: Arc<StdMutex<bool>>,
     /// Reused connection for non-transaction, non-callback operations (session-scoped).
     /// Released on close() and when starting a transaction to match aiosqlite and improve concurrent reads.
-    session_connection: Arc<Mutex<PoolConnectionSlot>>,
+    session_connection: SessionConnectionSlot,
 }
 
 // Note: We do not implement Drop for Connection because:
@@ -129,7 +135,7 @@ pub(crate) struct Connection {
 pub(crate) struct ConnectionExecutionState {
     pub(crate) path: String,
     pub(crate) pool: Arc<Mutex<PoolSlot>>,
-    pub(crate) session_connection: Arc<Mutex<PoolConnectionSlot>>,
+    pub(crate) session_connection: SessionConnectionSlot,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
@@ -137,7 +143,8 @@ pub(crate) struct ConnectionExecutionState {
     pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
     pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
+    pub(crate) callback_context: CallbackContext,
+    pub(crate) callback_connection_required: Arc<StdMutex<bool>>,
     pub(crate) user_functions: UserFunctions,
     pub(crate) user_aggregates: UserAggregates,
     pub(crate) user_collations: UserCollations,
@@ -177,9 +184,37 @@ pub(crate) fn ensure_not_closed(closed: &Arc<StdMutex<bool>>) -> Result<(), PyEr
 }
 
 impl Connection {
+    pub(crate) fn callback_context(&self) -> CallbackContext {
+        CallbackContext {
+            closed: Arc::clone(&self.closed),
+            path: self.path.clone(),
+            pool: Arc::clone(&self.pool),
+            pragmas: Arc::clone(&self.pragmas),
+            pool_size: Arc::clone(&self.pool_size),
+            connection_timeout_secs: Arc::clone(&self.connection_timeout_secs),
+            idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
+            transaction_connection: Arc::clone(&self.transaction_connection),
+            callback_connection: Arc::clone(&self.callback_connection),
+            callback_operation_lock: Arc::clone(&self.callback_operation_lock),
+            callback_connection_required: Arc::clone(&self.callback_connection_required),
+            extension_loading_allowed: Arc::clone(&self.extension_loading_allowed),
+            loaded_extensions: Arc::clone(&self.loaded_extensions),
+            user_functions: Arc::clone(&self.user_functions),
+            user_aggregates: Arc::clone(&self.user_aggregates),
+            user_collations: Arc::clone(&self.user_collations),
+            trace_callback: Arc::clone(&self.trace_callback),
+            authorizer_callback: Arc::clone(&self.authorizer_callback),
+            progress_handler: Arc::clone(&self.progress_handler),
+            authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
+            progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
+            skip_release: false,
+        }
+    }
+
     /// Build schema introspection context for delegation to schema module.
     fn build_schema_context(self_: PyRef<Self>) -> schema::SchemaContext {
         schema::SchemaContext {
+            callback_context: self_.callback_context(),
             path: self_.path.clone(),
             pool: Arc::clone(&self_.pool),
             pragmas: Arc::clone(&self_.pragmas),
@@ -189,7 +224,7 @@ impl Connection {
             transaction_state: Arc::clone(&self_.transaction_state),
             transaction_connection: Arc::clone(&self_.transaction_connection),
             callback_connection: Arc::clone(&self_.callback_connection),
-            load_extension_enabled: Arc::clone(&self_.load_extension_enabled),
+            callback_connection_required: Arc::clone(&self_.callback_connection_required),
             user_functions: Arc::clone(&self_.user_functions),
             user_aggregates: Arc::clone(&self_.user_aggregates),
             user_collations: Arc::clone(&self_.user_collations),
@@ -280,17 +315,32 @@ impl Connection {
             return Err(ValueError::new_err("iter_chunk_size must be >= 1"));
         }
         let iter_chunk_size = iter_chunk_size as usize;
-        // Parse connection string if it's a URI
-        let (db_path, uri_params) = parse_connection_string(&path)?;
-        validate_path(&db_path)?;
+        // Split SQLite URI connection options from the database path. Options such
+        // as mode/cache belong in the SQLite URL, not in PRAGMA statements.
+        let (parsed_path, uri_params) = parse_connection_string(&path)?;
+        validate_path(&parsed_path)?;
 
-        // Merge URI params with pragmas dict
         let mut all_pragmas = Vec::new();
-
-        // Add URI parameters
+        let mut sqlite_uri_options = Vec::new();
         for (key, value) in uri_params {
-            all_pragmas.push((key, value));
+            match key.to_ascii_lowercase().as_str() {
+                "mode" | "cache" | "immutable" | "vfs" | "nolock" | "psow" => {
+                    sqlite_uri_options.push((key, value));
+                }
+                _ => all_pragmas.push((key, value)),
+            }
         }
+        let db_path = if sqlite_uri_options.is_empty() {
+            parsed_path
+        } else {
+            let options = sqlite_uri_options
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join("&");
+            format!("file:{parsed_path}?{options}")
+        };
+        let (pool_registry_lease, session_connection) = PoolRegistryLease::new(db_path.clone());
 
         // Add pragmas from dict if provided
         if let Some(pragmas_dict) = pragmas {
@@ -310,6 +360,7 @@ impl Connection {
 
         Ok(Connection {
             path: db_path,
+            pool_registry_lease: Arc::new(StdMutex::new(Some(pool_registry_lease))),
             pool: Arc::new(Mutex::new(PoolSlot::default())),
             transaction_state: Arc::new(Mutex::new(TransactionState::None)),
             transaction_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
@@ -327,7 +378,10 @@ impl Connection {
             query_cache: Arc::new(StdMutex::new(HashMap::new())),
             // Callback infrastructure (Phase 2.7)
             callback_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
-            load_extension_enabled: Arc::new(StdMutex::new(false)),
+            callback_operation_lock: Arc::new(Mutex::new(())),
+            callback_connection_required: Arc::new(StdMutex::new(false)),
+            extension_loading_allowed: Arc::new(StdMutex::new(false)),
+            loaded_extensions: Arc::new(StdMutex::new(Vec::new())),
             user_functions: Arc::new(StdMutex::new(HashMap::new())),
             user_aggregates: Arc::new(StdMutex::new(HashMap::new())),
             user_collations: Arc::new(StdMutex::new(HashMap::new())),
@@ -344,7 +398,7 @@ impl Connection {
             iter_chunk_size: Arc::new(StdMutex::new(iter_chunk_size)), // Phase 3.10: aiosqlite compat
             explicit_transaction: Arc::new(Mutex::new(false)),
             closed: Arc::new(StdMutex::new(false)),
-            session_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
+            session_connection,
         })
     }
 
@@ -400,15 +454,15 @@ impl Connection {
     fn total_changes(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
-        let session_connection = Arc::clone(&self.session_connection);
-        let callback_connection = Arc::clone(&self.callback_connection);
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
         let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
         let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
+        let session_connection = self.session_connection.clone();
+        let callback_connection = Arc::clone(&self.callback_connection);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self.callback_connection_required);
         let user_functions = Arc::clone(&self.user_functions);
         let user_aggregates = Arc::clone(&self.user_aggregates);
         let user_collations = Arc::clone(&self.user_collations);
@@ -416,6 +470,7 @@ impl Connection {
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         let closed = Arc::clone(&self.closed);
+        let callback_context = self.callback_context();
 
         Python::attach(|py| {
             let future = async move {
@@ -440,7 +495,7 @@ impl Connection {
                 } else {
                     // Check if callbacks are set - if not, use session connection
                     let has_callbacks_flag = has_callbacks(
-                        &load_extension_enabled,
+                        &callback_connection_required,
                         &user_functions,
                         &user_aggregates,
                         &user_collations,
@@ -450,18 +505,9 @@ impl Connection {
                     );
 
                     if has_callbacks_flag {
-                        // Use callback connection (needed for callbacks)
-                        ensure_callback_connection(
-                            &path,
-                            &pool,
-                            &callback_connection,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-
+                        let _callback_operation_guard =
+                            callback_context.callback_operation_lock.lock().await;
+                        callbacks::rebind_callbacks(callback_context.clone()).await?;
                         let mut conn_guard = callback_connection.lock().await;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
@@ -470,10 +516,15 @@ impl Connection {
                         let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
                             OperationalError::new_err(format!("Failed to lock handle: {e}"))
                         })?;
-                        handle.as_raw_handle().as_ptr()
+                        let total =
+                            unsafe { sqlite3_total_changes(handle.as_raw_handle().as_ptr()) };
+                        drop(handle);
+                        drop(conn_guard);
+                        callbacks::discard_callback_connection(&callback_context).await;
+                        return Ok(total as u64);
                     } else {
                         // No callbacks - use session connection (compute total while handle is valid)
-                        ensure_session_connection(
+                        let mut conn_guard = lock_session_connection(
                             &path,
                             &pool,
                             &session_connection,
@@ -483,7 +534,6 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let mut conn_guard = session_connection.lock().await;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
@@ -592,10 +642,13 @@ impl Connection {
             }
             Some(n as usize)
         };
+        if let Some(lease) = self.pool_registry_lease.lock().unwrap().as_ref() {
+            lease.configure_pool_size(*guard);
+        }
         Ok(())
     }
 
-    /// Return pool metrics (size, num_idle, in_use). Pool must exist (use connection first).
+    /// Return pool metrics (size, num_idle, in_use, max_connections).
     fn pool_metrics(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
@@ -624,12 +677,14 @@ impl Connection {
                 let size = p.size();
                 let num_idle = p.num_idle();
                 let in_use = size as usize - num_idle;
+                let max_connections = p.options().get_max_connections();
                 #[allow(deprecated)]
                 Python::with_gil(|py| -> PyResult<Py<PyAny>> {
                     let dict = PyDict::new(py);
                     dict.set_item("size", size)?;
                     dict.set_item("num_idle", num_idle)?;
                     dict.set_item("in_use", in_use)?;
+                    dict.set_item("max_connections", max_connections)?;
                     Ok(dict.into_any().unbind())
                 })
             };
@@ -913,7 +968,7 @@ impl Connection {
     /// Close the connection.
     fn close(&self) -> PyResult<Py<PyAny>> {
         let pool = Arc::clone(&self.pool);
-        let session_connection = Arc::clone(&self.session_connection);
+        let session_connection = self.session_connection.clone();
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
@@ -925,8 +980,16 @@ impl Connection {
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         let closed = Arc::clone(&self.closed);
+        let pool_registry_lease = Arc::clone(&self.pool_registry_lease);
+        let lease_guard = pool_registry_lease.lock().unwrap();
+        let pool_registry_identity = lease_guard
+            .as_ref()
+            .and_then(PoolRegistryLease::identity)
+            .map(str::to_owned);
+        drop(lease_guard);
         Python::attach(|py| {
             let future = async move {
+                *closed.lock().unwrap() = true;
                 // Release session connection back to pool
                 release_session_connection(&session_connection).await;
                 // Clear all callbacks before closing
@@ -971,8 +1034,12 @@ impl Connection {
                 // Release our reference to the pool (do not close: pool is shared via global registry).
                 let mut pool_guard = pool.lock().await;
                 let _ = pool_guard.0.take();
+                drop(pool_guard);
+                if let Some(identity) = pool_registry_identity.as_deref() {
+                    close_registered_pool_if_last(identity).await;
+                }
+                pool_registry_lease.lock().unwrap().take();
 
-                *closed.lock().unwrap() = true;
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -988,17 +1055,17 @@ impl Connection {
     fn begin(self_: PyRef<Self>) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
-        let session_connection = Arc::clone(&self_.session_connection);
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let session_connection = self_.session_connection.clone();
         let explicit_transaction = Arc::clone(&self_.explicit_transaction);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self_.callback_connection_required);
         let user_functions = Arc::clone(&self_.user_functions);
         let user_aggregates = Arc::clone(&self_.user_aggregates);
         let user_collations = Arc::clone(&self_.user_collations);
@@ -1011,6 +1078,7 @@ impl Connection {
         let timeout = Arc::clone(&self_.timeout);
         let isolation_level = Arc::clone(&self_.isolation_level);
         let closed = Arc::clone(&self_.closed);
+        let callback_context = self_.callback_context();
         let connection_self = self_.into();
         Python::attach(|py| {
             let future = async move {
@@ -1109,7 +1177,7 @@ impl Connection {
 
                     // Check if callbacks are set - if so, use callback connection for transaction
                     let has_callbacks_flag = has_callbacks(
-                        &load_extension_enabled,
+                        &callback_connection_required,
                         &user_functions,
                         &user_aggregates,
                         &user_collations,
@@ -1119,17 +1187,10 @@ impl Connection {
                     );
 
                     if has_callbacks_flag {
+                        let _callback_operation_guard =
+                            callback_context.callback_operation_lock.lock().await;
                         from_callback = true;
-                        ensure_callback_connection(
-                            &path,
-                            &pool,
-                            &callback_connection,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
+                        callbacks::rebind_callbacks(callback_context.clone()).await?;
                         let mut conn_guard = callback_connection.lock().await;
                         let conn = conn_guard.0.take().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
@@ -1228,9 +1289,8 @@ impl Connection {
                     let mut conn = trans_conn_guard.0.take().or_else(|| pending_conn.0.take());
 
                     if from_callback {
-                        if let Some(c) = conn.take() {
-                            let mut cb_guard = callback_connection.lock().await;
-                            cb_guard.0 = Some(c);
+                        if let Some(mut c) = conn.take() {
+                            c.close_on_drop();
                         }
                     } else {
                         drop(conn);
@@ -1246,12 +1306,11 @@ impl Connection {
     /// Commit the current transaction.
     fn commit(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
+        let callback_operation_lock = Arc::clone(&self.callback_operation_lock);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
-        // Callback infrastructure (Phase 2.7) - need to return connection if it came from callbacks
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self.callback_connection_required);
         let user_functions = Arc::clone(&self.user_functions);
         let user_aggregates = Arc::clone(&self.user_aggregates);
         let user_collations = Arc::clone(&self.user_collations);
@@ -1260,15 +1319,16 @@ impl Connection {
         let progress_handler = Arc::clone(&self.progress_handler);
         Python::attach(|py| {
             let future = async move {
+                let _callback_operation_guard = callback_operation_lock.lock().await;
                 let mut trans_guard = transaction_state.lock().await;
                 // DBAPI compat: commit() is a no-op when not in an explicit transaction
                 if *trans_guard != TransactionState::Active {
                     return Ok(());
                 }
 
-                // Check if callbacks are set - if so, we need to return connection to callback_connection
+                // Callback registrations are rebound to a checked-out handle on the next operation.
                 let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -1289,6 +1349,10 @@ impl Connection {
                         return Ok(());
                     }
                 };
+
+                if has_callbacks_flag {
+                    conn.close_on_drop();
+                }
 
                 // Execute COMMIT on the same connection that started the transaction
                 #[allow(deprecated)]
@@ -1307,14 +1371,7 @@ impl Connection {
                     .await
                     .map_err(|e| map_sqlx_error(e, &path, "COMMIT"))?;
 
-                // If callbacks are set, return connection to callback_connection; otherwise it goes back to pool
-                if has_callbacks_flag {
-                    let mut callback_guard = callback_connection.lock().await;
-                    callback_guard.0 = Some(conn);
-                } else {
-                    // Connection is automatically returned to pool when dropped
-                    drop(conn);
-                }
+                drop(conn);
 
                 *trans_guard = TransactionState::None;
                 drop(trans_guard);
@@ -1329,12 +1386,12 @@ impl Connection {
     /// Rollback the current transaction.
     fn rollback(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
+        let callback_operation_lock = Arc::clone(&self.callback_operation_lock);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
-        // Callback infrastructure (Phase 2.7) - need to return connection if it came from callbacks
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        // Callback registrations are rebound to a checked-out handle on the next operation.
+        let callback_connection_required = Arc::clone(&self.callback_connection_required);
         let user_functions = Arc::clone(&self.user_functions);
         let user_aggregates = Arc::clone(&self.user_aggregates);
         let user_collations = Arc::clone(&self.user_collations);
@@ -1343,15 +1400,16 @@ impl Connection {
         let progress_handler = Arc::clone(&self.progress_handler);
         Python::attach(|py| {
             let future = async move {
+                let _callback_operation_guard = callback_operation_lock.lock().await;
                 let mut trans_guard = transaction_state.lock().await;
                 // DBAPI compat: rollback() is a no-op when not in an explicit transaction
                 if *trans_guard != TransactionState::Active {
                     return Ok(());
                 }
 
-                // Check if callbacks are set - if so, we need to return connection to callback_connection
+                // Check whether this physical connection must be discarded after rollback.
                 let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -1373,6 +1431,10 @@ impl Connection {
                     }
                 };
 
+                if has_callbacks_flag {
+                    conn.close_on_drop();
+                }
+
                 // Execute ROLLBACK on the same connection that started the transaction
                 #[allow(deprecated)]
                 let trace_cb = Python::with_gil(|py| {
@@ -1390,14 +1452,7 @@ impl Connection {
                     .await
                     .map_err(|e| map_sqlx_error(e, &path, "ROLLBACK"))?;
 
-                // If callbacks are set, return connection to callback_connection; otherwise it goes back to pool
-                if has_callbacks_flag {
-                    let mut callback_guard = callback_connection.lock().await;
-                    callback_guard.0 = Some(conn);
-                } else {
-                    // Connection is automatically returned to pool when dropped
-                    drop(conn);
-                }
+                drop(conn);
 
                 *trans_guard = TransactionState::None;
                 drop(trans_guard);
@@ -1467,7 +1522,7 @@ impl Connection {
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
-        let session_connection = Arc::clone(&self_.session_connection);
+        let session_connection = self_.session_connection.clone();
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
@@ -1479,7 +1534,7 @@ impl Connection {
         let explicit_transaction = Arc::clone(&self_.explicit_transaction);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self_.callback_connection_required);
         let user_functions = Arc::clone(&self_.user_functions);
         let user_aggregates = Arc::clone(&self_.user_aggregates);
         let user_collations = Arc::clone(&self_.user_collations);
@@ -1498,6 +1553,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
+        let callback_context = self_.callback_context();
         let connection_self: Py<Connection> = self_.into();
 
         // Raise immediately if connection is closed (cursor.execute() on closed connection, etc.)
@@ -1572,8 +1628,10 @@ impl Connection {
                     text_factory: Arc::clone(&text_factory),
                     transaction_state: Arc::clone(&transaction_state),
                     transaction_connection: Arc::clone(&transaction_connection),
+                    session_connection: session_connection.clone(),
                     callback_connection: Arc::clone(&callback_connection),
-                    load_extension_enabled: Arc::clone(&load_extension_enabled),
+                    callback_connection_required: Arc::clone(&callback_connection_required),
+                    callback_context: callback_context.clone(),
                     user_functions: Arc::clone(&user_functions),
                     user_aggregates: Arc::clone(&user_aggregates),
                     user_collations: Arc::clone(&user_collations),
@@ -1615,7 +1673,7 @@ impl Connection {
             let state = ConnectionExecutionState {
                 path,
                 pool: Arc::clone(&pool),
-                session_connection: Arc::clone(&session_connection),
+                session_connection: session_connection.clone(),
                 pragmas: Arc::clone(&pragmas),
                 pool_size: Arc::clone(&pool_size),
                 connection_timeout_secs: Arc::clone(&connection_timeout_secs),
@@ -1623,7 +1681,8 @@ impl Connection {
                 transaction_state: Arc::clone(&transaction_state),
                 transaction_connection: Arc::clone(&transaction_connection),
                 callback_connection: Arc::clone(&callback_connection),
-                load_extension_enabled: Arc::clone(&load_extension_enabled),
+                callback_context: callback_context.clone(),
+                callback_connection_required: Arc::clone(&callback_connection_required),
                 user_functions: Arc::clone(&user_functions),
                 user_aggregates: Arc::clone(&user_aggregates),
                 user_collations: Arc::clone(&user_collations),
@@ -1670,9 +1729,10 @@ impl Connection {
         let last_changes = Arc::clone(&self_.last_changes);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let session_connection = self_.session_connection.clone();
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self_.callback_connection_required);
         let user_functions = Arc::clone(&self_.user_functions);
         let user_aggregates = Arc::clone(&self_.user_aggregates);
         let user_collations = Arc::clone(&self_.user_collations);
@@ -1685,6 +1745,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let _timeout = Arc::clone(&self_.timeout);
         let adapters = Arc::clone(&self_.adapters);
+        let callback_context = self_.callback_context();
         let connection_self = self_.into();
 
         // Process all parameter sets
@@ -1737,7 +1798,7 @@ impl Connection {
                 execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
                 let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -1745,6 +1806,11 @@ impl Connection {
                     &authorizer_callback,
                     &progress_handler,
                 );
+                let _callback_operation_guard = if has_callbacks_flag {
+                    Some(callback_context.callback_operation_lock.lock().await)
+                } else {
+                    None
+                };
 
                 let mut total_changes = 0u64;
                 let mut last_row_id = 0i64;
@@ -1765,60 +1831,42 @@ impl Connection {
                         drop(conn_guard);
                     }
                 } else if has_callbacks_flag {
-                    // Ensure callback connection exists once before the loop
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-
-                    // Use callback connection for each iteration
-                    for param_values in processed_params.iter() {
-                        let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Callback connection not available")
-                        })?;
-                        let result =
-                            bind_and_execute_on_connection(&query, param_values, conn, &path)
-                                .await?;
-                        total_changes += result.rows_affected();
-                        last_row_id = result.last_insert_rowid();
-                        drop(conn_guard);
+                    let execution_result: Result<(), PyErr> = async {
+                        callbacks::rebind_callbacks(callback_context.clone()).await?;
+                        for param_values in processed_params.iter() {
+                            let mut conn_guard = callback_connection.lock().await;
+                            let conn = conn_guard.0.as_mut().ok_or_else(|| {
+                                OperationalError::new_err("Callback connection not available")
+                            })?;
+                            let result =
+                                bind_and_execute_on_connection(&query, param_values, conn, &path)
+                                    .await?;
+                            total_changes += result.rows_affected();
+                            last_row_id = result.last_insert_rowid();
+                        }
+                        Ok(())
                     }
+                    .await;
+                    callbacks::discard_callback_connection(&callback_context).await;
+                    execution_result?;
                 } else {
-                    // Use pool: one connection, lock handle, run batch in block_in_place (single transaction).
-                    // Reuses connection and params (no clone); BEGIN/COMMIT in execute_many_raw_core.
-                    let pool_clone = get_or_create_pool(
+                    // Reuse the connection pinned to this logical Connection. Acquiring another
+                    // pool connection here can deadlock when pool_size=1 because the session
+                    // connection remains checked out between operations.
+                    let mut conn_guard = lock_session_connection(
                         &path,
                         &pool,
+                        &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    let sqlite_conn: &mut SqliteConnection = &mut conn;
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
+                        OperationalError::new_err("Session connection not available")
+                    })?;
+                    let sqlite_conn: &mut SqliteConnection = &mut *conn;
                     let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
                         OperationalError::new_err(format!("Failed to lock handle: {e}"))
                     })?;
@@ -1891,18 +1939,18 @@ impl Connection {
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
-        let session_connection = Arc::clone(&self_.session_connection);
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let session_connection = self_.session_connection.clone();
         let row_factory = Arc::clone(&self_.row_factory);
         let text_factory = Arc::clone(&self_.text_factory);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self_.callback_connection_required);
         let user_functions = Arc::clone(&self_.user_functions);
         let user_aggregates = Arc::clone(&self_.user_aggregates);
         let user_collations = Arc::clone(&self_.user_collations);
@@ -1917,6 +1965,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
+        let callback_context = self_.callback_context();
         let connection_self = self_.into();
 
         // Process parameters (sync; Python::with_gil acceptable here)
@@ -1967,7 +2016,7 @@ impl Connection {
                 execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
                 let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -1975,6 +2024,14 @@ impl Connection {
                     &authorizer_callback,
                     &progress_handler,
                 );
+                let _callback_operation_guard = if has_callbacks_flag {
+                    Some(callback_context.callback_operation_lock.lock().await)
+                } else {
+                    None
+                };
+                if has_callbacks_flag && !in_transaction {
+                    callbacks::rebind_callbacks(callback_context.clone()).await?;
+                }
 
                 let rows = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
@@ -1984,27 +2041,22 @@ impl Connection {
                     bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
                         .await?
                 } else if has_callbacks_flag {
-                    // Ensure callback connection exists
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-
-                    // Use callback connection
                     let mut conn_guard = callback_connection.lock().await;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
-                    bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
+                    let rows_result = bind_and_fetch_all_on_connection(
+                        &processed_query,
+                        &param_values,
+                        conn,
+                        &path,
+                    )
+                    .await;
+                    drop(conn_guard);
+                    callbacks::discard_callback_connection(&callback_context).await;
+                    rows_result?
                 } else {
-                    ensure_session_connection(
+                    let mut conn_guard = lock_session_connection(
                         &path,
                         &pool,
                         &session_connection,
@@ -2014,7 +2066,6 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let mut conn_guard = session_connection.lock().await;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Session connection not available")
                     })?;
@@ -2088,11 +2139,12 @@ impl Connection {
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let session_connection = self_.session_connection.clone();
         let row_factory = Arc::clone(&self_.row_factory);
         let text_factory = Arc::clone(&self_.text_factory);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self_.callback_connection_required);
         let user_functions = Arc::clone(&self_.user_functions);
         let user_aggregates = Arc::clone(&self_.user_aggregates);
         let user_collations = Arc::clone(&self_.user_collations);
@@ -2105,6 +2157,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
+        let callback_context = self_.callback_context();
         let connection_self = self_.into();
 
         // Process parameters (sync; Python::with_gil acceptable here)
@@ -2152,7 +2205,7 @@ impl Connection {
                 execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
                 let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -2160,6 +2213,14 @@ impl Connection {
                     &authorizer_callback,
                     &progress_handler,
                 );
+                let _callback_operation_guard = if has_callbacks_flag {
+                    Some(callback_context.callback_operation_lock.lock().await)
+                } else {
+                    None
+                };
+                if has_callbacks_flag && !in_transaction {
+                    callbacks::rebind_callbacks(callback_context.clone()).await?;
+                }
 
                 let row = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
@@ -2169,58 +2230,36 @@ impl Connection {
                     bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path)
                         .await?
                 } else if has_callbacks_flag {
-                    // Ensure callback connection exists
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-
-                    // Use callback connection
                     let mut conn_guard = callback_connection.lock().await;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
-                    bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path)
-                        .await?
+                    let row_result = bind_and_fetch_one_on_connection(
+                        &processed_query,
+                        &param_values,
+                        conn,
+                        &path,
+                    )
+                    .await;
+                    drop(conn_guard);
+                    callbacks::discard_callback_connection(&callback_context).await;
+                    row_result?
                 } else {
-                    let pool_clone = get_or_create_pool(
+                    let mut conn_guard = lock_session_connection(
                         &path,
                         &pool,
+                        &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
-                    bind_and_fetch_one_on_connection(
-                        &processed_query,
-                        &param_values,
-                        &mut conn,
-                        &path,
-                    )
-                    .await?
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
+                        OperationalError::new_err("Session connection not available")
+                    })?;
+                    bind_and_fetch_one_on_connection(&processed_query, &param_values, conn, &path)
+                        .await?
                 };
 
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
@@ -2288,11 +2327,12 @@ impl Connection {
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let session_connection = self_.session_connection.clone();
         let row_factory = Arc::clone(&self_.row_factory);
         let text_factory = Arc::clone(&self_.text_factory);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self_.callback_connection_required);
         let user_functions = Arc::clone(&self_.user_functions);
         let user_aggregates = Arc::clone(&self_.user_aggregates);
         let user_collations = Arc::clone(&self_.user_collations);
@@ -2305,6 +2345,7 @@ impl Connection {
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
+        let callback_context = self_.callback_context();
         let connection_self = self_.into();
 
         // Process parameters (sync; Python::with_gil acceptable here)
@@ -2339,7 +2380,7 @@ impl Connection {
                 execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
 
                 let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -2347,6 +2388,14 @@ impl Connection {
                     &authorizer_callback,
                     &progress_handler,
                 );
+                let _callback_operation_guard = if has_callbacks_flag {
+                    Some(callback_context.callback_operation_lock.lock().await)
+                } else {
+                    None
+                };
+                if has_callbacks_flag && !in_transaction {
+                    callbacks::rebind_callbacks(callback_context.clone()).await?;
+                }
 
                 let opt = if in_transaction {
                     let mut conn_guard = transaction_connection.lock().await;
@@ -2361,60 +2410,38 @@ impl Connection {
                     )
                     .await?
                 } else if has_callbacks_flag {
-                    // Ensure callback connection exists
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-
-                    // Use callback connection
                     let mut conn_guard = callback_connection.lock().await;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
-                    bind_and_fetch_optional_on_connection(
+                    let opt_result = bind_and_fetch_optional_on_connection(
                         &processed_query,
                         &param_values,
                         conn,
                         &path,
                     )
-                    .await?
+                    .await;
+                    drop(conn_guard);
+                    callbacks::discard_callback_connection(&callback_context).await;
+                    opt_result?
                 } else {
-                    let pool_clone = get_or_create_pool(
+                    let mut conn_guard = lock_session_connection(
                         &path,
                         &pool,
+                        &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let pool_size_val = {
-                        let g = pool_size.lock().unwrap();
-                        *g
-                    };
-                    let timeout_val = {
-                        let g = connection_timeout_secs.lock().unwrap();
-                        *g
-                    };
-                    let mut conn = acquire_with_pragmas(
-                        &pool_clone,
-                        &pragmas,
-                        &path,
-                        pool_size_val,
-                        timeout_val,
-                    )
-                    .await?;
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
+                        OperationalError::new_err("Session connection not available")
+                    })?;
                     bind_and_fetch_optional_on_connection(
                         &processed_query,
                         &param_values,
-                        &mut conn,
+                        conn,
                         &path,
                     )
                     .await?
@@ -2455,8 +2482,9 @@ impl Connection {
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_state = Arc::clone(&self_.transaction_state);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
+        let session_connection = self_.session_connection.clone();
         let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self_.callback_connection_required);
         let user_functions = Arc::clone(&self_.user_functions);
         let user_aggregates = Arc::clone(&self_.user_aggregates);
         let user_collations = Arc::clone(&self_.user_collations);
@@ -2466,6 +2494,7 @@ impl Connection {
         let last_rowid = Arc::clone(&self_.last_rowid);
         let last_changes = Arc::clone(&self_.last_changes);
         let adapters = Arc::clone(&self_.adapters);
+        let callback_context = self_.callback_context();
 
         #[allow(deprecated)]
         let (processed_query, param_values) =
@@ -2486,6 +2515,24 @@ impl Connection {
                     *g == TransactionState::Active
                 };
 
+                let has_callbacks_flag = has_callbacks(
+                    &callback_connection_required,
+                    &user_functions,
+                    &user_aggregates,
+                    &user_collations,
+                    &trace_callback,
+                    &authorizer_callback,
+                    &progress_handler,
+                );
+                let _callback_operation_guard = if has_callbacks_flag {
+                    Some(callback_context.callback_operation_lock.lock().await)
+                } else {
+                    None
+                };
+                if has_callbacks_flag && !in_transaction {
+                    callbacks::rebind_callbacks(callback_context.clone()).await?;
+                }
+
                 let result = if !in_transaction {
                     get_or_create_pool(
                         &path,
@@ -2497,64 +2544,37 @@ impl Connection {
                     )
                     .await?;
 
-                    if has_callbacks(
-                        &load_extension_enabled,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    ) {
-                        ensure_callback_connection(
-                            &path,
-                            &pool,
-                            &callback_connection,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
+                    if has_callbacks_flag {
                         let mut conn_guard = callback_connection.lock().await;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
-                        bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
-                            .await?
+                        let query_result = bind_and_execute_on_connection(
+                            &processed_query,
+                            &param_values,
+                            conn,
+                            &path,
+                        )
+                        .await;
+                        drop(conn_guard);
+                        callbacks::discard_callback_connection(&callback_context).await;
+                        query_result?
                     } else {
-                        let pool_clone = get_or_create_pool(
+                        let mut conn_guard = lock_session_connection(
                             &path,
                             &pool,
+                            &session_connection,
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let pool_size_val = {
-                            let g = pool_size.lock().unwrap();
-                            *g
-                        };
-                        let timeout_val = {
-                            let g = connection_timeout_secs.lock().unwrap();
-                            *g
-                        };
-                        let mut conn = acquire_with_pragmas(
-                            &pool_clone,
-                            &pragmas,
-                            &path,
-                            pool_size_val,
-                            timeout_val,
-                        )
-                        .await?;
-                        bind_and_execute_on_connection(
-                            &processed_query,
-                            &param_values,
-                            &mut conn,
-                            &path,
-                        )
-                        .await?
+                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
+                        })?;
+                        bind_and_execute_on_connection(&processed_query, &param_values, conn, &path)
+                            .await?
                     }
                 } else {
                     let mut conn_guard = transaction_connection.lock().await;
@@ -2606,8 +2626,10 @@ impl Connection {
         let text_factory = Arc::clone(&slf.text_factory);
         let transaction_state = Arc::clone(&slf.transaction_state);
         let transaction_connection = Arc::clone(&slf.transaction_connection);
+        let session_connection = slf.session_connection.clone();
         let callback_connection = Arc::clone(&slf.callback_connection);
-        let load_extension_enabled = Arc::clone(&slf.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&slf.callback_connection_required);
+        let callback_context = slf.callback_context();
         let user_functions = Arc::clone(&slf.user_functions);
         let user_aggregates = Arc::clone(&slf.user_aggregates);
         let user_collations = Arc::clone(&slf.user_collations);
@@ -2635,8 +2657,10 @@ impl Connection {
             text_factory,
             transaction_state,
             transaction_connection,
+            session_connection,
             callback_connection,
-            load_extension_enabled,
+            callback_connection_required,
+            callback_context,
             user_functions,
             user_aggregates,
             user_collations,
@@ -2673,8 +2697,10 @@ impl Connection {
         let text_factory = Arc::clone(&slf.text_factory);
         let transaction_state = Arc::clone(&slf.transaction_state);
         let transaction_connection = Arc::clone(&slf.transaction_connection);
+        let session_connection = slf.session_connection.clone();
         let callback_connection = Arc::clone(&slf.callback_connection);
-        let load_extension_enabled = Arc::clone(&slf.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&slf.callback_connection_required);
+        let callback_context = slf.callback_context();
         let user_functions = Arc::clone(&slf.user_functions);
         let user_aggregates = Arc::clone(&slf.user_aggregates);
         let user_collations = Arc::clone(&slf.user_collations);
@@ -2702,8 +2728,10 @@ impl Connection {
             text_factory,
             transaction_state,
             transaction_connection,
+            session_connection,
             callback_connection,
-            load_extension_enabled,
+            callback_connection_required,
+            callback_context,
             user_functions,
             user_aggregates,
             user_collations,
@@ -2728,7 +2756,7 @@ impl Connection {
     fn transaction(slf: PyRef<Self>) -> PyResult<TransactionContextManager> {
         let path = slf.path.clone();
         let pool = Arc::clone(&slf.pool);
-        let session_connection = Arc::clone(&slf.session_connection);
+        let session_connection = slf.session_connection.clone();
         let pragmas = Arc::clone(&slf.pragmas);
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
@@ -2741,6 +2769,7 @@ impl Connection {
         let isolation_level = Arc::clone(&slf.isolation_level);
         let explicit_transaction = Arc::clone(&slf.explicit_transaction);
         let trace_callback = Arc::clone(&slf.trace_callback);
+        let callback_context = slf.callback_context();
         let connection: Py<Connection> = slf.into();
         Ok(TransactionContextManager {
             path,
@@ -2759,6 +2788,7 @@ impl Connection {
             isolation_level,
             explicit_transaction,
             trace_callback,
+            callback_context,
         })
     }
 
@@ -2792,7 +2822,7 @@ impl Connection {
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let session_connection = Arc::clone(&self_.session_connection);
+        let session_connection = self_.session_connection.clone();
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
@@ -2859,6 +2889,8 @@ impl Connection {
                 {
                     let mut conn_guard = session_connection.lock().await;
                     if let Some(ref mut conn) = conn_guard.0 {
+                        let pragmas_list = pragmas.lock().unwrap().clone();
+                        apply_pragmas_to_connection(conn, &pragmas_list, &path).await?;
                         sqlx::query(&pragma_query)
                             .execute(&mut **conn)
                             .await
@@ -2905,14 +2937,8 @@ impl Connection {
     /// Interrupts the callback connection when present (UDFs, trace, authorizer, etc.);
     /// no-op when no callbacks are configured.
     fn interrupt(&self) -> PyResult<Py<PyAny>> {
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
         let callback_connection = Arc::clone(&self.callback_connection);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self.callback_connection_required);
         let user_functions = Arc::clone(&self.user_functions);
         let user_aggregates = Arc::clone(&self.user_aggregates);
         let user_collations = Arc::clone(&self.user_collations);
@@ -2924,7 +2950,7 @@ impl Connection {
             let future = async move {
                 ensure_not_closed(&closed)?;
                 if !has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -2934,20 +2960,12 @@ impl Connection {
                 ) {
                     return Ok(());
                 }
-                ensure_callback_connection(
-                    &path,
-                    &pool,
-                    &callback_connection,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                    &idle_timeout_secs,
-                )
-                .await?;
-                let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                    OperationalError::new_err("Callback connection not available")
-                })?;
+                let Ok(mut conn_guard) = callback_connection.try_lock() else {
+                    return Ok(());
+                };
+                let Some(conn) = conn_guard.0.as_mut() else {
+                    return Ok(());
+                };
                 let sqlite_conn: &mut SqliteConnection = conn;
                 let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
                     OperationalError::new_err(format!("Failed to lock handle: {e}"))
@@ -2962,66 +2980,26 @@ impl Connection {
 
     /// Enable or disable loading SQLite extensions.
     fn enable_load_extension(&self, enabled: bool) -> PyResult<Py<PyAny>> {
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let callback_context = self.callback_context();
         let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
-                // Ensure callback connection exists
-                ensure_callback_connection(
-                    &path,
-                    &pool,
-                    &callback_connection,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                    &idle_timeout_secs,
-                )
-                .await?;
-
-                // Get the callback connection and access raw handle
-                let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                    OperationalError::new_err("Callback connection not available")
-                })?;
-
-                // Store the state
-                {
-                    let mut enabled_guard = load_extension_enabled.lock().unwrap();
-                    *enabled_guard = enabled;
-                }
-
-                // Access raw sqlite3* handle via PoolConnection's Deref to SqliteConnection
-                // PoolConnection<Sqlite> derefs to SqliteConnection, so we can use &mut *conn
-                // Then call lock_handle() to get LockedSqliteHandle, then as_raw_handle() for NonNull<sqlite3>
-                let sqlite_conn: &mut SqliteConnection = conn;
-                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                })?;
-                let raw_db = handle.as_raw_handle().as_ptr();
-
-                // Call the C API
-                let enabled_int = if enabled { 1 } else { 0 };
-                // Safety: raw_db is a valid sqlite3* pointer obtained from
-                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                // for the lifetime of the handle lock. sqlite3_enable_load_extension
-                // is thread-safe and modifies only the connection's extension loading state.
-                let result = unsafe { sqlite3_enable_load_extension(raw_db, enabled_int) };
-
-                if result != 0 {
-                    return Err(OperationalError::new_err(format!(
-                        "Failed to enable/disable load extension: SQLite error code {result}"
-                    )));
-                }
-
+                let _callback_operation_guard =
+                    callback_context.callback_operation_lock.lock().await;
+                *callback_context.extension_loading_allowed.lock().unwrap() = enabled;
+                let extensions_loaded = !callback_context
+                    .loaded_extensions
+                    .lock()
+                    .unwrap()
+                    .is_empty();
+                *callback_context
+                    .callback_connection_required
+                    .lock()
+                    .unwrap() = enabled || extensions_loaded;
+                callbacks::rebind_callbacks(callback_context.clone()).await?;
+                callbacks::discard_callback_connection(&callback_context).await;
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -3031,24 +3009,14 @@ impl Connection {
     /// Load a SQLite extension from the specified file.
     /// Extension loading must be enabled first using enable_load_extension(true).
     fn load_extension(&self, name: String) -> PyResult<Py<PyAny>> {
-        let path = self.path.clone();
-        let pool = Arc::clone(&self.pool);
-        let callback_connection = Arc::clone(&self.callback_connection);
-        let pragmas = Arc::clone(&self.pragmas);
-        let pool_size = Arc::clone(&self.pool_size);
-        let connection_timeout_secs = Arc::clone(&self.connection_timeout_secs);
-        let idle_timeout_secs = Arc::clone(&self.idle_timeout_secs);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let callback_context = self.callback_context();
         let closed = Arc::clone(&self.closed);
 
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
                 // Check if extension loading is enabled
-                let enabled = {
-                    let guard = load_extension_enabled.lock().unwrap();
-                    *guard
-                };
+                let enabled = *callback_context.extension_loading_allowed.lock().unwrap();
 
                 if !enabled {
                     return Err(OperationalError::new_err(
@@ -3056,76 +3024,61 @@ impl Connection {
                     ));
                 }
 
-                // Ensure callback connection exists
-                ensure_callback_connection(
-                    &path,
-                    &pool,
-                    &callback_connection,
-                    &pragmas,
-                    &pool_size,
-                    &connection_timeout_secs,
-                    &idle_timeout_secs,
-                )
-                .await?;
-
-                // Get the callback connection and access raw handle
-                let mut conn_guard = callback_connection.lock().await;
-                let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                    OperationalError::new_err("Callback connection not available")
-                })?;
-
-                let sqlite_conn: &mut SqliteConnection = conn;
-                let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
-                    OperationalError::new_err(format!("Failed to lock handle: {e}"))
-                })?;
-                let raw_db = handle.as_raw_handle().as_ptr();
-
-                // Convert extension name to CString
-                let name_cstr = CString::new(name.clone()).map_err(|e| {
-                    OperationalError::new_err(format!("Invalid extension name: {e}"))
-                })?;
-
-                // Call sqlite3_load_extension
-                // Use NULL for entry point - SQLite will try sqlite3_extension_init first.
-                // errmsg as *mut u8: libsqlite3-sys uses *mut u8 for char* on some targets (e.g. aarch64).
-                let mut errmsg: *mut u8 = std::ptr::null_mut();
-                // Safety: raw_db is a valid sqlite3* pointer obtained from
-                // lock_handle().as_raw_handle().as_ptr() and is guaranteed to be valid
-                // for the lifetime of the handle lock. name_cstr is a valid CString.
-                // errmsg is a mutable pointer that SQLite may set; we check for null and
-                // free it if set. sqlite3_load_extension is thread-safe for the connection.
-                let result = unsafe {
-                    sqlite3_load_extension(
-                        raw_db,
-                        name_cstr.as_ptr(),
-                        std::ptr::null::<std::ffi::c_char>(),
-                        &mut errmsg as *mut *mut u8 as *mut *mut std::ffi::c_char,
-                    )
-                };
-
-                // Handle error message if present
-                if result != SQLITE_OK {
-                    let error_msg = if !errmsg.is_null() {
-                        // Safety: errmsg is a pointer returned by sqlite3_load_extension.
-                        // We check for null before dereferencing. cstr_from_c_char_ptr
-                        // converts the C string to a Rust CStr reference.
-                        let cstr =
-                            unsafe { cstr_from_c_char_ptr(errmsg as *const std::ffi::c_char) };
-                        let msg = cstr.to_string_lossy().to_string();
-                        // Safety: errmsg was allocated by SQLite and must be freed with
-                        // sqlite3_free. We've already copied the string, so it's safe to free.
-                        unsafe {
-                            sqlite3_free(errmsg as *mut std::ffi::c_void);
-                        }
-                        msg
-                    } else {
-                        format!("SQLite error code {result}")
+                let _callback_operation_guard =
+                    callback_context.callback_operation_lock.lock().await;
+                callbacks::rebind_callbacks(callback_context.clone()).await?;
+                let load_result: Result<(), PyErr> = async {
+                    let mut conn_guard = callback_context.callback_connection.lock().await;
+                    let conn = conn_guard.0.as_mut().ok_or_else(|| {
+                        OperationalError::new_err("Callback connection not available")
+                    })?;
+                    let sqlite_conn: &mut SqliteConnection = conn;
+                    let mut handle = sqlite_conn.lock_handle().await.map_err(|e| {
+                        OperationalError::new_err(format!("Failed to lock handle: {e}"))
+                    })?;
+                    let raw_db = handle.as_raw_handle().as_ptr();
+                    let name_cstr = CString::new(name.clone()).map_err(|e| {
+                        OperationalError::new_err(format!("Invalid extension name: {e}"))
+                    })?;
+                    let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
+                    let result = unsafe {
+                        sqlite3_load_extension(
+                            raw_db,
+                            name_cstr.as_ptr(),
+                            std::ptr::null(),
+                            &mut errmsg,
+                        )
                     };
-                    return Err(OperationalError::new_err(format!(
-                        "Failed to load extension '{name}': {error_msg}"
-                    )));
+                    if result != SQLITE_OK {
+                        let error_msg = if errmsg.is_null() {
+                            format!("SQLite error code {result}")
+                        } else {
+                            let message = unsafe {
+                                cstr_from_c_char_ptr(errmsg).to_string_lossy().into_owned()
+                            };
+                            unsafe { sqlite3_free(errmsg.cast()) };
+                            message
+                        };
+                        return Err(OperationalError::new_err(format!(
+                            "Failed to load extension '{name}': {error_msg}"
+                        )));
+                    }
+                    if !errmsg.is_null() {
+                        unsafe { sqlite3_free(errmsg.cast()) };
+                    }
+                    Ok(())
                 }
-
+                .await;
+                callbacks::discard_callback_connection(&callback_context).await;
+                load_result?;
+                let mut extensions = callback_context.loaded_extensions.lock().unwrap();
+                if !extensions.contains(&name) {
+                    extensions.push(name);
+                }
+                *callback_context
+                    .callback_connection_required
+                    .lock()
+                    .unwrap() = true;
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -3170,7 +3123,10 @@ impl Connection {
             idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
             transaction_connection: Arc::clone(&self.transaction_connection),
             callback_connection: Arc::clone(&self.callback_connection),
-            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            callback_operation_lock: Arc::clone(&self.callback_operation_lock),
+            callback_connection_required: Arc::clone(&self.callback_connection_required),
+            extension_loading_allowed: Arc::clone(&self.extension_loading_allowed),
+            loaded_extensions: Arc::clone(&self.loaded_extensions),
             user_functions: Arc::clone(&self.user_functions),
             user_aggregates: Arc::clone(&self.user_aggregates),
             user_collations: Arc::clone(&self.user_collations),
@@ -3179,6 +3135,7 @@ impl Connection {
             progress_handler: Arc::clone(&self.progress_handler),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
+            skip_release: false,
         };
 
         Python::attach(|py| {
@@ -3217,7 +3174,10 @@ impl Connection {
             idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
             transaction_connection: Arc::clone(&self.transaction_connection),
             callback_connection: Arc::clone(&self.callback_connection),
-            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            callback_operation_lock: Arc::clone(&self.callback_operation_lock),
+            callback_connection_required: Arc::clone(&self.callback_connection_required),
+            extension_loading_allowed: Arc::clone(&self.extension_loading_allowed),
+            loaded_extensions: Arc::clone(&self.loaded_extensions),
             user_functions: Arc::clone(&self.user_functions),
             user_aggregates: Arc::clone(&self.user_aggregates),
             user_collations: Arc::clone(&self.user_collations),
@@ -3226,6 +3186,7 @@ impl Connection {
             progress_handler: Arc::clone(&self.progress_handler),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
+            skip_release: false,
         };
 
         Python::attach(|py| {
@@ -3251,7 +3212,10 @@ impl Connection {
             idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
             transaction_connection: Arc::clone(&self.transaction_connection),
             callback_connection: Arc::clone(&self.callback_connection),
-            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            callback_operation_lock: Arc::clone(&self.callback_operation_lock),
+            callback_connection_required: Arc::clone(&self.callback_connection_required),
+            extension_loading_allowed: Arc::clone(&self.extension_loading_allowed),
+            loaded_extensions: Arc::clone(&self.loaded_extensions),
             user_functions: Arc::clone(&self.user_functions),
             user_aggregates: Arc::clone(&self.user_aggregates),
             user_collations: Arc::clone(&self.user_collations),
@@ -3260,6 +3224,7 @@ impl Connection {
             progress_handler: Arc::clone(&self.progress_handler),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
+            skip_release: false,
         };
         Python::attach(|py| {
             future_into_py(py, callbacks::create_collation_impl(ctx, name, callable))
@@ -3320,7 +3285,10 @@ impl Connection {
             idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
             transaction_connection: Arc::clone(&self.transaction_connection),
             callback_connection: Arc::clone(&self.callback_connection),
-            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            callback_operation_lock: Arc::clone(&self.callback_operation_lock),
+            callback_connection_required: Arc::clone(&self.callback_connection_required),
+            extension_loading_allowed: Arc::clone(&self.extension_loading_allowed),
+            loaded_extensions: Arc::clone(&self.loaded_extensions),
             user_functions: Arc::clone(&self.user_functions),
             user_aggregates: Arc::clone(&self.user_aggregates),
             user_collations: Arc::clone(&self.user_collations),
@@ -3329,6 +3297,7 @@ impl Connection {
             progress_handler: Arc::clone(&self.progress_handler),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
+            skip_release: false,
         };
 
         Python::attach(|py| {
@@ -3355,7 +3324,10 @@ impl Connection {
             idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
             transaction_connection: Arc::clone(&self.transaction_connection),
             callback_connection: Arc::clone(&self.callback_connection),
-            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            callback_operation_lock: Arc::clone(&self.callback_operation_lock),
+            callback_connection_required: Arc::clone(&self.callback_connection_required),
+            extension_loading_allowed: Arc::clone(&self.extension_loading_allowed),
+            loaded_extensions: Arc::clone(&self.loaded_extensions),
             user_functions: Arc::clone(&self.user_functions),
             user_aggregates: Arc::clone(&self.user_aggregates),
             user_collations: Arc::clone(&self.user_collations),
@@ -3364,6 +3336,7 @@ impl Connection {
             progress_handler: Arc::clone(&self.progress_handler),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
+            skip_release: false,
         };
         Python::attach(|py| {
             let callback_clone = callback.as_ref().map(|c| c.clone_ref(py));
@@ -3389,7 +3362,10 @@ impl Connection {
             idle_timeout_secs: Arc::clone(&self.idle_timeout_secs),
             transaction_connection: Arc::clone(&self.transaction_connection),
             callback_connection: Arc::clone(&self.callback_connection),
-            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            callback_operation_lock: Arc::clone(&self.callback_operation_lock),
+            callback_connection_required: Arc::clone(&self.callback_connection_required),
+            extension_loading_allowed: Arc::clone(&self.extension_loading_allowed),
+            loaded_extensions: Arc::clone(&self.loaded_extensions),
             user_functions: Arc::clone(&self.user_functions),
             user_aggregates: Arc::clone(&self.user_aggregates),
             user_collations: Arc::clone(&self.user_collations),
@@ -3398,6 +3374,7 @@ impl Connection {
             progress_handler: Arc::clone(&self.progress_handler),
             authorizer_callback_ctx_ptr: Arc::clone(&self.authorizer_callback_ctx_ptr),
             progress_handler_ctx_ptr: Arc::clone(&self.progress_handler_ctx_ptr),
+            skip_release: false,
         };
         Python::attach(|py| {
             let callback_clone = callback.as_ref().map(|c| c.clone_ref(py));
@@ -3423,7 +3400,7 @@ impl Connection {
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         // Callback infrastructure (Phase 2.7)
         let callback_connection = Arc::clone(&self_.callback_connection);
-        let load_extension_enabled = Arc::clone(&self_.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self_.callback_connection_required);
         let user_functions = Arc::clone(&self_.user_functions);
         let user_aggregates = Arc::clone(&self_.user_aggregates);
         let user_collations = Arc::clone(&self_.user_collations);
@@ -3431,6 +3408,7 @@ impl Connection {
         let authorizer_callback = Arc::clone(&self_.authorizer_callback);
         let progress_handler = Arc::clone(&self_.progress_handler);
         let closed = Arc::clone(&self_.closed);
+        let callback_context = self_.callback_context();
 
         Python::attach(|py| {
             let future = async move {
@@ -3442,7 +3420,7 @@ impl Connection {
                 };
 
                 let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -3450,6 +3428,14 @@ impl Connection {
                     &authorizer_callback,
                     &progress_handler,
                 );
+                let _callback_operation_guard = if has_callbacks_flag {
+                    Some(callback_context.callback_operation_lock.lock().await)
+                } else {
+                    None
+                };
+                if has_callbacks_flag && !in_transaction {
+                    callbacks::rebind_callbacks(callback_context.clone()).await?;
+                }
 
                 // Helper function to encode bytes as hex
                 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -3472,24 +3458,17 @@ impl Connection {
                         .await
                         .map_err(|e| map_sqlx_error(e, &path, "SELECT FROM sqlite_master"))?
                 } else if has_callbacks_flag {
-                    ensure_callback_connection(
-                        &path,
-                        &pool,
-                        &callback_connection,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
                     let mut conn_guard = callback_connection.lock().await;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
-                    sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'trigger' THEN 2 WHEN 'view' THEN 3 ELSE 4 END, name")
+                    let schema_result = sqlx::query("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'trigger' THEN 2 WHEN 'view' THEN 3 ELSE 4 END, name")
                         .fetch_all(&mut **conn)
                         .await
-                        .map_err(|e| map_sqlx_error(e, &path, "SELECT FROM sqlite_master"))?
+                        .map_err(|e| map_sqlx_error(e, &path, "SELECT FROM sqlite_master"));
+                    drop(conn_guard);
+                    callbacks::discard_callback_connection(&callback_context).await;
+                    schema_result?
                 } else {
                     let pool_clone = get_or_create_pool(
                         &path,
@@ -3591,14 +3570,18 @@ impl Connection {
                             .await
                             .map_err(|e| map_sqlx_error(e, &path, &query))?
                     } else if has_callbacks_flag {
+                        callbacks::rebind_callbacks(callback_context.clone()).await?;
                         let mut conn_guard = callback_connection.lock().await;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Callback connection not available")
                         })?;
-                        sqlx::query(&query)
+                        let rows_result = sqlx::query(&query)
                             .fetch_all(&mut **conn)
                             .await
-                            .map_err(|e| map_sqlx_error(e, &path, &query))?
+                            .map_err(|e| map_sqlx_error(e, &path, &query));
+                        drop(conn_guard);
+                        callbacks::discard_callback_connection(&callback_context).await;
+                        rows_result?
                     } else {
                         let pool_clone = get_or_create_pool(
                             &path,
@@ -3772,7 +3755,8 @@ impl Connection {
             transaction_state: Arc::clone(&self_.transaction_state),
             transaction_connection: Arc::clone(&self_.transaction_connection),
             callback_connection: Arc::clone(&self_.callback_connection),
-            load_extension_enabled: Arc::clone(&self_.load_extension_enabled),
+            callback_operation_lock: Arc::clone(&self_.callback_operation_lock),
+            callback_connection_required: Arc::clone(&self_.callback_connection_required),
             user_functions: Arc::clone(&self_.user_functions),
             user_aggregates: Arc::clone(&self_.user_aggregates),
             user_collations: Arc::clone(&self_.user_collations),
@@ -3800,7 +3784,8 @@ impl Connection {
                     transaction_state: Arc::clone(&t.transaction_state),
                     transaction_connection: Arc::clone(&t.transaction_connection),
                     callback_connection: Arc::clone(&t.callback_connection),
-                    load_extension_enabled: Arc::clone(&t.load_extension_enabled),
+                    callback_operation_lock: Arc::clone(&t.callback_operation_lock),
+                    callback_connection_required: Arc::clone(&t.callback_connection_required),
                     user_functions: Arc::clone(&t.user_functions),
                     user_aggregates: Arc::clone(&t.user_aggregates),
                     user_collations: Arc::clone(&t.user_collations),

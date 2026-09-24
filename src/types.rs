@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 // Type aliases for complex types to reduce clippy warnings
-pub(crate) type UserFunctions = Arc<StdMutex<HashMap<String, (i32, Py<PyAny>)>>>;
+pub(crate) type UserFunctions = Arc<StdMutex<HashMap<String, (i32, bool, Py<PyAny>)>>>;
 /// (num_params, user_data pointer as usize for cleanup on remove; usize is Send)
 pub(crate) type UserAggregates = Arc<StdMutex<HashMap<String, (i32, usize)>>>;
 /// Collation name -> user_data pointer as usize for cleanup on remove

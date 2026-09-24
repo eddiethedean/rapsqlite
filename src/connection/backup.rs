@@ -184,7 +184,8 @@ pub(crate) struct BackupSourceContext {
     pub transaction_state: Arc<Mutex<TransactionState>>,
     pub transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    pub load_extension_enabled: Arc<StdMutex<bool>>,
+    pub callback_operation_lock: Arc<Mutex<()>>,
+    pub callback_connection_required: Arc<StdMutex<bool>>,
     pub user_functions: UserFunctions,
     pub user_aggregates: UserAggregates,
     pub user_collations: UserCollations,
@@ -204,7 +205,8 @@ pub(crate) struct BackupTargetRapsqliteContext {
     pub transaction_state: Arc<Mutex<TransactionState>>,
     pub transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    pub load_extension_enabled: Arc<StdMutex<bool>>,
+    pub callback_operation_lock: Arc<Mutex<()>>,
+    pub callback_connection_required: Arc<StdMutex<bool>>,
     pub user_functions: UserFunctions,
     pub user_aggregates: UserAggregates,
     pub user_collations: UserCollations,
@@ -233,6 +235,9 @@ pub(crate) async fn run_backup(
 
     let mut source_taken = TakenConnectionGuard::default();
     let mut target_taken = TakenConnectionGuard::default();
+    let mut source_callback_taken = false;
+    let mut target_callback_taken = false;
+    let mut target_callback_operation_guard = None;
     let mut source_pool_conn = PoolConnectionSlot::default();
     let mut target_pool_conn = PoolConnectionSlot::default();
 
@@ -242,7 +247,7 @@ pub(crate) async fn run_backup(
             g.is_active()
         };
         let has_callbacks_flag = has_callbacks(
-            &source.load_extension_enabled,
+            &source.callback_connection_required,
             &source.user_functions,
             &source.user_aggregates,
             &source.user_collations,
@@ -250,6 +255,11 @@ pub(crate) async fn run_backup(
             &source.authorizer_callback,
             &source.progress_handler,
         );
+        let _source_callback_operation_guard = if has_callbacks_flag && !in_transaction {
+            Some(Arc::clone(&source.callback_operation_lock).lock_owned().await)
+        } else {
+            None
+        };
 
         // Acquire source connection
         if in_transaction {
@@ -274,6 +284,7 @@ pub(crate) async fn run_backup(
                 OperationalError::new_err("Callback connection not available")
             })?;
             source_taken = TakenConnectionGuard::new(Arc::clone(&source.callback_connection), conn);
+            source_callback_taken = true;
         } else {
             let pool_clone = get_or_create_pool(
                 &source.path,
@@ -314,7 +325,7 @@ pub(crate) async fn run_backup(
                     g.is_active()
                 };
                 let target_has_callbacks_flag = has_callbacks(
-                    &t.load_extension_enabled,
+                    &t.callback_connection_required,
                     &t.user_functions,
                     &t.user_aggregates,
                     &t.user_collations,
@@ -322,6 +333,10 @@ pub(crate) async fn run_backup(
                     &t.authorizer_callback,
                     &t.progress_handler,
                 );
+                if target_has_callbacks_flag && !target_in_transaction {
+                    target_callback_operation_guard =
+                        Some(Arc::clone(&t.callback_operation_lock).lock_owned().await);
+                }
 
                 if target_in_transaction {
                     let mut guard = t.transaction_connection.lock().await;
@@ -345,6 +360,7 @@ pub(crate) async fn run_backup(
                         OperationalError::new_err("Target callback connection not available")
                     })?;
                     target_taken = TakenConnectionGuard::new(Arc::clone(&t.callback_connection), conn);
+                    target_callback_taken = true;
                 } else {
                     let target_pool_clone = get_or_create_pool(
                         &t.path,
@@ -485,6 +501,13 @@ pub(crate) async fn run_backup(
         Ok(())
     }
     .await;
+
+    if source_callback_taken {
+        source_taken.discard();
+    }
+    if target_callback_taken {
+        target_taken.discard();
+    }
 
     if let Some((slot, conn)) = source_taken.take_for_restore() {
         let mut g = slot.lock().await;
