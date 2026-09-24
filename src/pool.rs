@@ -130,6 +130,14 @@ impl TakenConnectionGuard {
     ) -> Option<(Arc<Mutex<PoolConnectionSlot>>, PoolConnection<sqlx::Sqlite>)> {
         self.0.take()
     }
+
+    /// Close and release the held connection instead of restoring it to its slot.
+    pub(crate) fn discard(&mut self) {
+        if let Some((_, mut conn)) = self.0.take() {
+            conn.close_on_drop();
+            drop(conn);
+        }
+    }
 }
 
 impl Drop for TakenConnectionGuard {
@@ -174,12 +182,11 @@ impl SessionConnectionSlot {
     }
 }
 
-/// Holds a logical Connection's session slot for one operation. A one-connection
-/// pool cannot keep an idle connection pinned to every logical Connection, so
-/// return that lease to SQLx when the operation finishes.
+/// Holds a logical Connection's session slot for one operation. Return the lease
+/// to SQLx when the operation finishes so idle Connection wrappers do not consume
+/// the pool's bounded capacity.
 pub(crate) struct SessionConnectionGuard {
     guard: tokio::sync::OwnedMutexGuard<PoolConnectionSlot>,
-    release_when_unlocked: bool,
 }
 
 impl Deref for SessionConnectionGuard {
@@ -198,9 +205,7 @@ impl DerefMut for SessionConnectionGuard {
 
 impl Drop for SessionConnectionGuard {
     fn drop(&mut self) {
-        if self.release_when_unlocked {
-            self.guard.0.take();
-        }
+        self.guard.0.take();
     }
 }
 
@@ -602,7 +607,6 @@ pub(crate) async fn lock_session_connection(
         idle_timeout_secs,
     )
     .await?;
-    let release_when_unlocked = pool_clone.options().get_max_connections() == 1;
     if guard.0.is_none() {
         let pool_size_val = *pool_size.lock().unwrap();
         let timeout_val = *connection_timeout_secs.lock().unwrap();
@@ -613,10 +617,7 @@ pub(crate) async fn lock_session_connection(
         let pragmas_list = pragmas.lock().unwrap().clone();
         apply_pragmas_to_connection(conn, &pragmas_list, path).await?;
     }
-    Ok(SessionConnectionGuard {
-        guard,
-        release_when_unlocked,
-    })
+    Ok(SessionConnectionGuard { guard })
 }
 
 /// Release the session connection (return to pool). Call on close() and when starting a transaction.
@@ -627,7 +628,7 @@ pub(crate) async fn release_session_connection(session_connection: &SessionConne
 
 /// Check if any callbacks are currently set.
 pub(crate) fn has_callbacks(
-    load_extension_enabled: &Arc<StdMutex<bool>>,
+    callback_connection_required: &Arc<StdMutex<bool>>,
     user_functions: &UserFunctions,
     user_aggregates: &UserAggregates,
     user_collations: &UserCollations,
@@ -638,7 +639,7 @@ pub(crate) fn has_callbacks(
     // Safety: StdMutex::lock() only fails if the mutex is poisoned (another thread panicked).
     // In Python's GIL context and with proper error handling, this is extremely unlikely.
     // These are read-only operations, so unwrap() is acceptable.
-    let load_ext = *load_extension_enabled.lock().unwrap();
+    let load_ext = *callback_connection_required.lock().unwrap();
     let has_functions = !user_functions.lock().unwrap().is_empty();
     let has_aggregates = !user_aggregates.lock().unwrap().is_empty();
     let has_collations = !user_collations.lock().unwrap().is_empty();

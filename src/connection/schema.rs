@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
 use crate::pool::{
-    acquire_with_pragmas, ensure_callback_connection, execute_init_hook_if_needed,
-    get_or_create_pool, has_callbacks, PoolConnectionSlot, PoolSlot,
+    acquire_with_pragmas, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
+    PoolConnectionSlot, PoolSlot,
 };
 use crate::query::bind_and_fetch_all_on_connection;
 use crate::types::{
@@ -17,7 +17,7 @@ use crate::types::{
 };
 use crate::OperationalError;
 
-use super::Connection;
+use super::{CallbackContext, Connection};
 
 use super::ensure_not_closed;
 
@@ -32,6 +32,7 @@ type TableIntrospection = (
 /// Context for running schema introspection queries. Built from Connection and passed
 /// into schema async functions so they don't depend on the Connection pyclass.
 pub(crate) struct SchemaContext {
+    pub callback_context: CallbackContext,
     pub path: String,
     pub pool: Arc<Mutex<PoolSlot>>,
     pub pragmas: Arc<StdMutex<Vec<(String, String)>>>,
@@ -41,7 +42,7 @@ pub(crate) struct SchemaContext {
     pub transaction_state: Arc<Mutex<TransactionState>>,
     pub transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    pub load_extension_enabled: Arc<StdMutex<bool>>,
+    pub callback_connection_required: Arc<StdMutex<bool>>,
     pub user_functions: UserFunctions,
     pub user_aggregates: UserAggregates,
     pub user_collations: UserCollations,
@@ -84,7 +85,7 @@ pub(crate) async fn run_introspection_query(
     execute_init_hook_if_needed(&ctx.init_hook, &ctx.init_hook_called, connection_for_hook).await?;
 
     let has_callbacks_flag = has_callbacks(
-        &ctx.load_extension_enabled,
+        &ctx.callback_connection_required,
         &ctx.user_functions,
         &ctx.user_aggregates,
         &ctx.user_collations,
@@ -92,6 +93,11 @@ pub(crate) async fn run_introspection_query(
         &ctx.authorizer_callback,
         &ctx.progress_handler,
     );
+    let _callback_operation_guard = if has_callbacks_flag {
+        Some(ctx.callback_context.callback_operation_lock.lock().await)
+    } else {
+        None
+    };
 
     let rows = if in_transaction {
         let mut conn_guard = ctx.transaction_connection.lock().await;
@@ -101,22 +107,17 @@ pub(crate) async fn run_introspection_query(
             .ok_or_else(|| OperationalError::new_err("Transaction connection not available"))?;
         bind_and_fetch_all_on_connection(query, &[], conn, &ctx.path).await?
     } else if has_callbacks_flag {
-        ensure_callback_connection(
-            &ctx.path,
-            &ctx.pool,
-            &ctx.callback_connection,
-            &ctx.pragmas,
-            &ctx.pool_size,
-            &ctx.connection_timeout_secs,
-            &ctx.idle_timeout_secs,
-        )
-        .await?;
-        let mut conn_guard = ctx.callback_connection.lock().await;
-        let conn = conn_guard
-            .0
-            .as_mut()
-            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-        bind_and_fetch_all_on_connection(query, &[], conn, &ctx.path).await?
+        super::rebind_callbacks(ctx.callback_context.clone()).await?;
+        let rows_result = {
+            let mut conn_guard = ctx.callback_connection.lock().await;
+            let conn = conn_guard
+                .0
+                .as_mut()
+                .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+            bind_and_fetch_all_on_connection(query, &[], conn, &ctx.path).await
+        };
+        super::discard_callback_connection(&ctx.callback_context).await;
+        rows_result?
     } else {
         let pool_clone = get_or_create_pool(
             &ctx.path,

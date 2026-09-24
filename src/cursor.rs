@@ -8,12 +8,13 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
-use crate::connection::ensure_not_closed;
+use crate::connection::{
+    discard_callback_connection, ensure_not_closed, rebind_callbacks, CallbackContext,
+};
 use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{
-    ensure_callback_connection, has_callbacks, lock_session_connection, PoolConnectionSlot,
-    PoolSlot, SessionConnectionSlot,
+    has_callbacks, lock_session_connection, PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{
@@ -45,7 +46,8 @@ struct CursorFetchContext {
     transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     session_connection: SessionConnectionSlot,
     callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    load_extension_enabled: Arc<StdMutex<bool>>,
+    callback_connection_required: Arc<StdMutex<bool>>,
+    callback_context: CallbackContext,
     user_functions: UserFunctions,
     user_aggregates: UserAggregates,
     user_collations: UserCollations,
@@ -125,7 +127,7 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
         g.is_active()
     };
     let has_callbacks_flag = has_callbacks(
-        &ctx.load_extension_enabled,
+        &ctx.callback_connection_required,
         &ctx.user_functions,
         &ctx.user_aggregates,
         &ctx.user_collations,
@@ -133,6 +135,14 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
         &ctx.authorizer_callback,
         &ctx.progress_handler,
     );
+    let _callback_operation_guard = if has_callbacks_flag {
+        Some(ctx.callback_context.callback_operation_lock.lock().await)
+    } else {
+        None
+    };
+    if has_callbacks_flag && !in_transaction {
+        rebind_callbacks(ctx.callback_context.clone()).await?;
+    }
 
     let rows = if in_transaction {
         let mut conn_guard = ctx.transaction_connection.lock().await;
@@ -143,23 +153,17 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
         bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &ctx.path)
             .await?
     } else if has_callbacks_flag {
-        ensure_callback_connection(
-            &ctx.path,
-            &ctx.pool,
-            &ctx.callback_connection,
-            &ctx.pragmas,
-            &ctx.pool_size,
-            &ctx.connection_timeout_secs,
-            &ctx.idle_timeout_secs,
-        )
-        .await?;
-        let mut conn_guard = ctx.callback_connection.lock().await;
-        let conn = conn_guard
-            .0
-            .as_mut()
-            .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
-        bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &ctx.path)
-            .await?
+        let rows_result = {
+            let mut conn_guard = ctx.callback_connection.lock().await;
+            let conn = conn_guard
+                .0
+                .as_mut()
+                .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+            bind_and_fetch_all_on_connection(&processed_query, &processed_params, conn, &ctx.path)
+                .await
+        };
+        discard_callback_connection(&ctx.callback_context).await;
+        rows_result?
     } else {
         let mut conn_guard = lock_session_connection(
             &ctx.path,
@@ -246,7 +250,8 @@ pub(crate) struct Cursor {
     pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) session_connection: SessionConnectionSlot,
     pub(crate) callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    pub(crate) load_extension_enabled: Arc<StdMutex<bool>>,
+    pub(crate) callback_connection_required: Arc<StdMutex<bool>>,
+    pub(crate) callback_context: CallbackContext,
     pub(crate) user_functions: UserFunctions,
     pub(crate) user_aggregates: UserAggregates,
     pub(crate) user_collations: UserCollations,
@@ -288,7 +293,8 @@ impl Cursor {
             transaction_connection: Arc::clone(&self.transaction_connection),
             session_connection: self.session_connection.clone(),
             callback_connection: Arc::clone(&self.callback_connection),
-            load_extension_enabled: Arc::clone(&self.load_extension_enabled),
+            callback_connection_required: Arc::clone(&self.callback_connection_required),
+            callback_context: self.callback_context.clone(),
             user_functions: Arc::clone(&self.user_functions),
             user_aggregates: Arc::clone(&self.user_aggregates),
             user_collations: Arc::clone(&self.user_collations),
@@ -685,7 +691,8 @@ impl Cursor {
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let session_connection = self.session_connection.clone();
         let callback_connection = Arc::clone(&self.callback_connection);
-        let load_extension_enabled = Arc::clone(&self.load_extension_enabled);
+        let callback_connection_required = Arc::clone(&self.callback_connection_required);
+        let callback_context = self.callback_context.clone();
         let user_functions = Arc::clone(&self.user_functions);
         let user_aggregates = Arc::clone(&self.user_aggregates);
         let user_collations = Arc::clone(&self.user_collations);
@@ -766,7 +773,7 @@ impl Cursor {
                 };
 
                 let has_callbacks_flag = has_callbacks(
-                    &load_extension_enabled,
+                    &callback_connection_required,
                     &user_functions,
                     &user_aggregates,
                     &user_collations,
@@ -774,6 +781,11 @@ impl Cursor {
                     &authorizer_callback,
                     &progress_handler,
                 );
+                let _callback_operation_guard = if has_callbacks_flag {
+                    Some(callback_context.callback_operation_lock.lock().await)
+                } else {
+                    None
+                };
 
                 // Execute each statement sequentially
                 for statement in statements {
@@ -784,22 +796,16 @@ impl Cursor {
                         })?;
                         bind_and_execute_on_connection(&statement, &[], conn, &path).await?;
                     } else if has_callbacks_flag {
-                        ensure_callback_connection(
-                            &path,
-                            &pool,
-                            &callback_connection,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-
-                        let mut conn_guard = callback_connection.lock().await;
-                        let conn = conn_guard.0.as_mut().ok_or_else(|| {
-                            OperationalError::new_err("Callback connection not available")
-                        })?;
-                        bind_and_execute_on_connection(&statement, &[], conn, &path).await?;
+                        rebind_callbacks(callback_context.clone()).await?;
+                        let result = {
+                            let mut conn_guard = callback_connection.lock().await;
+                            let conn = conn_guard.0.as_mut().ok_or_else(|| {
+                                OperationalError::new_err("Callback connection not available")
+                            })?;
+                            bind_and_execute_on_connection(&statement, &[], conn, &path).await
+                        };
+                        discard_callback_connection(&callback_context).await;
+                        result?;
                     } else {
                         let mut conn_guard = lock_session_connection(
                             &path,

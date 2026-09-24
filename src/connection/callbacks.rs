@@ -7,9 +7,10 @@ use tokio::sync::Mutex;
 
 use libsqlite3_sys::{
     sqlite3_aggregate_context, sqlite3_context, sqlite3_create_collation_v2,
-    sqlite3_create_function_v2, sqlite3_progress_handler, sqlite3_result_error,
-    sqlite3_result_null, sqlite3_set_authorizer, sqlite3_user_data, sqlite3_value, SQLITE_DENY,
-    SQLITE_DETERMINISTIC, SQLITE_OK, SQLITE_UTF8,
+    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free,
+    sqlite3_load_extension, sqlite3_progress_handler, sqlite3_result_error, sqlite3_result_null,
+    sqlite3_set_authorizer, sqlite3_user_data, sqlite3_value, SQLITE_DENY, SQLITE_DETERMINISTIC,
+    SQLITE_OK, SQLITE_UTF8,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyString, PyTuple};
@@ -25,6 +26,7 @@ use super::ensure_not_closed;
 
 /// Context for running callback/UDF operations. Built from Connection and passed
 /// into callback async functions.
+#[derive(Clone)]
 pub(crate) struct CallbackContext {
     pub closed: Arc<StdMutex<bool>>,
     pub path: String,
@@ -35,15 +37,56 @@ pub(crate) struct CallbackContext {
     pub idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    pub load_extension_enabled: Arc<StdMutex<bool>>,
+    pub callback_operation_lock: Arc<Mutex<()>>,
+    pub callback_connection_required: Arc<StdMutex<bool>>,
+    pub extension_loading_allowed: Arc<StdMutex<bool>>,
     pub user_functions: UserFunctions,
     pub user_aggregates: UserAggregates,
     pub user_collations: UserCollations,
+    pub loaded_extensions: Arc<StdMutex<Vec<String>>>,
     pub trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub progress_handler: ProgressHandler,
     pub authorizer_callback_ctx_ptr: Arc<StdMutex<usize>>,
     pub progress_handler_ctx_ptr: Arc<StdMutex<usize>>,
+    /// Rebinding uses the same registration functions but must retain the
+    /// checked-out handle until the operation finishes.
+    pub skip_release: bool,
+}
+
+/// Destroy a callback-bound physical connection before returning it to the
+/// pool. SQLite callbacks are handle-local; closing the handle prevents them
+/// from leaking into a different logical Connection that reuses the pool.
+pub(crate) async fn discard_callback_connection(ctx: &CallbackContext) {
+    if ctx.skip_release {
+        return;
+    }
+    let mut guard = ctx.callback_connection.lock().await;
+    if let Some(conn) = guard.0.as_mut() {
+        conn.close_on_drop();
+    }
+    guard.0.take();
+}
+
+async fn finish_callback_update(ctx: &CallbackContext) {
+    if !ctx.skip_release {
+        discard_callback_connection(ctx).await;
+    }
+}
+
+/// Callback changes made during a transaction must target its existing handle.
+/// Rebinding there avoids acquiring a second pool lease and preserves the hard cap.
+async fn prepare_callback_target(ctx: &mut CallbackContext) -> Result<(), PyErr> {
+    if ctx.skip_release {
+        return Ok(());
+    }
+    let transaction_active = ctx.transaction_connection.lock().await.0.is_some();
+    if transaction_active {
+        ctx.callback_connection = Arc::clone(&ctx.transaction_connection);
+        ctx.skip_release = true;
+        Box::pin(rebind_callbacks(ctx.clone())).await?;
+    }
+    Ok(())
 }
 
 #[inline]
@@ -63,15 +106,21 @@ fn drop_py_callback_ptr(ptr_usize: usize) {
 
 /// Set or clear the progress handler. Runs on the callback connection.
 pub(crate) async fn set_progress_handler_impl(
-    ctx: CallbackContext,
+    mut ctx: CallbackContext,
     n: i32,
     callback: Option<Py<PyAny>>,
 ) -> Result<(), PyErr> {
     ensure_not_closed(&ctx.closed)?;
+    let _operation_guard = if ctx.skip_release {
+        None
+    } else {
+        Some(Arc::clone(&ctx.callback_operation_lock).lock_owned().await)
+    };
+    prepare_callback_target(&mut ctx).await?;
 
     if callback.is_none() {
         let all_cleared = !has_callbacks(
-            &ctx.load_extension_enabled,
+            &ctx.callback_connection_required,
             &ctx.user_functions,
             &ctx.user_aggregates,
             &ctx.user_collations,
@@ -80,8 +129,7 @@ pub(crate) async fn set_progress_handler_impl(
             &ctx.progress_handler,
         );
         if all_cleared {
-            let mut callback_guard = ctx.callback_connection.lock().await;
-            callback_guard.0.take();
+            discard_callback_connection(&ctx).await;
             return Ok(());
         }
     }
@@ -96,6 +144,9 @@ pub(crate) async fn set_progress_handler_impl(
         &ctx.idle_timeout_secs,
     )
     .await?;
+    if !ctx.skip_release {
+        Box::pin(rebind_callbacks(ctx.clone())).await?;
+    }
 
     let mut conn_guard = ctx.callback_connection.lock().await;
     let conn = conn_guard
@@ -180,7 +231,7 @@ pub(crate) async fn set_progress_handler_impl(
 
     if callback.is_none() {
         let all_cleared = !has_callbacks(
-            &ctx.load_extension_enabled,
+            &ctx.callback_connection_required,
             &ctx.user_functions,
             &ctx.user_aggregates,
             &ctx.user_collations,
@@ -191,12 +242,12 @@ pub(crate) async fn set_progress_handler_impl(
         if all_cleared {
             drop(handle);
             drop(conn_guard);
-            let mut callback_guard = ctx.callback_connection.lock().await;
-            callback_guard.0.take();
+            discard_callback_connection(&ctx).await;
             return Ok(());
         }
     }
 
+    finish_callback_update(&ctx).await;
     Ok(())
 }
 
@@ -212,11 +263,17 @@ pub(crate) async fn set_trace_callback_impl(
 
 /// Create or remove a custom collation. Runs on the callback connection.
 pub(crate) async fn create_collation_impl(
-    ctx: CallbackContext,
+    mut ctx: CallbackContext,
     name: String,
     callable: Option<Py<PyAny>>,
 ) -> Result<(), PyErr> {
     ensure_not_closed(&ctx.closed)?;
+    let _operation_guard = if ctx.skip_release {
+        None
+    } else {
+        Some(Arc::clone(&ctx.callback_operation_lock).lock_owned().await)
+    };
+    prepare_callback_target(&mut ctx).await?;
 
     ensure_callback_connection(
         &ctx.path,
@@ -228,6 +285,9 @@ pub(crate) async fn create_collation_impl(
         &ctx.idle_timeout_secs,
     )
     .await?;
+    if !ctx.skip_release {
+        Box::pin(rebind_callbacks(ctx.clone())).await?;
+    }
 
     let mut conn_guard = ctx.callback_connection.lock().await;
     let conn = conn_guard
@@ -281,7 +341,7 @@ pub(crate) async fn create_collation_impl(
         }
 
         let all_cleared = !has_callbacks(
-            &ctx.load_extension_enabled,
+            &ctx.callback_connection_required,
             &ctx.user_functions,
             &ctx.user_aggregates,
             &ctx.user_collations,
@@ -292,9 +352,9 @@ pub(crate) async fn create_collation_impl(
         if all_cleared {
             drop(handle);
             drop(conn_guard);
-            let mut callback_guard = ctx.callback_connection.lock().await;
-            callback_guard.0.take();
+            discard_callback_connection(&ctx).await;
         }
+        finish_callback_update(&ctx).await;
         return Ok(());
     }
 
@@ -390,19 +450,26 @@ pub(crate) async fn create_collation_impl(
         });
     }
 
+    finish_callback_update(&ctx).await;
     Ok(())
 }
 
 /// Set or clear the authorizer callback. Runs on the callback connection.
 pub(crate) async fn set_authorizer_impl(
-    ctx: CallbackContext,
+    mut ctx: CallbackContext,
     callback: Option<Py<PyAny>>,
 ) -> Result<(), PyErr> {
     ensure_not_closed(&ctx.closed)?;
+    let _operation_guard = if ctx.skip_release {
+        None
+    } else {
+        Some(Arc::clone(&ctx.callback_operation_lock).lock_owned().await)
+    };
+    prepare_callback_target(&mut ctx).await?;
 
     if callback.is_none() {
         let all_cleared = !has_callbacks(
-            &ctx.load_extension_enabled,
+            &ctx.callback_connection_required,
             &ctx.user_functions,
             &ctx.user_aggregates,
             &ctx.user_collations,
@@ -411,8 +478,7 @@ pub(crate) async fn set_authorizer_impl(
             &ctx.progress_handler,
         );
         if all_cleared {
-            let mut callback_guard = ctx.callback_connection.lock().await;
-            callback_guard.0.take();
+            discard_callback_connection(&ctx).await;
             return Ok(());
         }
     }
@@ -427,6 +493,9 @@ pub(crate) async fn set_authorizer_impl(
         &ctx.idle_timeout_secs,
     )
     .await?;
+    if !ctx.skip_release {
+        Box::pin(rebind_callbacks(ctx.clone())).await?;
+    }
 
     let mut conn_guard = ctx.callback_connection.lock().await;
     let conn = conn_guard
@@ -546,7 +615,7 @@ pub(crate) async fn set_authorizer_impl(
 
     if callback.is_none() {
         let all_cleared = !has_callbacks(
-            &ctx.load_extension_enabled,
+            &ctx.callback_connection_required,
             &ctx.user_functions,
             &ctx.user_aggregates,
             &ctx.user_collations,
@@ -557,24 +626,30 @@ pub(crate) async fn set_authorizer_impl(
         if all_cleared {
             drop(handle);
             drop(conn_guard);
-            let mut callback_guard = ctx.callback_connection.lock().await;
-            callback_guard.0.take();
+            discard_callback_connection(&ctx).await;
             return Ok(());
         }
     }
 
+    finish_callback_update(&ctx).await;
     Ok(())
 }
 
 /// Create or remove a user-defined SQL function. Uses transaction_connection when present, else callback_connection.
 pub(crate) async fn create_function_impl(
-    ctx: CallbackContext,
+    mut ctx: CallbackContext,
     name: String,
     nargs: i32,
     func: Option<Py<PyAny>>,
     deterministic: bool,
 ) -> Result<(), PyErr> {
     ensure_not_closed(&ctx.closed)?;
+    let _operation_guard = if ctx.skip_release {
+        None
+    } else {
+        Some(Arc::clone(&ctx.callback_operation_lock).lock_owned().await)
+    };
+    prepare_callback_target(&mut ctx).await?;
 
     extern "C" fn udf_trampoline(
         udf_ctx: *mut sqlite3_context,
@@ -743,7 +818,7 @@ pub(crate) async fn create_function_impl(
                 )));
             }
             let all_cleared = !has_callbacks(
-                &ctx.load_extension_enabled,
+                &ctx.callback_connection_required,
                 &ctx.user_functions,
                 &ctx.user_aggregates,
                 &ctx.user_collations,
@@ -765,7 +840,7 @@ pub(crate) async fn create_function_impl(
             let callback_for_storage = Python::with_gil(|py| func.as_ref().unwrap().clone_ref(py));
             {
                 let mut funcs_guard = ctx.user_functions.lock().unwrap();
-                funcs_guard.insert(name.clone(), (nargs, callback_for_storage));
+                funcs_guard.insert(name.clone(), (nargs, deterministic, callback_for_storage));
             }
             let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
                 OperationalError::new_err(format!("Function name contains null byte: {e}"))
@@ -813,6 +888,9 @@ pub(crate) async fn create_function_impl(
         &ctx.idle_timeout_secs,
     )
     .await?;
+    if !ctx.skip_release {
+        Box::pin(rebind_callbacks(ctx.clone())).await?;
+    }
 
     let mut cb_guard = ctx.callback_connection.lock().await;
     let conn = cb_guard
@@ -854,7 +932,7 @@ pub(crate) async fn create_function_impl(
             )));
         }
         let all_cleared = !has_callbacks(
-            &ctx.load_extension_enabled,
+            &ctx.callback_connection_required,
             &ctx.user_functions,
             &ctx.user_aggregates,
             &ctx.user_collations,
@@ -865,8 +943,7 @@ pub(crate) async fn create_function_impl(
         if all_cleared {
             drop(handle);
             drop(cb_guard);
-            let mut callback_guard = ctx.callback_connection.lock().await;
-            callback_guard.0.take();
+            discard_callback_connection(&ctx).await;
             return Ok(());
         }
     } else {
@@ -879,7 +956,7 @@ pub(crate) async fn create_function_impl(
         let callback_for_storage = Python::with_gil(|py| func.as_ref().unwrap().clone_ref(py));
         {
             let mut funcs_guard = ctx.user_functions.lock().unwrap();
-            funcs_guard.insert(name.clone(), (nargs, callback_for_storage));
+            funcs_guard.insert(name.clone(), (nargs, deterministic, callback_for_storage));
         }
         let name_cstr = std::ffi::CString::new(name.clone()).map_err(|e| {
             OperationalError::new_err(format!("Function name contains null byte: {e}"))
@@ -915,17 +992,24 @@ pub(crate) async fn create_function_impl(
         }
     }
 
+    finish_callback_update(&ctx).await;
     Ok(())
 }
 
 /// Create or remove a custom SQL aggregate function. Runs on the callback connection.
 pub(crate) async fn create_aggregate_impl(
-    ctx: CallbackContext,
+    mut ctx: CallbackContext,
     name: String,
     num_params: i32,
     aggregate_class: Option<Py<PyAny>>,
 ) -> Result<(), PyErr> {
     ensure_not_closed(&ctx.closed)?;
+    let _operation_guard = if ctx.skip_release {
+        None
+    } else {
+        Some(Arc::clone(&ctx.callback_operation_lock).lock_owned().await)
+    };
+    prepare_callback_target(&mut ctx).await?;
 
     ensure_callback_connection(
         &ctx.path,
@@ -937,6 +1021,9 @@ pub(crate) async fn create_aggregate_impl(
         &ctx.idle_timeout_secs,
     )
     .await?;
+    if !ctx.skip_release {
+        Box::pin(rebind_callbacks(ctx.clone())).await?;
+    }
 
     let mut conn_guard = ctx.callback_connection.lock().await;
     let conn = conn_guard
@@ -993,7 +1080,7 @@ pub(crate) async fn create_aggregate_impl(
         }
 
         let all_cleared = !has_callbacks(
-            &ctx.load_extension_enabled,
+            &ctx.callback_connection_required,
             &ctx.user_functions,
             &ctx.user_aggregates,
             &ctx.user_collations,
@@ -1004,9 +1091,9 @@ pub(crate) async fn create_aggregate_impl(
         if all_cleared {
             drop(handle);
             drop(conn_guard);
-            let mut callback_guard = ctx.callback_connection.lock().await;
-            callback_guard.0.take();
+            discard_callback_connection(&ctx).await;
         }
+        finish_callback_update(&ctx).await;
         return Ok(());
     }
 
@@ -1220,6 +1307,180 @@ pub(crate) async fn create_aggregate_impl(
         Python::with_gil(|_py| unsafe {
             let _ = Box::from_raw(old_ptr as *mut Py<PyAny>);
         });
+    }
+
+    finish_callback_update(&ctx).await;
+    Ok(())
+}
+
+/// Reinstall this logical Connection's callback configuration on its current
+/// checked-out physical connection. Callback-enabled connections are discarded
+/// after each operation so idle wrappers do not reserve pool capacity.
+pub(crate) async fn rebind_callbacks(ctx: CallbackContext) -> Result<(), PyErr> {
+    let result = rebind_callbacks_inner(ctx.clone()).await;
+    if result.is_err() && !ctx.skip_release {
+        discard_callback_connection(&ctx).await;
+    }
+    result
+}
+
+async fn rebind_callbacks_inner(ctx: CallbackContext) -> Result<(), PyErr> {
+    ensure_callback_connection(
+        &ctx.path,
+        &ctx.pool,
+        &ctx.callback_connection,
+        &ctx.pragmas,
+        &ctx.pool_size,
+        &ctx.connection_timeout_secs,
+        &ctx.idle_timeout_secs,
+    )
+    .await?;
+
+    let mut batch_ctx = ctx.clone();
+    batch_ctx.skip_release = true;
+
+    let functions = {
+        let guard = ctx.user_functions.lock().unwrap();
+        #[allow(deprecated)]
+        Python::with_gil(|py| {
+            guard
+                .iter()
+                .map(|(name, (nargs, deterministic, callback))| {
+                    (name.clone(), *nargs, *deterministic, callback.clone_ref(py))
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    for (name, nargs, deterministic, callback) in functions {
+        create_function_impl(
+            batch_ctx.clone(),
+            name,
+            nargs,
+            Some(callback),
+            deterministic,
+        )
+        .await?;
+    }
+
+    let aggregates = {
+        let guard = ctx.user_aggregates.lock().unwrap();
+        #[allow(deprecated)]
+        Python::with_gil(|py| {
+            guard
+                .iter()
+                .map(|(name, (nargs, class_ptr))| unsafe {
+                    (
+                        name.clone(),
+                        *nargs,
+                        (*(*class_ptr as *const Py<PyAny>)).clone_ref(py),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    for (name, nargs, class) in aggregates {
+        create_aggregate_impl(batch_ctx.clone(), name, nargs, Some(class)).await?;
+    }
+
+    let collations = {
+        let guard = ctx.user_collations.lock().unwrap();
+        #[allow(deprecated)]
+        Python::with_gil(|py| {
+            guard
+                .iter()
+                .map(|(name, callback_ptr)| unsafe {
+                    (
+                        name.clone(),
+                        (*(*callback_ptr as *const Py<PyAny>)).clone_ref(py),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    for (name, callback) in collations {
+        create_collation_impl(batch_ctx.clone(), name, Some(callback)).await?;
+    }
+
+    let authorizer = {
+        let guard = ctx.authorizer_callback.lock().unwrap();
+        #[allow(deprecated)]
+        Python::with_gil(|py| guard.as_ref().map(|callback| callback.clone_ref(py)))
+    };
+    if let Some(callback) = authorizer {
+        set_authorizer_impl(batch_ctx.clone(), Some(callback)).await?;
+    }
+
+    let progress = {
+        let guard = ctx.progress_handler.lock().unwrap();
+        #[allow(deprecated)]
+        Python::with_gil(|py| {
+            guard
+                .as_ref()
+                .map(|(n, callback)| (*n, callback.clone_ref(py)))
+        })
+    };
+    if let Some((n, callback)) = progress {
+        set_progress_handler_impl(batch_ctx, n, Some(callback)).await?;
+    }
+
+    let mut conn_guard = ctx.callback_connection.lock().await;
+    let conn = conn_guard
+        .0
+        .as_mut()
+        .ok_or_else(|| OperationalError::new_err("Callback connection not available"))?;
+    let sqlite_conn: &mut SqliteConnection = conn;
+    let mut handle = sqlite_conn
+        .lock_handle()
+        .await
+        .map_err(|e| OperationalError::new_err(format!("Failed to lock handle: {e}")))?;
+    let raw_db = handle.as_raw_handle().as_ptr();
+    let extensions = ctx.loaded_extensions.lock().unwrap().clone();
+    let enabled = *ctx.extension_loading_allowed.lock().unwrap();
+    if !extensions.is_empty() {
+        let result = unsafe { sqlite3_enable_load_extension(raw_db, 1) };
+        if result != SQLITE_OK {
+            return Err(OperationalError::new_err(format!(
+                "Failed to enable extension loading: SQLite error code {result}"
+            )));
+        }
+        for extension in extensions {
+            let extension_cstr = std::ffi::CString::new(extension.as_str())
+                .map_err(|e| OperationalError::new_err(format!("Invalid extension name: {e}")))?;
+            let mut error: *mut std::ffi::c_char = std::ptr::null_mut();
+            let result = unsafe {
+                sqlite3_load_extension(
+                    raw_db,
+                    extension_cstr.as_ptr(),
+                    std::ptr::null(),
+                    &mut error,
+                )
+            };
+            if result != SQLITE_OK {
+                let message = if error.is_null() {
+                    format!("SQLite error code {result}")
+                } else {
+                    let message = unsafe {
+                        std::ffi::CStr::from_ptr(error)
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    unsafe { sqlite3_free(error.cast()) };
+                    message
+                };
+                return Err(OperationalError::new_err(format!(
+                    "Failed to reload extension '{extension}': {message}"
+                )));
+            }
+            if !error.is_null() {
+                unsafe { sqlite3_free(error.cast()) };
+            }
+        }
+    }
+    let result = unsafe { sqlite3_enable_load_extension(raw_db, i32::from(enabled)) };
+    if result != SQLITE_OK {
+        return Err(OperationalError::new_err(format!(
+            "Failed to configure extension loading: SQLite error code {result}"
+        )));
     }
 
     Ok(())
