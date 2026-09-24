@@ -5,6 +5,7 @@ import pytest
 from conftest import skip_if_no_phase3
 from rapsqlite import (
     connect,
+    ProgrammingError,
     execute_iter,
     paginate,
     analyze_query_plan,
@@ -395,6 +396,26 @@ async def test_cursor_close(test_db):
         assert cur.description is None
         assert cur.lastrowid == -1
         assert cur.rowcount == -1
+
+
+@pytest.mark.asyncio
+async def test_closed_returning_cursor_does_not_execute_again(test_db):
+    async with connect(test_db) as db:
+        await db.execute("DROP TABLE IF EXISTS cursor_close_returning")
+        await db.execute(
+            "CREATE TABLE cursor_close_returning (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)"
+        )
+        cursor = await db.execute(
+            "INSERT INTO cursor_close_returning(value) VALUES ('x') RETURNING id"
+        )
+        assert await cursor.fetchone() == [1]
+
+        await cursor.close()
+        with pytest.raises(ProgrammingError, match="closed cursor"):
+            await cursor.fetchall()
+
+        rows = await db.fetch_all("SELECT id, value FROM cursor_close_returning")
+        assert rows == [[1, "x"]]
 
 
 @pytest.mark.asyncio

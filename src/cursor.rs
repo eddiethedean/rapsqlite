@@ -54,6 +54,7 @@ struct CursorFetchContext {
     description: Arc<StdMutex<Option<Py<PyAny>>>>,
     pending_description: Arc<StdMutex<Option<Py<PyAny>>>>,
     row_factory_override: Arc<StdMutex<Option<Py<PyAny>>>>,
+    cursor_closed: Arc<StdMutex<bool>>,
     adapters: Adapters,
     converters: Converters,
     closed: Arc<StdMutex<bool>>,
@@ -63,6 +64,11 @@ struct CursorFetchContext {
 /// acquires the appropriate connection, runs the query, converts rows with row_factory/text_factory,
 /// and sets results + pending_description + current_index. If the query does not return rows, sets empty results.
 async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), PyErr> {
+    if *ctx.cursor_closed.lock().unwrap() {
+        return Err(ProgrammingError::new_err(
+            "Cannot operate on a closed cursor.",
+        ));
+    }
     ensure_not_closed(&ctx.closed)?;
     let needs_fetch = ctx.results.lock().unwrap().is_none();
     if !needs_fetch {
@@ -266,6 +272,7 @@ pub(crate) struct Cursor {
     pub(crate) lastrowid: Arc<StdMutex<i64>>,
     pub(crate) rowcount: Arc<StdMutex<i64>>,
     pub(crate) row_factory_override: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) cursor_closed: Arc<StdMutex<bool>>,
     pub(crate) closed: Arc<StdMutex<bool>>,
 }
 
@@ -300,6 +307,7 @@ impl Cursor {
             description: Arc::clone(&self.description),
             pending_description: Arc::clone(&self.pending_description),
             row_factory_override: Arc::clone(&self.row_factory_override),
+            cursor_closed: Arc::clone(&self.cursor_closed),
             adapters: Arc::clone(&self.adapters),
             converters: Arc::clone(&self.converters),
             closed: Arc::clone(&self.closed),
@@ -341,6 +349,11 @@ impl Cursor {
         query: String,
         parameters: Vec<Vec<Py<PyAny>>>,
     ) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         self.query = query.clone();
         Python::attach(|py| {
             let conn = self.connection.bind(py);
@@ -449,6 +462,11 @@ impl Cursor {
 
     /// Fetch one row.
     fn fetchone(&self) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
@@ -497,6 +515,11 @@ impl Cursor {
 
     /// Fetch all rows.
     fn fetchall(&self) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
@@ -574,6 +597,11 @@ impl Cursor {
     /// When size is omitted, uses cursor.arraysize (default 1).
     #[pyo3(signature = (size = None))]
     fn fetchmany(&self, size: Option<usize>) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         if self.query.is_empty() {
             return Err(ProgrammingError::new_err("No query executed"));
         }
@@ -631,6 +659,7 @@ impl Cursor {
 
     /// Close the cursor (Phase 3.9). Clears cached results and resets state.
     fn close(&self) -> PyResult<Py<PyAny>> {
+        *self.cursor_closed.lock().unwrap() = true;
         let results = Arc::clone(&self.results);
         let current_index = Arc::clone(&self.current_index);
         let description = Arc::clone(&self.description);
@@ -677,6 +706,11 @@ impl Cursor {
 
     /// Execute a script containing multiple SQL statements separated by semicolons.
     fn executescript(&self, script: String) -> PyResult<Py<PyAny>> {
+        if *self.cursor_closed.lock().unwrap() {
+            return Err(ProgrammingError::new_err(
+                "Cannot operate on a closed cursor.",
+            ));
+        }
         let path = self.connection_path.clone();
         let pool = Arc::clone(&self.connection_pool);
         let pragmas = Arc::clone(&self.connection_pragmas);
