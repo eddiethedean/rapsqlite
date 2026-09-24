@@ -73,52 +73,35 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
         *ctx.results.lock().unwrap() = Some(Vec::new());
         return Ok(());
     }
-    let (processed_query, processed_params) = if let (Some(q), Some(p)) =
-        (ctx.processed_query.as_ref(), ctx.processed_params.as_ref())
-    {
-        (q.clone(), p.clone())
-    } else {
-        #[allow(deprecated)]
-        Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
-            let params_guard = ctx.parameters.lock().unwrap();
-            if let Some(ref params_py) = *params_guard {
-                let params_bound = params_py.bind(py);
-                if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
-                    let (proc_query, param_values) =
-                        process_named_parameters(py, &ctx.query, dict, Some(&ctx.adapters))?;
-                    if param_values.is_empty()
-                        && (ctx.query.contains(':')
-                            || ctx.query.contains('@')
-                            || ctx.query.contains('$'))
-                    {
-                        return Err(ProgrammingError::new_err(format!(
-                            "Named parameters found in query but none extracted. Query: '{}', Processed: '{}'",
-                            ctx.query, proc_query
-                        )));
+    let (processed_query, processed_params) =
+        if let (Some(q), Some(p)) = (ctx.processed_query.as_ref(), ctx.processed_params.as_ref()) {
+            (q.clone(), p.clone())
+        } else {
+            #[allow(deprecated)]
+            Python::with_gil(|py| -> PyResult<(String, Vec<SqliteParam>)> {
+                let params_guard = ctx.parameters.lock().unwrap();
+                if let Some(ref params_py) = *params_guard {
+                    let params_bound = params_py.bind(py);
+                    if let Ok(dict) = params_bound.cast::<pyo3::types::PyDict>() {
+                        let (proc_query, param_values) =
+                            process_named_parameters(py, &ctx.query, dict, Some(&ctx.adapters))?;
+                        return Ok((proc_query, param_values));
                     }
-                    if !proc_query.contains('?') && ctx.query.contains(':') {
-                        return Err(ProgrammingError::new_err(format!(
-                            "Query had named parameters but processed query has no ? placeholders. Original: '{}', Processed: '{}'",
-                            ctx.query, proc_query
-                        )));
+                    if let Ok(list) = params_bound.cast::<PyList>() {
+                        let param_values =
+                            process_positional_parameters(py, list, Some(&ctx.adapters))?;
+                        return Ok((ctx.query.clone(), param_values));
                     }
-                    return Ok((proc_query, param_values));
+                    let param = SqliteParam::apply_adapters_then_from_py(
+                        py,
+                        params_bound,
+                        Some(&ctx.adapters),
+                    )?;
+                    return Ok((ctx.query.clone(), vec![param]));
                 }
-                if let Ok(list) = params_bound.cast::<PyList>() {
-                    let param_values =
-                        process_positional_parameters(py, list, Some(&ctx.adapters))?;
-                    return Ok((ctx.query.clone(), param_values));
-                }
-                let param = SqliteParam::apply_adapters_then_from_py(
-                    py,
-                    params_bound,
-                    Some(&ctx.adapters),
-                )?;
-                return Ok((ctx.query.clone(), vec![param]));
-            }
-            Ok((ctx.query.clone(), Vec::new()))
-        })?
-    };
+                Ok((ctx.query.clone(), Vec::new()))
+            })?
+        };
 
     let in_transaction = {
         let g = ctx.transaction_state.lock().await;
