@@ -394,11 +394,9 @@ fn insert_sensitive_value_ranges(
             }
         }
         cursor = close + 1;
-        if find_sql_keyword(query_lower, "values", cursor).is_some() {
-            break;
-        }
-        if query[cursor..].trim_start().starts_with(',') {
-            cursor += query[cursor..].find(',').unwrap_or(0) + 1;
+        let separator = skip_sql_ignored(query, cursor, query.len());
+        if query.as_bytes().get(separator) == Some(&b',') {
+            cursor = separator + 1;
         } else {
             break;
         }
@@ -630,6 +628,14 @@ mod tests {
         let out = sanitize_query(q);
         assert!(!out.contains("TOPSECRET"));
         assert!(out.contains("VALUES (***)"));
+    }
+
+    #[test]
+    fn test_sanitize_query_insert_sensitive_values_after_comment() {
+        let q = "INSERT INTO users (password) VALUES ('first') /* comment */ , ('TOPSECRET')";
+        let out = sanitize_query(q);
+        assert_eq!(out.matches("***").count(), 2);
+        assert!(!out.contains("TOPSECRET"));
     }
 
     #[test]
