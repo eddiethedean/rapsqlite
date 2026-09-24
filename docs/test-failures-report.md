@@ -240,24 +240,27 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
 import tempfile, os
 
+
 async def main():
-    with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db = f.name
     try:
-        engine = create_async_engine(f'sqlite+rapsqlite:///{db}')
+        engine = create_async_engine(f"sqlite+rapsqlite:///{db}")
         async with engine.connect() as conn:
-            await conn.execute(text('CREATE TABLE t (id INTEGER PRIMARY KEY)'))
+            await conn.execute(text("CREATE TABLE t (id INTEGER PRIMARY KEY)"))
             await conn.commit()
         async with engine.connect() as conn:
             await conn.begin()
-            await conn.execute(text('INSERT INTO t (id) VALUES (2)'))
+            await conn.execute(text("INSERT INTO t (id) VALUES (2)"))
             await conn.rollback()
         async with engine.connect() as conn:
-            rows = (await conn.execute(text('SELECT id FROM t'))).fetchall()
+            rows = (await conn.execute(text("SELECT id FROM t"))).fetchall()
             print(rows)  # Expect [(1,)] if rollback worked; get [(1,), (2,)] if not
         await engine.dispose()
     finally:
         os.unlink(db)
+
+
 asyncio.run(main())
 ```
 
@@ -269,18 +272,26 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, select
 
-class Base(DeclarativeBase): pass
+
+class Base(DeclarativeBase):
+    pass
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(50))
+
 
 async def main():
     engine = create_async_engine("sqlite+rapsqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     from sqlalchemy.ext.asyncio import AsyncSession
-    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+    async_session = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with async_session() as session:
         async with session.begin():
             session.add_all([User(name="alice"), User(name="bob")])
@@ -289,5 +300,7 @@ async def main():
         users = result.scalars().all()
         print(len(users))  # Expect 2; get 4 if doubled
     await engine.dispose()
+
+
 asyncio.run(main())
 ```

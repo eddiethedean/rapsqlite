@@ -206,6 +206,7 @@ Tests are categorized using pytest markers. Use `pytest -m unit`, `pytest -m "no
 import pytest
 from rapsqlite import connect
 
+
 @pytest.mark.asyncio
 async def test_feature_name(test_db):
     """Test description."""
@@ -230,6 +231,7 @@ async def test_edge_case(test_db):
 ```python
 import pytest
 from rapsqlite import OperationalError
+
 
 @pytest.mark.asyncio
 async def test_error_handling(test_db):

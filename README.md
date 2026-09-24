@@ -58,12 +58,14 @@ To verify: run the [installation example](https://rapsqlite.readthedocs.io/en/la
 import asyncio
 from rapsqlite import connect
 
+
 async def main():
     async with connect("example.db") as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("INSERT INTO users (name) VALUES ('Alice')")
         rows = await conn.fetch_all("SELECT * FROM users")
         print(rows)
+
 
 asyncio.run(main())
 ```
@@ -79,12 +81,14 @@ import asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+
 async def main():
     engine = create_async_engine("sqlite+rapsqlite:///app.db")
     async with engine.connect() as conn:
         result = await conn.execute(text("SELECT 1"))
         print(result.scalar())  # 1
     await engine.dispose()
+
 
 asyncio.run(main())
 ```

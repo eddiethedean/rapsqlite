@@ -107,6 +107,7 @@ Always use the provided fixtures:
 import pytest
 from rapsqlite import connect
 
+
 @pytest.mark.asyncio
 async def test_feature_name(test_db):
     """Test description."""
