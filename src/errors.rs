@@ -146,10 +146,19 @@ pub(crate) fn map_sqlx_error_with_query_visibility(
 }
 
 /// Map raw SQLite result code + message to Python exception (for use from non-Python threads).
-pub(crate) fn map_sqlite_error_from_msg(path: &str, query: &str, rc: i32, msg: &str) -> PyErr {
+pub(crate) fn map_sqlite_error_from_msg(
+    path: &str,
+    query: &str,
+    rc: i32,
+    msg: &str,
+    include_query: bool,
+) -> PyErr {
     let sanitized = sanitize_query(query);
-    let error_msg =
-        format!("Failed to execute query on database {path}: {msg}\nQuery: {sanitized}");
+    let error_msg = if include_query {
+        format!("Failed to execute query on database {path}: {msg}\nQuery: {sanitized}")
+    } else {
+        format!("Failed to execute query on database {path}: {msg}")
+    };
     let primary = rc & 0xff;
     match primary {
         libsqlite3_sys::SQLITE_CONSTRAINT => IntegrityError::new_err(error_msg),

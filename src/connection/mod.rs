@@ -1838,7 +1838,13 @@ impl Connection {
                     });
                     drop(handle);
                     let (total_changes_val, last_row_id_val) = result.map_err(|(rc, msg)| {
-                        crate::errors::map_sqlite_error_from_msg(&path, &query, rc, &msg)
+                        crate::errors::map_sqlite_error_from_msg(
+                            &path,
+                            &query,
+                            rc,
+                            &msg,
+                            include_query_in_errors,
+                        )
                     })?;
                     total_changes = total_changes_val;
                     last_row_id = last_row_id_val;
