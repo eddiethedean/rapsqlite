@@ -6,6 +6,7 @@ from conftest import skip_if_no_phase3
 from rapsqlite import (
     analyze_query_plan,
     connect,
+    ProgrammingError,
     execute_iter,
     in_clause_query,
     paginate,
@@ -205,6 +206,43 @@ async def test_execute_iter(test_db):
 
 
 @pytest.mark.asyncio
+async def test_query_helpers_treat_scalar_strings_as_one_parameter(test_db):
+    async with connect(test_db) as db:
+        await db.execute("DROP TABLE IF EXISTS helper_scalar_params")
+        await db.execute("CREATE TABLE helper_scalar_params (value TEXT)")
+        await db.execute("INSERT INTO helper_scalar_params VALUES ('a'), ('aa'), ('b')")
+
+        page = await paginate(
+            db,
+            "SELECT value FROM helper_scalar_params WHERE value = ?",
+            "a",
+            page_size=1,
+        )
+        chunks = [
+            chunk
+            async for chunk in execute_iter(
+                db,
+                "SELECT value FROM helper_scalar_params WHERE value = ? ORDER BY value",
+                "a",
+                chunk_size=1,
+            )
+        ]
+
+    assert page == [["a"]]
+    assert chunks == [[["a"]]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [0, -1])
+async def test_pagination_helpers_reject_non_positive_sizes(test_db, size):
+    async with connect(test_db) as db:
+        with pytest.raises(ValueError, match="page_size must be greater than zero"):
+            await paginate(db, "SELECT 1", page_size=size)
+        with pytest.raises(ValueError, match="chunk_size must be greater than zero"):
+            execute_iter(db, "SELECT 1", chunk_size=size)
+
+
+@pytest.mark.asyncio
 async def test_timed_fetch_all(test_db):
     """timed_fetch_all returns (rows, duration) or rows and calls on_timing when given."""
     async with connect(test_db) as db:
@@ -278,6 +316,26 @@ async def test_analyze_query_plan(test_db):
 
 
 @pytest.mark.asyncio
+async def test_query_plan_detects_current_sqlite_scan_format(test_db):
+    async with connect(test_db) as db:
+        await db.execute("DROP TABLE IF EXISTS query_plan_scan")
+        await db.execute("CREATE TABLE query_plan_scan (id INTEGER, active INTEGER)")
+        analysis = await analyze_query_plan(
+            db, "SELECT * FROM query_plan_scan WHERE active = 1"
+        )
+        suggestions = await suggest_indexes(
+            db, "SELECT * FROM query_plan_scan WHERE active = 1"
+        )
+
+    assert analysis["table_scan"] is True
+    assert any(
+        detail.upper().startswith("SCAN QUERY_PLAN_SCAN")
+        for detail in analysis["details"]
+    )
+    assert any(suggestion["table"] == "query_plan_scan" for suggestion in suggestions)
+
+
+@pytest.mark.asyncio
 async def test_suggest_indexes(test_db):
     """suggest_indexes returns list of suggestions when table_scan without index."""
     async with connect(test_db) as db:
@@ -306,6 +364,16 @@ async def test_in_clause_query(test_db):
         rows = await db.fetch_all(sql, params)
         assert len(rows) == 3
         assert {r[0] for r in rows} == {1, 2, 3}
+
+        literal_sql, literal_params = in_clause_query(
+            "SELECT 'IN (?)' AS literal, id FROM t WHERE id IN (?) -- IN (?)",
+            [1, 2],
+        )
+        assert "'IN (?)'" in literal_sql
+        assert "WHERE id IN (?,?)" in literal_sql
+        assert "-- IN (?)" in literal_sql
+        literal_rows = await db.fetch_all(literal_sql, literal_params)
+        assert literal_rows == [["IN (?)", 1], ["IN (?)", 2]]
     with pytest.raises(ValueError, match="at least one value"):
         in_clause_query("SELECT * FROM t WHERE id IN (?)", [])
     with pytest.raises(ValueError, match="IN \\(\\?\\)"):
@@ -396,6 +464,26 @@ async def test_cursor_close(test_db):
         assert cur.description is None
         assert cur.lastrowid == -1
         assert cur.rowcount == -1
+
+
+@pytest.mark.asyncio
+async def test_closed_returning_cursor_does_not_execute_again(test_db):
+    async with connect(test_db) as db:
+        await db.execute("DROP TABLE IF EXISTS cursor_close_returning")
+        await db.execute(
+            "CREATE TABLE cursor_close_returning (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)"
+        )
+        cursor = await db.execute(
+            "INSERT INTO cursor_close_returning(value) VALUES ('x') RETURNING id"
+        )
+        assert await cursor.fetchone() == [1]
+
+        await cursor.close()
+        with pytest.raises(ProgrammingError, match="closed cursor"):
+            await cursor.fetchall()
+
+        rows = await db.fetch_all("SELECT id, value FROM cursor_close_returning")
+        assert rows == [[1, "x"]]
 
 
 @pytest.mark.asyncio

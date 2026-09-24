@@ -1,6 +1,7 @@
 //! `RapRow` implementation (aiosqlite-compatible row type).
 
 use pyo3::prelude::*;
+use pyo3::types::{PyIterator, PyList};
 
 /// Row class for dict-like access to query results (similar to aiosqlite.Row).
 #[pyclass]
@@ -89,9 +90,10 @@ impl RapRow {
             .collect())
     }
 
-    /// Iterate over column names.
-    fn __iter__(&self) -> PyResult<Vec<String>> {
-        Ok(self.columns.clone())
+    /// Iterate over row values, like sqlite3.Row.
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyIterator>> {
+        let values = PyList::new(py, self.values.iter().map(|value| value.clone_ref(py)))?;
+        PyIterator::from_object(&values)
     }
 
     /// String representation.

@@ -183,13 +183,15 @@ class AsyncCursor:
             self._result_index = 0
             self._cached_description = None
             await self._raw.execute(sql, params)
-            # Capture description immediately after execute (Rust sets pending_description
-            # in __aenter__; fetchall() later moves it to description, so read before fetchall
-            # so 0-row SELECT has description for SQLAlchemy).
+            # Keep the description available for empty results. For non-empty results the
+            # raw cursor promotes its pending description during fetchall(), so refresh it
+            # afterward to preserve SQLite's real labels.
             self._cached_description = self._raw.description
             # Buffer rows so SQLAlchemy can consume results even if it closes the cursor
             # before reading all rows (driver-adapter behavior).
             self._result_buffer = await self._raw.fetchall()
+            if self._raw.description is not None:
+                self._cached_description = self._raw.description
 
             # Fallback: raw cursor may set description lazily on first fetch; if still
             # None but we have rows, build a minimal description so SQLAlchemy can build result.

@@ -38,6 +38,53 @@ async def test_transaction_retry_max_retries_one_succeeds(test_db):
 
 
 @pytest.mark.asyncio
+async def test_transaction_retry_retries_locked_begin_without_rollback(test_db):
+    async with (
+        connect(test_db, timeout=0) as holder,
+        connect(test_db, timeout=0) as contender,
+    ):
+        await holder.execute(
+            "CREATE TABLE IF NOT EXISTS retry_begin_lock (id INTEGER PRIMARY KEY)"
+        )
+        await holder.begin()
+        await holder.execute("INSERT INTO retry_begin_lock DEFAULT VALUES")
+
+        class CountingConnection:
+            def __init__(self, connection):
+                self.connection = connection
+                self.begin_calls = 0
+                self.rollback_calls = 0
+
+            async def begin(self):
+                self.begin_calls += 1
+                await self.connection.begin()
+
+            async def rollback(self):
+                self.rollback_calls += 1
+                await self.connection.rollback()
+
+            async def commit(self):
+                await self.connection.commit()
+
+        wrapped = CountingConnection(contender)
+        work_calls = 0
+
+        async def work():
+            nonlocal work_calls
+            work_calls += 1
+
+        with pytest.raises(Exception, match="locked|busy"):
+            await transaction_retry(
+                wrapped, work, max_retries=3, initial_delay=0, max_delay=0
+            )
+
+        assert wrapped.begin_calls == 3
+        assert wrapped.rollback_calls == 0
+        assert work_calls == 0
+        await holder.rollback()
+
+
+@pytest.mark.asyncio
 async def test_connection_state_cleanup_on_close(test_db):
     """total_changes and in_transaction state are cleaned up when connection is closed."""
     db = connect(test_db)

@@ -437,6 +437,11 @@ async def test_row_factory_rapsqlite_row_mixed_access(test_db):
         assert items["a"] == "x"
         assert items["b"] == 1.5
 
+        # Sequence iteration and unpacking use row values, not column names.
+        assert list(row) == [1, "x", 1.5]
+        row_id, name, value = row
+        assert (row_id, name, value) == (1, "x", 1.5)
+
         # __contains__ and __len__
         assert "id" in row
         assert "missing" not in row
