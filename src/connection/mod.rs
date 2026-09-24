@@ -3078,10 +3078,9 @@ impl Connection {
                 // The query task holds the callback/transaction slot mutex while it
                 // executes. Read the registered raw handle before attempting that
                 // mutex so interrupt() can reach an in-flight SQLite operation.
-                if let Some(raw_db) = callbacks::active_handle_for(&transaction_connection)
-                    .or_else(|| callbacks::active_handle_for(&callback_connection))
+                if callbacks::interrupt_active_handle(&transaction_connection)
+                    || callbacks::interrupt_active_handle(&callback_connection)
                 {
-                    unsafe { sqlite3_interrupt(raw_db as *mut libsqlite3_sys::sqlite3) };
                     return Ok(());
                 }
 

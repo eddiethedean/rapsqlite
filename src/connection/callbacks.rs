@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use libsqlite3_sys::{
     sqlite3_aggregate_context, sqlite3_context, sqlite3_create_collation_v2,
-    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free,
+    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free, sqlite3_interrupt,
     sqlite3_load_extension, sqlite3_progress_handler, sqlite3_result_error, sqlite3_result_null,
     sqlite3_set_authorizer, sqlite3_user_data, sqlite3_value, SQLITE_DENY, SQLITE_DETERMINISTIC,
     SQLITE_OK, SQLITE_UTF8,
@@ -55,8 +55,39 @@ pub(crate) struct CallbackContext {
     pub skip_release: bool,
 }
 
-fn active_handles() -> &'static StdMutex<HashMap<usize, usize>> {
-    static ACTIVE_HANDLES: OnceLock<StdMutex<HashMap<usize, usize>>> = OnceLock::new();
+struct ActiveHandle {
+    raw_db: usize,
+    active: StdMutex<bool>,
+}
+
+impl ActiveHandle {
+    fn new(raw_db: usize) -> Self {
+        Self {
+            raw_db,
+            active: StdMutex::new(true),
+        }
+    }
+
+    fn deactivate(&self) {
+        if let Ok(mut active) = self.active.lock() {
+            *active = false;
+        }
+    }
+
+    fn interrupt(&self) -> bool {
+        let Ok(active) = self.active.lock() else {
+            return false;
+        };
+        if !*active {
+            return false;
+        }
+        unsafe { sqlite3_interrupt(self.raw_db as *mut libsqlite3_sys::sqlite3) };
+        true
+    }
+}
+
+fn active_handles() -> &'static StdMutex<HashMap<usize, Arc<ActiveHandle>>> {
+    static ACTIVE_HANDLES: OnceLock<StdMutex<HashMap<usize, Arc<ActiveHandle>>>> = OnceLock::new();
     ACTIVE_HANDLES.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
@@ -64,24 +95,34 @@ fn callback_slot_key(slot: &Arc<Mutex<PoolConnectionSlot>>) -> usize {
     Arc::as_ptr(slot) as usize
 }
 
-/// Return the raw SQLite handle currently associated with a callback slot.
-/// The slot's owner keeps the physical connection alive while the handle is used.
-pub(crate) fn active_handle_for(slot: &Arc<Mutex<PoolConnectionSlot>>) -> Option<usize> {
-    active_handles()
+/// Interrupt a callback operation associated with a slot, if one is active.
+/// The per-handle lock synchronizes this call with connection teardown.
+pub(crate) fn interrupt_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>) -> bool {
+    let handle = active_handles()
         .lock()
         .ok()
-        .and_then(|handles| handles.get(&callback_slot_key(slot)).copied())
+        .and_then(|handles| handles.get(&callback_slot_key(slot)).cloned());
+    handle.is_some_and(|handle| handle.interrupt())
 }
 
 fn register_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>, raw_db: usize) {
-    if let Ok(mut handles) = active_handles().lock() {
-        handles.insert(callback_slot_key(slot), raw_db);
+    let new_handle = Arc::new(ActiveHandle::new(raw_db));
+    let old_handle = active_handles()
+        .lock()
+        .ok()
+        .and_then(|mut handles| handles.insert(callback_slot_key(slot), Arc::clone(&new_handle)));
+    if let Some(old_handle) = old_handle {
+        old_handle.deactivate();
     }
 }
 
 pub(crate) fn clear_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>) {
-    if let Ok(mut handles) = active_handles().lock() {
-        handles.remove(&callback_slot_key(slot));
+    let old_handle = active_handles()
+        .lock()
+        .ok()
+        .and_then(|mut handles| handles.remove(&callback_slot_key(slot)));
+    if let Some(old_handle) = old_handle {
+        old_handle.deactivate();
     }
 }
 

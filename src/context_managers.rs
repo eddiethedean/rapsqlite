@@ -245,7 +245,15 @@ impl ExecuteContextManager {
                             &path,
                             include_query_in_errors,
                         )
-                        .await?;
+                        .await;
+                        let result = match result {
+                            Ok(result) => result,
+                            Err(error) => {
+                                clear_active_handle(&callback_connection);
+                                clear_active_handle(&transaction_connection);
+                                return Err(error);
+                            }
+                        };
                         {
                             let mut g = transaction_state.lock().await;
                             *g = TransactionState::Active;
@@ -282,10 +290,15 @@ impl ExecuteContextManager {
                             OperationalError::new_err("Callback connection not available")
                         })?;
                         maybe_trace_sql(&trace_callback, "BEGIN");
-                        sqlx::query("BEGIN")
+                        let begin_result = sqlx::query("BEGIN")
                             .execute(&mut *conn)
                             .await
-                            .map_err(|e| map_sqlx_error(e, &path, "BEGIN"))?;
+                            .map_err(|e| map_sqlx_error(e, &path, "BEGIN"));
+                        if let Err(error) = begin_result {
+                            clear_active_handle(&callback_connection);
+                            clear_active_handle(&transaction_connection);
+                            return Err(error);
+                        }
                         {
                             let mut g = transaction_state.lock().await;
                             *g = TransactionState::Active;
@@ -463,6 +476,8 @@ impl ExecuteContextManager {
                             *ex_guard = false;
                         }
                         if has_callbacks_flag {
+                            clear_active_handle(&callback_connection);
+                            clear_active_handle(&transaction_connection);
                             let mut conn_guard = transaction_connection.lock().await;
                             if let Some(mut conn) = conn_guard.0.take() {
                                 conn.close_on_drop();
