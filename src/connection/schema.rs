@@ -266,8 +266,8 @@ pub(crate) async fn get_foreign_keys(
     ctx: SchemaContext,
     table_name: String,
 ) -> PyResult<Py<PyAny>> {
-    let escaped = table_name.replace("'", "''");
-    let query = format!("PRAGMA foreign_key_list('{escaped}')");
+    let quoted = quote_pragma_identifier(&table_name);
+    let query = format!("PRAGMA foreign_key_list({quoted})");
     let rows = run_introspection_query(&ctx, &query).await?;
 
     #[allow(deprecated)]
@@ -366,8 +366,8 @@ pub(crate) async fn get_index_list(ctx: SchemaContext, table_name: String) -> Py
 
 /// get_index_info: PRAGMA index_info (seqno, cid, name).
 pub(crate) async fn get_index_info(ctx: SchemaContext, index_name: String) -> PyResult<Py<PyAny>> {
-    let escaped = index_name.replace("'", "''");
-    let query = format!("PRAGMA index_info('{escaped}')");
+    let quoted = quote_pragma_identifier(&index_name);
+    let query = format!("PRAGMA index_info({quoted})");
     let rows = run_introspection_query(&ctx, &query).await?;
 
     #[allow(deprecated)]
@@ -388,6 +388,11 @@ pub(crate) async fn get_index_info(ctx: SchemaContext, index_name: String) -> Py
         }
         Ok(result_list.into())
     })
+}
+
+/// Quote a table or index name used as a PRAGMA identifier.
+fn quote_pragma_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// get_table_xinfo: PRAGMA table_xinfo (cid, name, type, notnull, dflt_value, pk, hidden).

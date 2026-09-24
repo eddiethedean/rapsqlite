@@ -1826,8 +1826,6 @@ impl Connection {
                     }
                 } else if has_callbacks_flag {
                     let execution_result: Result<(), PyErr> = async {
-                        let _callback_operation_guard =
-                            callback_context.callback_operation_lock.lock().await;
                         callbacks::rebind_callbacks(callback_context.clone()).await?;
                         for param_values in processed_params.iter() {
                             let mut conn_guard = callback_connection.lock().await;
