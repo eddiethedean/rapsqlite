@@ -247,6 +247,8 @@ pub(crate) async fn set_progress_handler_impl(
         }
     }
 
+    drop(handle);
+    drop(conn_guard);
     finish_callback_update(&ctx).await;
     Ok(())
 }
@@ -450,6 +452,8 @@ pub(crate) async fn create_collation_impl(
         });
     }
 
+    drop(handle);
+    drop(conn_guard);
     finish_callback_update(&ctx).await;
     Ok(())
 }
@@ -631,6 +635,8 @@ pub(crate) async fn set_authorizer_impl(
         }
     }
 
+    drop(handle);
+    drop(conn_guard);
     finish_callback_update(&ctx).await;
     Ok(())
 }
@@ -992,6 +998,8 @@ pub(crate) async fn create_function_impl(
         }
     }
 
+    drop(handle);
+    drop(cb_guard);
     finish_callback_update(&ctx).await;
     Ok(())
 }
@@ -1309,6 +1317,8 @@ pub(crate) async fn create_aggregate_impl(
         });
     }
 
+    drop(handle);
+    drop(conn_guard);
     finish_callback_update(&ctx).await;
     Ok(())
 }
