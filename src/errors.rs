@@ -4,6 +4,277 @@ use pyo3::prelude::*;
 
 use crate::exceptions::{DatabaseError, IntegrityError, OperationalError, ProgrammingError};
 
+fn is_sql_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Find a SQL keyword outside quoted strings, quoted identifiers, and comments.
+fn find_sql_keyword(query_lower: &str, keyword: &str, from: usize) -> Option<usize> {
+    let bytes = query_lower.as_bytes();
+    let keyword_bytes = keyword.as_bytes();
+    let mut i = from;
+    let mut quote = None;
+
+    while i < bytes.len() {
+        if let Some(quote_byte) = quote {
+            if bytes[i] == quote_byte {
+                if i + 1 < bytes.len() && bytes[i + 1] == quote_byte {
+                    i += 2;
+                } else {
+                    quote = None;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if bytes[i] == b'\'' || bytes[i] == b'"' || bytes[i] == b'`' {
+            quote = Some(bytes[i]);
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'[' {
+            while i < bytes.len() {
+                if bytes[i] == b']' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'-' && bytes.get(i + 1) == Some(&b'-') {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+
+        if bytes[i..].starts_with(keyword_bytes)
+            && (i == 0 || !is_sql_identifier_byte(bytes[i - 1]))
+            && (i + keyword_bytes.len() == bytes.len()
+                || !is_sql_identifier_byte(bytes[i + keyword_bytes.len()]))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_sql_byte(query: &str, from: usize, needle: u8) -> Option<usize> {
+    let bytes = query.as_bytes();
+    let mut i = from;
+    let mut quote = None;
+
+    while i < bytes.len() {
+        if let Some(quote_byte) = quote {
+            if bytes[i] == quote_byte {
+                if i + 1 < bytes.len() && bytes[i + 1] == quote_byte {
+                    i += 2;
+                } else {
+                    quote = None;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'\'' || bytes[i] == b'"' || bytes[i] == b'`' {
+            quote = Some(bytes[i]);
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'[' {
+            while i < bytes.len() {
+                if bytes[i] == b']' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn matching_sql_paren(query: &str, open: usize) -> Option<usize> {
+    let bytes = query.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    let mut quote = None;
+
+    while i < bytes.len() {
+        if let Some(quote_byte) = quote {
+            if bytes[i] == quote_byte {
+                if i + 1 < bytes.len() && bytes[i + 1] == quote_byte {
+                    i += 2;
+                } else {
+                    quote = None;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => quote = Some(bytes[i]),
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_sql_list(query: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let bytes = query.as_bytes();
+    let mut ranges = Vec::new();
+    let mut item_start = start;
+    let mut depth = 0usize;
+    let mut i = start;
+    let mut quote = None;
+
+    while i < end {
+        if let Some(quote_byte) = quote {
+            if bytes[i] == quote_byte {
+                if i + 1 < end && bytes[i + 1] == quote_byte {
+                    i += 2;
+                } else {
+                    quote = None;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => quote = Some(bytes[i]),
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                ranges.push((item_start, i));
+                item_start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    ranges.push((item_start, end));
+    ranges
+}
+
+fn trim_sql_range(query: &str, (mut start, mut end): (usize, usize)) -> (usize, usize) {
+    let bytes = query.as_bytes();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    (start, end)
+}
+
+/// Find literal ranges belonging to sensitive columns in INSERT ... VALUES statements.
+fn insert_sensitive_value_ranges(
+    query: &str,
+    query_lower: &str,
+    sensitive_keywords: &[&str],
+) -> Vec<(usize, usize)> {
+    let Some(insert_pos) = find_sql_keyword(query_lower, "insert", 0) else {
+        return Vec::new();
+    };
+    let Some(values_pos) = find_sql_keyword(query_lower, "values", insert_pos + "insert".len())
+    else {
+        return Vec::new();
+    };
+    let Some(columns_open) = find_sql_byte(query, insert_pos + "insert".len(), b'(') else {
+        return Vec::new();
+    };
+    if columns_open >= values_pos {
+        return Vec::new();
+    }
+    let Some(columns_close) = matching_sql_paren(query, columns_open) else {
+        return Vec::new();
+    };
+    if columns_close > values_pos {
+        return Vec::new();
+    }
+
+    let sensitive_indices: Vec<usize> = split_sql_list(query, columns_open + 1, columns_close)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, range)| {
+            let (start, end) = trim_sql_range(query, range);
+            if start == end {
+                return None;
+            }
+            let column = query[start..end]
+                .trim_matches(|ch| ch == '`' || ch == '"' || ch == '[' || ch == ']')
+                .to_ascii_lowercase();
+            sensitive_keywords
+                .iter()
+                .any(|keyword| *keyword == column)
+                .then_some(index)
+        })
+        .collect();
+    if sensitive_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::new();
+    let mut cursor = values_pos + "values".len();
+    while let Some(open) = find_sql_byte(query, cursor, b'(') {
+        let Some(close) = matching_sql_paren(query, open) else {
+            break;
+        };
+        let values = split_sql_list(query, open + 1, close);
+        for index in &sensitive_indices {
+            if let Some(range) = values.get(*index) {
+                let trimmed = trim_sql_range(query, *range);
+                if trimmed.0 < trimmed.1 {
+                    ranges.push(trimmed);
+                }
+            }
+        }
+        cursor = close + 1;
+        if find_sql_keyword(query_lower, "values", cursor).is_some() {
+            break;
+        }
+        if query[cursor..].trim_start().starts_with(',') {
+            cursor += query[cursor..].find(',').unwrap_or(0) + 1;
+        } else {
+            break;
+        }
+    }
+    ranges
+}
+
 /// Sanitize a query string to remove potentially sensitive information.
 /// Replaces common sensitive patterns with placeholders.
 ///
@@ -31,6 +302,11 @@ fn sanitize_query(query: &str) -> String {
     ];
 
     let mut ranges = Vec::new();
+    ranges.extend(insert_sensitive_value_ranges(
+        query,
+        &query_lower,
+        &sensitive_keywords,
+    ));
     for keyword in sensitive_keywords {
         let mut search_from = 0;
         while let Some(relative_pos) = query_lower[search_from..].find(keyword) {
@@ -207,6 +483,14 @@ mod tests {
         let out = sanitize_query(q);
         assert!(out.contains("***"));
         assert!(!out.contains("abc123"));
+    }
+
+    #[test]
+    fn test_sanitize_query_insert_sensitive_value() {
+        let q = "INSERT INTO users (id, password) VALUES (1, 'TOPSECRET')";
+        let out = sanitize_query(q);
+        assert!(out.contains("VALUES (1, ***)"));
+        assert!(!out.contains("TOPSECRET"));
     }
 
     #[test]
