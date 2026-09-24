@@ -21,9 +21,9 @@ use crate::conversion::{
     build_description_empty_result, build_description_tuple, row_to_py_with_factory,
 };
 use crate::pool::{
-    acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
-    execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
-    PoolConnectionSlot, PoolSlot,
+    acquire_with_pragmas, ensure_callback_connection, execute_init_hook_if_needed,
+    get_or_create_pool, has_callbacks, lock_session_connection, release_session_connection,
+    PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{SqliteParam, TransactionState};
@@ -74,7 +74,7 @@ impl ExecuteContextManager {
             let state = slf.borrow(py).state.clone();
             let path = state.path.clone();
             let pool = Arc::clone(&state.pool);
-            let session_connection = Arc::clone(&state.session_connection);
+            let session_connection = state.session_connection.clone();
             let pragmas = Arc::clone(&state.pragmas);
             let pool_size = Arc::clone(&state.pool_size);
             let connection_timeout_secs = Arc::clone(&state.connection_timeout_secs);
@@ -323,7 +323,7 @@ impl ExecuteContextManager {
                         }
                     } else if hook_already_called || !is_dml_query(&query) {
                         // Inside init_hook, or DDL (CREATE/DROP etc.): use session connection.
-                        ensure_session_connection(
+                        let mut conn_guard = lock_session_connection(
                             &path,
                             &pool,
                             &session_connection,
@@ -333,7 +333,6 @@ impl ExecuteContextManager {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let mut conn_guard = session_connection.lock().await;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
@@ -356,7 +355,7 @@ impl ExecuteContextManager {
                         // Implicit transaction (aiosqlite compat): first DML (INSERT/UPDATE/DELETE)
                         // without explicit begin() starts a transaction; commit()/rollback() end it.
                         // Use session connection for BEGIN then move it to transaction_connection.
-                        ensure_session_connection(
+                        let mut conn_guard = lock_session_connection(
                             &path,
                             &pool,
                             &session_connection,
@@ -366,7 +365,6 @@ impl ExecuteContextManager {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let mut conn_guard = session_connection.lock().await;
                         let mut conn = conn_guard.0.take().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
@@ -588,7 +586,7 @@ impl ExecuteContextManager {
                         })?;
                         bind_and_fetch_all_on_connection(&query, &param_values, conn, &path).await?
                     } else {
-                        ensure_session_connection(
+                        let mut conn_guard = lock_session_connection(
                             &path,
                             &pool,
                             &session_connection,
@@ -598,7 +596,6 @@ impl ExecuteContextManager {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let mut conn_guard = session_connection.lock().await;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
@@ -688,7 +685,7 @@ impl ExecuteContextManager {
 pub(crate) struct TransactionContextManager {
     pub(crate) path: String,
     pub(crate) pool: Arc<Mutex<PoolSlot>>,
-    pub(crate) session_connection: Arc<Mutex<PoolConnectionSlot>>,
+    pub(crate) session_connection: SessionConnectionSlot,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
@@ -711,7 +708,7 @@ impl TransactionContextManager {
         Python::attach(|py| {
             let path = slf.borrow(py).path.clone();
             let pool = Arc::clone(&slf.borrow(py).pool);
-            let session_connection = Arc::clone(&slf.borrow(py).session_connection);
+            let session_connection = slf.borrow(py).session_connection.clone();
             let pragmas = Arc::clone(&slf.borrow(py).pragmas);
             let pool_size = Arc::clone(&slf.borrow(py).pool_size);
             let connection_timeout_secs = Arc::clone(&slf.borrow(py).connection_timeout_secs);

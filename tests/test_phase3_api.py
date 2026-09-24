@@ -178,6 +178,7 @@ async def test_pool_metrics_gauges(test_db):
     assert "rapsqlite_pool_size" in gauges
     assert "rapsqlite_pool_num_idle" in gauges
     assert "rapsqlite_pool_in_use" in gauges
+    assert "rapsqlite_pool_max_connections" in gauges
     assert (
         gauges["rapsqlite_pool_size"]
         == gauges["rapsqlite_pool_num_idle"] + gauges["rapsqlite_pool_in_use"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 from typing import Any, Callable, Coroutine, Dict, Iterator, List, Optional, Protocol, Type, TypeVar, TypeAlias
+from rapsqlite._metrics import PoolMetrics
 
 # Type alias for init_hook callback
 InitHook = Callable[["Connection"], Coroutine[Any, Any, None]]
@@ -134,7 +135,7 @@ class Connection:
         self, sql: str, parameters: Optional[Any] = None
     ) -> Coroutine[Any, Any, List[Any]]: ...
     def pool_health(self) -> Coroutine[Any, Any, bool]: ...
-    def pool_metrics(self) -> Coroutine[Any, Any, Dict[str, int]]: ...
+    def pool_metrics(self) -> Coroutine[Any, Any, PoolMetrics]: ...
     def execute_insert(
         self, query: str, parameters: Optional[Any] = None
     ) -> Coroutine[Any, Any, int]: ...

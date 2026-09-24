@@ -51,13 +51,15 @@ Example:
 
 import inspect
 import os
+import uuid
+from urllib.parse import quote
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import builtins as _builtins
 
 from rapsqlite._compat import apply_compat
 from rapsqlite._connection_state import apply_state
-from rapsqlite._metrics import PoolMetricsGauges, pool_metrics_gauges
+from rapsqlite._metrics import PoolMetrics, PoolMetricsGauges, pool_metrics_gauges
 from rapsqlite._query_helpers import (
     _StreamChunksIterator,
     analyze_query_plan,
@@ -177,6 +179,8 @@ __all__: list[str] = [
     "CursorT",
     "Row",
     "connect",
+    "connect_memory",
+    "PoolMetrics",
     "PoolMetricsGauges",
     "pool_metrics_gauges",
     "execute_iter",
@@ -200,6 +204,36 @@ __all__: list[str] = [
     "NotSupportedError",
     "ValueError",
 ]
+
+
+def connect_memory(
+    *,
+    name: str | None = None,
+    pragmas: Any = None,
+    timeout: float = 5.0,
+    iter_chunk_size: int = 64,
+    idle_timeout: int | None = None,
+    pool_size: int | None = None,
+) -> ConnectionT:
+    """Create an isolated or explicitly shared in-memory SQLite database.
+
+    An unnamed database gets a unique process-local identity. A non-empty name
+    shares one database among live ``connect_memory(name=...)`` connections
+    with that same name. SQLite closes the database after the last connection
+    using that identity is closed or discarded.
+    """
+    if name is not None and (not isinstance(name, str) or not name):
+        raise ValueError("name must be a non-empty string or None")
+    identity = quote(name, safe="") if name is not None else uuid.uuid4().hex
+    uri = f"file:rapsqlite-memory-{identity}?mode=memory&cache=shared"
+    return connect(
+        uri,
+        pragmas=pragmas,
+        timeout=timeout,
+        iter_chunk_size=iter_chunk_size,
+        idle_timeout=idle_timeout,
+        pool_size=pool_size,
+    )
 
 
 def connect(
@@ -244,9 +278,10 @@ def connect(
             aiosqlite/sqlite3). Use for drop-in ``import rapsqlite as aiosqlite``
             without changing code that expects tuple rows. Default False (rows
             are lists).
-        pool_size: Optional max connections in the shared pool for this path.
-            Set before first use so the pool is created with this size (e.g. for
-            high-concurrency tests). Default None (pool uses internal minimum).
+        pool_size: Optional maximum connections in the shared pool for this path.
+            An explicit value is honored (0 is normalized to 1). If another live
+            Connection already created this shared pool, its existing maximum is
+            used. Default None selects the internal shared-pool default (25).
         **kwargs: Additional arguments (currently ignored, reserved for future use)
 
     Returns:

@@ -22,6 +22,26 @@ Example
        await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
        rows = await conn.fetch_all("SELECT * FROM test")
 
+
+
+Named and isolated in-memory databases
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``connect_memory()`` when you need an in-memory database whose identity is
+clear and controlled by the caller. With no name, each call creates a distinct
+database. The same non-empty name shares one database among live connections:
+
+.. code-block:: python
+
+   from rapsqlite import connect_memory
+
+   async with connect_memory(name="cache-a", pool_size=4) as conn:
+       await conn.execute("CREATE TABLE items (value TEXT)")
+
+The database is process-local and disappears when the last connection using
+that identity is closed or discarded. Existing ``connect(":memory:")``
+behavior is unchanged.
+
 Callback Exception Handling
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -46,7 +66,7 @@ Pool metrics and health
 
 When using a connection (which uses an internal pool), you can observe pool state and run health checks:
 
-- **``pool_metrics()``** (async): Returns a dict with ``size`` (total connections in pool), ``num_idle`` (idle connections), and ``in_use`` (connections currently in use). Use this to monitor pool usage in production (e.g. log periodically or expose via a metrics endpoint). For Prometheus-style gauges, use the helper :func:`rapsqlite.pool_metrics_gauges` (see :doc:`../guides/advanced-usage` Monitoring / Metrics export).
+- **``pool_metrics()``** (async): Returns a dict with ``size`` (total connections in pool), ``num_idle`` (idle connections), ``in_use`` (connections currently in use), and ``max_connections`` (the actual maximum configured on the shared pool). Values reflect the underlying pool, including when another live connection created it first. Use this to monitor pool usage in production (e.g. log periodically or expose via a metrics endpoint). For Prometheus-style gauges, use the helper :func:`rapsqlite.pool_metrics_gauges` (see :doc:`../guides/advanced-usage` Monitoring / Metrics export).
 
 - **``pool_health()``** (async): Runs a minimal health check (``SELECT 1``) and returns ``True`` on success; raises on failure. Use for liveness/readiness probes.
 

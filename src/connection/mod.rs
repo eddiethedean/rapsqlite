@@ -27,9 +27,10 @@ use crate::conversion::row_to_py_with_factory;
 use crate::errors::map_sqlx_error;
 use crate::parameters::process_parameters;
 use crate::pool::{
-    acquire_with_pragmas, ensure_callback_connection, ensure_session_connection,
-    execute_init_hook_if_needed, get_or_create_pool, has_callbacks, release_session_connection,
-    PoolConnectionSlot, PoolSlot,
+    acquire_with_pragmas, apply_pragmas_to_connection, close_registered_pool,
+    ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
+    lock_session_connection, release_session_connection, PoolConnectionSlot, PoolRegistryLease,
+    PoolSlot, SessionConnectionSlot,
 };
 use crate::query::{
     bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
@@ -53,6 +54,7 @@ use crate::{InterfaceError, InternalError, OperationalError};
 #[pyclass]
 pub(crate) struct Connection {
     path: String,
+    pool_registry_lease: Arc<StdMutex<Option<PoolRegistryLease>>>,
     pool: Arc<Mutex<PoolSlot>>,
     transaction_state: Arc<Mutex<TransactionState>>,
     // Store the connection used for active transaction
@@ -105,7 +107,7 @@ pub(crate) struct Connection {
     closed: Arc<StdMutex<bool>>,
     /// Reused connection for non-transaction, non-callback operations (session-scoped).
     /// Released on close() and when starting a transaction to match aiosqlite and improve concurrent reads.
-    session_connection: Arc<Mutex<PoolConnectionSlot>>,
+    session_connection: SessionConnectionSlot,
 }
 
 // Note: We do not implement Drop for Connection because:
@@ -129,7 +131,7 @@ pub(crate) struct Connection {
 pub(crate) struct ConnectionExecutionState {
     pub(crate) path: String,
     pub(crate) pool: Arc<Mutex<PoolSlot>>,
-    pub(crate) session_connection: Arc<Mutex<PoolConnectionSlot>>,
+    pub(crate) session_connection: SessionConnectionSlot,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
@@ -280,17 +282,32 @@ impl Connection {
             return Err(ValueError::new_err("iter_chunk_size must be >= 1"));
         }
         let iter_chunk_size = iter_chunk_size as usize;
-        // Parse connection string if it's a URI
-        let (db_path, uri_params) = parse_connection_string(&path)?;
-        validate_path(&db_path)?;
+        // Split SQLite URI connection options from the database path. Options such
+        // as mode/cache belong in the SQLite URL, not in PRAGMA statements.
+        let (parsed_path, uri_params) = parse_connection_string(&path)?;
+        validate_path(&parsed_path)?;
 
-        // Merge URI params with pragmas dict
         let mut all_pragmas = Vec::new();
-
-        // Add URI parameters
+        let mut sqlite_uri_options = Vec::new();
         for (key, value) in uri_params {
-            all_pragmas.push((key, value));
+            match key.to_ascii_lowercase().as_str() {
+                "mode" | "cache" | "immutable" | "vfs" | "nolock" | "psow" => {
+                    sqlite_uri_options.push((key, value));
+                }
+                _ => all_pragmas.push((key, value)),
+            }
         }
+        let db_path = if sqlite_uri_options.is_empty() {
+            parsed_path
+        } else {
+            let options = sqlite_uri_options
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join("&");
+            format!("file:{parsed_path}?{options}")
+        };
+        let (pool_registry_lease, session_connection) = PoolRegistryLease::new(db_path.clone());
 
         // Add pragmas from dict if provided
         if let Some(pragmas_dict) = pragmas {
@@ -310,6 +327,7 @@ impl Connection {
 
         Ok(Connection {
             path: db_path,
+            pool_registry_lease: Arc::new(StdMutex::new(Some(pool_registry_lease))),
             pool: Arc::new(Mutex::new(PoolSlot::default())),
             transaction_state: Arc::new(Mutex::new(TransactionState::None)),
             transaction_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
@@ -344,7 +362,7 @@ impl Connection {
             iter_chunk_size: Arc::new(StdMutex::new(iter_chunk_size)), // Phase 3.10: aiosqlite compat
             explicit_transaction: Arc::new(Mutex::new(false)),
             closed: Arc::new(StdMutex::new(false)),
-            session_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
+            session_connection,
         })
     }
 
@@ -400,7 +418,7 @@ impl Connection {
     fn total_changes(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
-        let session_connection = Arc::clone(&self.session_connection);
+        let session_connection = self.session_connection.clone();
         let callback_connection = Arc::clone(&self.callback_connection);
         let pragmas = Arc::clone(&self.pragmas);
         let pool_size = Arc::clone(&self.pool_size);
@@ -473,7 +491,7 @@ impl Connection {
                         handle.as_raw_handle().as_ptr()
                     } else {
                         // No callbacks - use session connection (compute total while handle is valid)
-                        ensure_session_connection(
+                        let mut conn_guard = lock_session_connection(
                             &path,
                             &pool,
                             &session_connection,
@@ -483,7 +501,6 @@ impl Connection {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let mut conn_guard = session_connection.lock().await;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
@@ -592,10 +609,13 @@ impl Connection {
             }
             Some(n as usize)
         };
+        if let Some(lease) = self.pool_registry_lease.lock().unwrap().as_ref() {
+            lease.configure_pool_size(*guard);
+        }
         Ok(())
     }
 
-    /// Return pool metrics (size, num_idle, in_use). Pool must exist (use connection first).
+    /// Return pool metrics (size, num_idle, in_use, max_connections).
     fn pool_metrics(&self) -> PyResult<Py<PyAny>> {
         let path = self.path.clone();
         let pool = Arc::clone(&self.pool);
@@ -624,12 +644,14 @@ impl Connection {
                 let size = p.size();
                 let num_idle = p.num_idle();
                 let in_use = size as usize - num_idle;
+                let max_connections = p.options().get_max_connections();
                 #[allow(deprecated)]
                 Python::with_gil(|py| -> PyResult<Py<PyAny>> {
                     let dict = PyDict::new(py);
                     dict.set_item("size", size)?;
                     dict.set_item("num_idle", num_idle)?;
                     dict.set_item("in_use", in_use)?;
+                    dict.set_item("max_connections", max_connections)?;
                     Ok(dict.into_any().unbind())
                 })
             };
@@ -913,7 +935,7 @@ impl Connection {
     /// Close the connection.
     fn close(&self) -> PyResult<Py<PyAny>> {
         let pool = Arc::clone(&self.pool);
-        let session_connection = Arc::clone(&self.session_connection);
+        let session_connection = self.session_connection.clone();
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
@@ -925,10 +947,24 @@ impl Connection {
         let authorizer_callback = Arc::clone(&self.authorizer_callback);
         let progress_handler = Arc::clone(&self.progress_handler);
         let closed = Arc::clone(&self.closed);
+        let pool_registry_lease = Arc::clone(&self.pool_registry_lease);
+        let lease_guard = pool_registry_lease.lock().unwrap();
+        let is_last_pool_user = lease_guard
+            .as_ref()
+            .map(PoolRegistryLease::is_last_user)
+            .unwrap_or(true);
+        let pool_registry_identity = lease_guard
+            .as_ref()
+            .and_then(PoolRegistryLease::identity)
+            .map(str::to_owned);
+        drop(lease_guard);
         Python::attach(|py| {
             let future = async move {
+                *closed.lock().unwrap() = true;
                 // Release session connection back to pool
-                release_session_connection(&session_connection).await;
+                if is_last_pool_user {
+                    release_session_connection(&session_connection).await;
+                }
                 // Clear all callbacks before closing
                 {
                     let mut funcs_guard = user_functions.lock().unwrap();
@@ -971,8 +1007,14 @@ impl Connection {
                 // Release our reference to the pool (do not close: pool is shared via global registry).
                 let mut pool_guard = pool.lock().await;
                 let _ = pool_guard.0.take();
+                drop(pool_guard);
+                if is_last_pool_user {
+                    if let Some(identity) = pool_registry_identity.as_deref() {
+                        close_registered_pool(identity).await;
+                    }
+                }
+                pool_registry_lease.lock().unwrap().take();
 
-                *closed.lock().unwrap() = true;
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -988,7 +1030,7 @@ impl Connection {
     fn begin(self_: PyRef<Self>) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
-        let session_connection = Arc::clone(&self_.session_connection);
+        let session_connection = self_.session_connection.clone();
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
@@ -1467,7 +1509,7 @@ impl Connection {
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
-        let session_connection = Arc::clone(&self_.session_connection);
+        let session_connection = self_.session_connection.clone();
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
@@ -1609,7 +1651,7 @@ impl Connection {
             let state = ConnectionExecutionState {
                 path,
                 pool: Arc::clone(&pool),
-                session_connection: Arc::clone(&session_connection),
+                session_connection: session_connection.clone(),
                 pragmas: Arc::clone(&pragmas),
                 pool_size: Arc::clone(&pool_size),
                 connection_timeout_secs: Arc::clone(&connection_timeout_secs),
@@ -1885,7 +1927,7 @@ impl Connection {
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
-        let session_connection = Arc::clone(&self_.session_connection);
+        let session_connection = self_.session_connection.clone();
         let pragmas = Arc::clone(&self_.pragmas);
         let pool_size = Arc::clone(&self_.pool_size);
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
@@ -1998,7 +2040,7 @@ impl Connection {
                     bind_and_fetch_all_on_connection(&processed_query, &param_values, conn, &path)
                         .await?
                 } else {
-                    ensure_session_connection(
+                    let mut conn_guard = lock_session_connection(
                         &path,
                         &pool,
                         &session_connection,
@@ -2008,7 +2050,6 @@ impl Connection {
                         &idle_timeout_secs,
                     )
                     .await?;
-                    let mut conn_guard = session_connection.lock().await;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Session connection not available")
                     })?;
@@ -2720,7 +2761,7 @@ impl Connection {
     fn transaction(slf: PyRef<Self>) -> PyResult<TransactionContextManager> {
         let path = slf.path.clone();
         let pool = Arc::clone(&slf.pool);
-        let session_connection = Arc::clone(&slf.session_connection);
+        let session_connection = slf.session_connection.clone();
         let pragmas = Arc::clone(&slf.pragmas);
         let pool_size = Arc::clone(&slf.pool_size);
         let connection_timeout_secs = Arc::clone(&slf.connection_timeout_secs);
@@ -2784,7 +2825,7 @@ impl Connection {
         let connection_timeout_secs = Arc::clone(&self_.connection_timeout_secs);
         let idle_timeout_secs = Arc::clone(&self_.idle_timeout_secs);
         let transaction_connection = Arc::clone(&self_.transaction_connection);
-        let session_connection = Arc::clone(&self_.session_connection);
+        let session_connection = self_.session_connection.clone();
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
@@ -2851,6 +2892,8 @@ impl Connection {
                 {
                     let mut conn_guard = session_connection.lock().await;
                     if let Some(ref mut conn) = conn_guard.0 {
+                        let pragmas_list = pragmas.lock().unwrap().clone();
+                        apply_pragmas_to_connection(conn, &pragmas_list, &path).await?;
                         sqlx::query(&pragma_query)
                             .execute(&mut **conn)
                             .await
