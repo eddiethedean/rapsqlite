@@ -49,13 +49,12 @@ Example:
                 await conn.rollback()
 """
 
+import builtins as _builtins
 import inspect
 import os
 import uuid
-from urllib.parse import quote
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
-
-import builtins as _builtins
+from urllib.parse import quote
 
 from rapsqlite._compat import apply_compat
 from rapsqlite._connection_state import apply_state
@@ -74,7 +73,6 @@ from rapsqlite._transaction_helpers import (
     transaction_retry,
     transaction_with_timeout,
 )
-
 
 try:
     # Preferred: import extension from the local module name used when installed.
@@ -144,7 +142,7 @@ except AttributeError:  # pragma: no cover - compatibility with older wheels
 # Export RapRow as Row for aiosqlite compatibility, but fall back to Row if
 # running against an older build that does not expose RapRow explicitly.
 try:
-    Row = getattr(_ext, "RapRow", None) or getattr(_ext, "Row")
+    Row = getattr(_ext, "RapRow", None) or _ext.Row
 except AttributeError:
     # If neither RapRow nor Row exists, create a placeholder or raise a helpful error
     raise ImportError(
@@ -177,32 +175,32 @@ __all__: list[str] = [
     "ConnectionT",
     "Cursor",
     "CursorT",
-    "Row",
-    "connect",
-    "connect_memory",
+    "DataError",
+    "DatabaseError",
+    "Error",
+    "IntegrityError",
+    "InterfaceError",
+    "InternalError",
+    "NotSupportedError",
+    "OperationalError",
     "PoolMetrics",
     "PoolMetricsGauges",
-    "pool_metrics_gauges",
-    "execute_iter",
-    "paginate",
+    "ProgrammingError",
+    "Row",
+    "ValueError",
+    "Warning",
     "analyze_query_plan",
-    "suggest_indexes",
+    "connect",
+    "connect_memory",
+    "execute_iter",
     "in_clause_query",
+    "paginate",
+    "pool_metrics_gauges",
     "rows_to_dicts",
+    "suggest_indexes",
     "timed_fetch_all",
     "transaction_retry",
     "transaction_with_timeout",
-    "Error",
-    "Warning",
-    "InterfaceError",
-    "DatabaseError",
-    "DataError",
-    "OperationalError",
-    "IntegrityError",
-    "InternalError",
-    "ProgrammingError",
-    "NotSupportedError",
-    "ValueError",
 ]
 
 

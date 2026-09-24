@@ -1,17 +1,17 @@
 """Tests for Phase 3.9 API additions: execute_fetchall, execute_insert, Cursor props, close."""
 
 import pytest
-
 from conftest import skip_if_no_phase3
+
 from rapsqlite import (
+    analyze_query_plan,
     connect,
     execute_iter,
-    paginate,
-    analyze_query_plan,
-    suggest_indexes,
     in_clause_query,
-    rows_to_dicts,
+    paginate,
     pool_metrics_gauges,
+    rows_to_dicts,
+    suggest_indexes,
     timed_fetch_all,
     transaction_retry,
     transaction_with_timeout,
@@ -475,9 +475,8 @@ async def test_savepoint_no_name(test_db):
     """savepoint() with no name uses generated name."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
-        async with db.transaction():
-            async with db.savepoint():
-                await db.execute("INSERT INTO t (id) VALUES (1)")
+        async with db.transaction(), db.savepoint():
+            await db.execute("INSERT INTO t (id) VALUES (1)")
         rows = await db.fetch_all("SELECT * FROM t")
     assert rows == [[1]]
 

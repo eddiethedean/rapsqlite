@@ -246,13 +246,10 @@ impl PoolRegistryLease {
         let Some(entry) = registry.get_mut(identity) else {
             return;
         };
-        if entry.pool.0.is_none() {
-            if entry.configured_max_connections.is_none() {
-                if let Some(size) = requested {
-                    entry.configured_max_connections =
-                        Some(size.max(1).min(u32::MAX as usize) as u32);
-                    ensure_session_slots(entry, entry.configured_max_connections.unwrap());
-                }
+        if entry.pool.0.is_none() && entry.configured_max_connections.is_none() {
+            if let Some(size) = requested {
+                entry.configured_max_connections = Some(size.max(1).min(u32::MAX as usize) as u32);
+                ensure_session_slots(entry, entry.configured_max_connections.unwrap());
             }
         }
         if entry.session_slots.is_empty() {
@@ -277,7 +274,7 @@ impl PoolRegistryLease {
             .lock()
             .unwrap()
             .get(identity)
-            .map_or(true, |entry| entry.users <= 1)
+            .is_none_or(|entry| entry.users <= 1)
     }
 
     pub(crate) fn release(&mut self) {
