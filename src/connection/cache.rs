@@ -104,6 +104,7 @@ pub(super) enum CacheOperation {
 
 enum CacheResult {
     None,
+    InitializedInTransaction(bool),
     Value(Option<Vec<u8>>),
     Deleted(bool),
     DeletedCount(u64),
@@ -277,6 +278,9 @@ impl CacheResult {
     fn into_py(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(match self {
             Self::None => py.None(),
+            Self::InitializedInTransaction(value) => {
+                PyBool::new(py, value).to_owned().into_any().unbind()
+            }
             Self::Value(Some(value)) => PyBytes::new(py, &value).into_any().unbind(),
             Self::Value(None) => py.None(),
             Self::Deleted(value) => PyBool::new(py, value).to_owned().into_any().unbind(),
@@ -339,6 +343,7 @@ async fn execute_cache_operation(
             connection,
             &context.path,
             context.include_query_in_errors,
+            in_transaction,
             &operation,
         )
         .await
@@ -352,6 +357,7 @@ async fn execute_cache_operation(
             connection,
             &context.path,
             context.include_query_in_errors,
+            in_transaction,
             &operation,
         )
         .await;
@@ -377,6 +383,7 @@ async fn execute_cache_operation(
             connection,
             &context.path,
             context.include_query_in_errors,
+            in_transaction,
             &operation,
         )
         .await
@@ -387,6 +394,7 @@ async fn execute_on_connection(
     connection: &mut PoolConnection<Sqlite>,
     path: &str,
     include_query_in_errors: bool,
+    in_transaction: bool,
     operation: &CacheOperation,
 ) -> PyResult<CacheResult> {
     match operation {
@@ -416,7 +424,7 @@ async fn execute_on_connection(
                         include_query_in_errors,
                     )
                 })?;
-            Ok(CacheResult::None)
+            Ok(CacheResult::InitializedInTransaction(in_transaction))
         }
         CacheOperation::Get { query, key } => {
             let now = unix_time_seconds()?;

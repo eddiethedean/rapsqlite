@@ -21,6 +21,20 @@ async def test_cache_basic_get_set_delete_and_lazy_initialization() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cache_initialization_is_retried_after_transaction_rollback() -> None:
+    async with connect_memory(session_affinity=True) as conn:
+        cache = SQLiteCache(conn)
+        await conn.begin()
+
+        await cache.initialize()
+        await cache.set("rolled-back", b"value")
+
+        await conn.rollback()
+
+        assert await cache.get("rolled-back") is None
+
+
+@pytest.mark.asyncio
 async def test_cache_ttl_upsert_and_bounded_expiration_cleanup() -> None:
     async with connect_memory(session_affinity=True) as conn:
         cache = SQLiteCache(conn)

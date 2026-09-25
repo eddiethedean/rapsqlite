@@ -29,6 +29,12 @@ creation is lazy, or can be requested eagerly with ``initialize()``:
 
        deleted = await cache.delete("user:42")
 
+For the lowest request-path overhead, initialize the cache before starting a
+transaction. If first initialization occurs inside a transaction, it is treated
+as provisional and retried on later operations until initialization succeeds
+outside a transaction, so a rollback cannot leave the cache pointing at a
+missing table.
+
 TTL and expiration cleanup
 --------------------------
 

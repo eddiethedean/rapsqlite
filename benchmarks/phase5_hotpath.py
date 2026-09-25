@@ -41,13 +41,24 @@ except ImportError:  # pragma: no cover - depends on the environment
     redis = None
 
 
-READ_SQL = "SELECT value FROM cache WHERE key = ? AND expires_at > ?"
+READ_SQL = (
+    "SELECT value FROM cache WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)"
+)
 WRITE_SQL = (
     "INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) "
     "ON CONFLICT(key) DO UPDATE SET "
     "value = excluded.value, expires_at = excluded.expires_at"
 )
-SCHEMA_SQL = "CREATE TABLE cache (key TEXT PRIMARY KEY, value BLOB NOT NULL, expires_at REAL NOT NULL)"
+SCHEMA_SQL = (
+    "CREATE TABLE cache ("
+    "key TEXT PRIMARY KEY NOT NULL, "
+    "value BLOB NOT NULL, "
+    "expires_at REAL"
+    ") WITHOUT ROWID"
+)
+EXPIRATION_INDEX_SQL = (
+    "CREATE INDEX cache_expires_idx ON cache (expires_at) WHERE expires_at IS NOT NULL"
+)
 CACHE_KEY = "hot-key"
 CACHE_VALUE = b"x" * 1024
 
@@ -158,6 +169,7 @@ async def setup_sqlite(session_affinity: bool) -> Any:
     )
     await conn.__aenter__()
     await conn.execute(SCHEMA_SQL)
+    await conn.execute(EXPIRATION_INDEX_SQL)
     await conn.execute(
         "INSERT INTO cache VALUES (?, ?, ?)",
         ["hot-key", b"x" * 1024, time.time() + 3600],
@@ -220,7 +232,7 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for affinity in (False, True):
         conn = await setup_sqlite(affinity)
-        cache = rapsqlite.SQLiteCache(conn)
+        cache = rapsqlite.SQLiteCache(conn, table_name="cache")
         await cache.set(CACHE_KEY, CACHE_VALUE, ttl=3600)
         prepared = conn.prepare(READ_SQL)
         raw_prepared = conn.prepare(READ_SQL, raw=True, blob=True)

@@ -10,7 +10,7 @@ from typing import Protocol
 
 
 class _CacheConnection(Protocol):
-    def _cache_initialize(self, table_name: str) -> Awaitable[None]: ...
+    def _cache_initialize(self, table_name: str) -> Awaitable[bool]: ...
 
     def _cache_get(self, table_name: str, key: str) -> Awaitable[bytes | None]: ...
 
@@ -39,6 +39,9 @@ class SQLiteCache:
     ``None``; expired rows remain until :meth:`cleanup_expired` is called.
     Cache operations are executed by native rapsqlite methods and serialized
     with other cache objects using the same connection.
+    If the schema is first created inside a transaction, initialization is
+    rechecked on later operations until one succeeds outside a transaction,
+    since the creating transaction could be rolled back.
     """
 
     __slots__ = ("_connection", "_table_name", "_initialize_lock", "_initialized")
@@ -63,10 +66,10 @@ class SQLiteCache:
         async with self._initialize_lock:
             if self._initialized:
                 return
-            await self._connection._cache_initialize(  # pyright: ignore[reportPrivateUsage]
+            initialized_in_transaction = await self._connection._cache_initialize(  # pyright: ignore[reportPrivateUsage]
                 self._table_name
             )
-            self._initialized = True
+            self._initialized = not initialized_in_transaction
 
     async def get(self, key: str) -> bytes | None:
         """Return a BLOB for a live key, or ``None`` for a miss/expired key."""
