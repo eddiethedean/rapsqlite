@@ -181,10 +181,11 @@ For most applications, this is all you need! All core aiosqlite APIs are support
 
 See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md) for full details.
 
-- ✅ **Phase 1** – Connection lifecycle, transactions, type system, error handling, cursor API
-- ✅ **Phase 2** – Parameterized queries, pool/row factory, transaction context managers, backup/dump, schema introspection, init hooks, prepared statement caching
-- ✅ **Phase 3** – Type adapters/converters, custom aggregates/collations, True Async DBAPI, aiosqlite-style API parity
-- 🔜 **Next** – Dynamic pool sizing, deadlock handling, 100% aiosqlite test suite coverage
+- ✅ **0.1–0.3** – Async core, aiosqlite compatibility, callbacks, pooling, True Async DBAPI, SQLAlchemy/Alembic integration, and advanced SQLite features
+- 🔄 **0.4** – Post-`v0.3.3` compatibility, security, CI, SQLAlchemy 2.1 support, and release stabilization
+- 📋 **0.5** – Low-latency execution and session affinity
+- 📋 **0.6** – Cache-specific APIs, bulk operations, and concurrent workloads
+- 📋 **0.7–0.9** – Pooling, observability, reliability, ecosystem tooling, and stabilization toward 1.0
 
 ## Related Projects
 
@@ -211,4 +212,3 @@ Contributions are welcome! Please see our [contributing guidelines](https://gith
 ## License
 
 MIT
-

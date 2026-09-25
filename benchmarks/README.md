@@ -12,6 +12,27 @@ pip install -r requirements-test.txt
 python -m pytest benchmarks/benchmark_suite.py -v -s
 ```
 
+## Redis comparison
+
+`redis_comparison.py` compares the actual `rapsqlite` and `redis.asyncio`
+client APIs against the same 100,000-key, 1 KiB-value cache dataset. It reports
+expiration-aware sequential reads, existing-key writes, batched writes,
+concurrent reads and writes, pool-size effects, per-operation percentiles, and
+event-loop delay.
+
+For a local Redis instance on port 6380:
+
+```bash
+redis-server --port 6380 --save '' --appendonly no --daemonize yes
+python benchmarks/redis_comparison.py --port 6380 \
+  --json-out benchmarks/redis_comparison_results.json
+```
+
+Setup time is excluded from workload timings. Redis uses its native key TTL;
+SQLite stores an absolute expiration timestamp and checks it in the indexed
+read query. Redis's internal active-expiration work is server-side, so it is
+not represented as a client cleanup call in the matched latency rows.
+
 ## Benchmark Suite
 
 Each benchmark is run **multiple times** (see `BENCHMARK_RUNS` in `benchmark_suite.py`, default 5); reported values are **averages** across runs.
