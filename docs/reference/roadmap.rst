@@ -6,59 +6,27 @@ This roadmap outlines the development plan for ``rapsqlite``.
 Current Status
 --------------
 
-**Current Version (v0.3.1)** — Phase 1 Complete, Phase 2 Complete, Phase 3 Complete:
+**Latest tag:** ``v0.3.3``
+**Current phase:** ``0.4`` — Compatibility, security, and release stabilization
+**Next phases:** ``0.5`` low-latency execution; ``0.6`` cache APIs and batching
 
-**Phase 1 Complete:**
-* ✅ Connection lifecycle management (async context managers)
-* ✅ Transaction support (begin, commit, rollback)
-* ✅ Type system improvements (proper Python types: int, float, str, bytes, None)
-* ✅ Enhanced error handling (custom exception classes matching aiosqlite)
-* ✅ API improvements (fetch_one, fetch_optional, execute_many, last_insert_rowid, changes)
-* ✅ Cursor API (execute, executemany, fetchone, fetchall, fetchmany)
-* ✅ aiosqlite compatibility (connect function, exception types)
-* ✅ Connection pooling (basic implementation with reuse)
-* ✅ Input validation and security improvements
-* ✅ Type stubs for IDE support
+The completed 0.1, 0.2, and 0.3 phases delivered the async core, aiosqlite-compatible API, callbacks, pooling, True Async DBAPI, SQLAlchemy/Alembic integration, query helpers, type adapters/converters, aggregates, collations, and operational metrics.
 
-**Phase 2 Complete:**
-* ✅ Parameterized queries (named and positional parameters, execute_many with binding)
-* ✅ Cursor improvements (fetchmany size-based slicing, result caching, state management)
-* ✅ Connection configuration (PRAGMA settings, connection string parsing, constructor parameters)
-* ✅ Pool configuration (pool_size and connection_timeout getters/setters)
-* ✅ Row factory compatibility (dict/tuple/callable support)
-* ✅ Transaction context managers
-* ✅ Advanced SQLite callbacks (enable_load_extension, set_progress_handler, create_function, set_trace_callback, set_authorizer)
-* ✅ Database dump (iterdump)
-* ✅ Database backup (backup)
-* ✅ Schema operations and introspection (9 methods)
-* ✅ Database initialization hooks (init_hook parameter)
-* ✅ Prepared statements & performance optimization
-* ✅ Drop-in replacement validation (aiosqlite compatibility features)
-* ✅ Documentation & benchmarking
-
-**Phase 3 Complete (v0.3.1):**
-* ✅ API completeness (execute_fetchall, execute_insert, Cursor properties, savepoints, Connection.stop(), Cursor.execute/executemany/executescript return self)
-* ✅ init_hook fixes (run after transaction active; use transaction connection during init_hook)
-* ✅ True Async DBAPI (rapsqlite.dbapi), SQLAlchemy dialect (sqlite+rapsqlite)
-* ✅ Test isolation (xdist_group, loadgroup, optional test deps)
-* ✅ Query helpers (paginate, analyze_query_plan, transaction_with_timeout, set_slow_query_threshold)
-* ✅ Framework integration (FastAPI, Starlette, aiohttp examples and docs)
-* ✅ FTS5 and JSON1 tests and docs
-* ✅ Type adapters and converters (register_adapter, register_converter; per-connection, sqlite3-style)
-* ✅ Custom aggregates and collations (create_aggregate, create_collation)
+Phase 0.4 consolidates all work completed after ``v0.3.3``: parameter parsing and redaction fixes, shared-pool lifecycle fixes, cursor/row/SQLAlchemy compatibility, callback interrupt cleanup, CI/PyO3 hardening, Ruff tooling updates, SQLAlchemy 2.1 support, and the matched Redis comparison baseline.
 
 Goal
 ----
 
 Achieve drop-in replacement compatibility with ``aiosqlite`` to enable seamless migration with true async performance.
 
-Future Enhancements
--------------------
+Release Phases
+--------------
 
-Future enhancements may include:
-
-* Dynamic pool sizing
-* Deadlock detection and automatic retry
-* Pass 100% of aiosqlite test suite
+* **0.4** — Compatibility, security, and release stabilization; release all post-``v0.3.3`` work.
+* **0.5** — Low-latency execution, session affinity, prepared queries, scalar/BLOB paths, and hot-path reductions. Issues #35–#39, #41, #45, and #46.
+* **0.6** — Cache-specific APIs, bulk operations, and multiplexed concurrent reads. Issues #42–#44.
+* **0.7** — Pooling, observability, reliability, stress testing, and platform validation.
+* **0.8** — Type utilities, framework integrations, database tooling, and advanced SQLite helpers.
+* **0.9** — Final stabilization toward a future ``1.0.0`` release.
 
 For the complete roadmap, see the `ROADMAP.md <https://github.com/eddiethedean/rapsqlite/blob/main/docs/ROADMAP.md>`_ file in the repository (canonical source).

@@ -9,10 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **v0.1.x**: Phase 1 — Core functionality (MVP and core features)
 - **v0.2.x**: Phase 2 — Feature-complete drop-in replacement
-- **v0.3.x**: Phase 3 — Advanced features & aiosqlite parity - **Current: v0.3.2**
-- **v1.0.0**: Phase 4 — Production ready (stable API release)
+- **v0.3.x**: Phase 3 — Advanced features & aiosqlite parity (latest: v0.3.3)
+- **v0.4.x**: Compatibility, security, and release stabilization - **Current: v0.4.0**
+- **v1.0.0**: Stable production API release after the 0.x phases
 
-## [1.0.0] - TBA (Phase 4: Production Ready)
+## [0.4.0] - 2026-09-24
+
+### Added
+
+- SQLAlchemy 2.1 async bridge compatibility and typed await support.
+- Matched `rapsqlite` versus `redis.asyncio` cache benchmark covering sequential, batched, and concurrent workloads.
+- Release-oriented 0.4–0.9 roadmap with all current open enhancement issues assigned to future phases.
+
+### Fixed
+
+- SQL parameter parsing and error reporting, including complete SQLite `$` parameter support.
+- Shared pool identity and lifecycle behavior.
+- Cursor, row, and SQLAlchemy result compatibility.
+- Query-helper bounds and transaction retry behavior.
+- Restorable `iterdump()` output.
+- Sensitive INSERT-value redaction, including SQL-comment-aware handling.
+- Callback handle cleanup, callback interrupt synchronization, and raw transaction cleanup.
+
+### Changed
+
+- Restored CI with secure PyO3 configuration.
+- Pinned Ruff to a supported version and formatted Markdown examples with the current toolchain.
+- Refreshed transitive dependencies, including `event-listener` 5.4.2 and `spin` 0.9.9; `cargo audit` and `cargo deny` pass.
+- Updated release metadata and documentation for the 0.4.0 release.
+
+## Future 1.0.0 Release Notes (TBA)
 
 ### Overview
 
@@ -32,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Note: v1.0.0 release details will be added after Phase 4 completion._
 
-## [0.3.2] - Unreleased
+## Historical 0.3.2 Development Notes
 
 ### Changed - Structure and CI (2026-02-11)
 
@@ -45,7 +71,7 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 - **mypy** — `rapsqlite/sqlalchemy.py`: `import_dbapi` return type `DBAPIModule` with cast; `get_pool_class` returns cast to `type[pool.Pool]` to satisfy no-any-return.
 - **Lint** — Removed unused `_is_no_tx_error_message` re-export from `_compat/__init__.py`; `dbapi` imports it from `_compat.commit_rollback`. Removed unused `Type` import from `_compat/slow_query.py`.
 
-## [0.3.0] - TBA (Phase 3: Advanced Features & aiosqlite Parity)
+## Historical 0.3.0 Release Planning
 
 ### Overview
 
@@ -60,7 +86,7 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 - Migration guide complete
 - No breaking changes from v0.2.0
 
-## [0.3.0-dev] - Unreleased
+## Historical 0.3.0 Development Notes
 
 ### Added - Alembic support and documentation (2026-02-01)
 
@@ -769,5 +795,6 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 ---
 
 [0.2.0]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.2.0
+[0.4.0]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.4.0
 [0.1.1]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.1.1
 [0.1.0]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.1.0

@@ -17,7 +17,8 @@ async def transaction_retry(
     ``work`` is a callable that returns an awaitable (e.g. an async function); it is
     invoked once per attempt so each retry runs fresh. Retries with exponential backoff.
 
-    Example:
+    Example::
+
         async with connect("app.db") as conn:
             async def do_work():
                 await conn.execute("INSERT INTO t (x) VALUES (?)", ["a"])

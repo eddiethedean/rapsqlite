@@ -8,8 +8,8 @@
 project = "rapsqlite"
 copyright = "2026, RAP Project"
 author = "RAP Project"
-release = "0.3.1"
-version = "0.3"
+release = "0.4.0"
+version = "0.4"
 
 # -- General configuration ----------------------------------------------------
 
