@@ -189,7 +189,7 @@ pub(crate) fn sqlite_value_to_py<'py>(
     let type_name = row.columns()[col].type_info().name().to_ascii_uppercase();
 
     // register_converter: if we have a converter for this declared type, call it with bytes
-    if let Some(conv) = converters {
+    if let Some(conv) = converters.filter(|registry| registry.is_enabled()) {
         let callable = {
             let guard = conv.lock().unwrap();
             guard.get(&type_name).map(|c| c.clone_ref(py))

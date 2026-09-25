@@ -2,13 +2,13 @@
 
 This roadmap describes the release-oriented development plan for `rapsqlite`, a true async SQLite library for Python built with Rust, Tokio, and SQLx.
 
-The roadmap uses minor `0.x` releases as delivery phases. The latest release tag is `v0.3.3`; `0.4` is the next release phase.
+The roadmap uses minor `0.x` releases as delivery phases. The latest release tag is `v0.4.0`; the 0.5 implementation is complete and is in release validation.
 
 ## Current Status
 
-**Latest tag:** `v0.3.3` ✅
-**Current development phase:** `0.4` — Compatibility, security, and release stabilization 🔄
-**Next performance phases:** `0.5` and `0.6` 📋
+**Latest tag:** `v0.4.0` ✅
+**Current development phase:** `0.5` — Low-latency execution and session affinity ✅ implementation complete; release validation
+**Next performance phase:** `0.6` — Cache APIs, batching, and concurrent workloads 📋
 
 ## Completed Release Phases
 
@@ -43,7 +43,7 @@ The roadmap uses minor `0.x` releases as delivery phases. The latest release tag
 - Pool metrics, health checks, idle timeouts, and Prometheus gauges
 - Interrupt handling and callback-backed query support
 
-## 0.4 — Compatibility, security, and release stabilization 🔄
+## 0.4 — Compatibility, security, and release stabilization ✅
 
 **Goal:** Consolidate all work completed after `v0.3.3` and produce the next compatible minor release.
 
@@ -64,31 +64,103 @@ The roadmap uses minor `0.x` releases as delivery phases. The latest release tag
 - ✅ SQLAlchemy 2.1 async bridge support and typed await compatibility
 - ✅ Matched `rapsqlite` versus `redis.asyncio` cache benchmark, with release-build results and methodology documented in `benchmarks/`
 
-### 0.4 release work
+### 0.4 release result
 
-- ⏳ Run the complete release test matrix on supported Python and platform combinations
-- ⏳ Review compatibility documentation and release notes against the `v0.3.3..HEAD` change set
-- ⏳ Publish the `v0.4.0` release after the post-tag changes are validated
+- ✅ Complete release test matrix on supported Python and platform combinations
+- ✅ Review compatibility documentation and release notes against the `v0.3.3..HEAD` change set
+- ✅ Publish `v0.4.0` and its platform wheels after release validation
 
-## 0.5 — Low-latency execution and session affinity 📋
+## 0.5 — Low-latency execution and session affinity ✅
 
-**Goal:** Reduce fixed per-operation overhead for repeated local queries and cache lookups while preserving the general DB-API path.
+**Goal:** Reduce fixed per-operation overhead for repeated, single-statement local queries—especially cache lookups—while preserving the general DB-API path.
 
-- [#35](https://github.com/eddiethedean/rapsqlite/issues/35) Opt-in raw SQLite low-latency execution path
-- [#36](https://github.com/eddiethedean/rapsqlite/issues/36) Collapse no-op feature checks on the query hot path
-- [#37](https://github.com/eddiethedean/rapsqlite/issues/37) Reusable prepared query objects
-- [#38](https://github.com/eddiethedean/rapsqlite/issues/38) Retain per-Connection SQLite sessions
-- [#39](https://github.com/eddiethedean/rapsqlite/issues/39) Scalar and BLOB fetch fast paths
-- [#41](https://github.com/eddiethedean/rapsqlite/issues/41) Apply connection PRAGMAs once per physical connection
-- [#45](https://github.com/eddiethedean/rapsqlite/issues/45) Optimize common Python parameter conversion paths
-- [#46](https://github.com/eddiethedean/rapsqlite/issues/46) Make query usage tracking and SQL normalization opt-in
+This phase is about making one operation cheaper. It does not attempt to make SQLite a shared cache service or replace the batching work planned for 0.6.
+
+### Scope and non-goals
+
+In scope:
+
+- Remove unconditional work from the normal query path.
+- Preserve physical-connection and prepared-statement affinity where an application opts into it.
+- Add narrow scalar/BLOB and reusable-query paths for repeated operations.
+- Prototype a raw SQLite path only behind an explicit opt-in until cancellation and event-loop behavior are proven.
+
+Out of scope for 0.5:
+
+- Cache-specific `get`/`set` semantics and TTL APIs (#42).
+- Bulk operations and pipelining-style batching (#43).
+- Multiplexed concurrent reads (#44).
+- A general pool redesign or a claim that rapsqlite is faster than Redis for every workload.
+
+### 0.5 implementation result
+
+The planned implementation work is complete. The release candidate includes:
+
+- ✅ A release-build hot-path benchmark covering generic rows, scalar/BLOB paths, prepared-query dispatch, session affinity, synchronous `sqlite3`, and optional local `redis.asyncio`
+- ✅ One-time PRAGMA application per physical connection, opt-in query-usage tracking, atomic callback/feature presence checks, and fast common parameter conversion
+- ✅ Scalar and BLOB fetch APIs with documented behavior for misses, `NULL`, transactions, callbacks, and unsupported row factories
+- ✅ Opt-in session affinity with pool-capacity, transaction, close/reopen, and shared-memory behavior covered by tests
+- ✅ Connection-bound prepared query objects for repeated normal and raw scalar/BLOB operations
+- ✅ An opt-in raw scalar SQLite path with transaction routing, error mapping, callback restrictions, and `Connection.interrupt()` cancellation support
+- ✅ Performance guidance and API documentation that distinguish measured local results from unmatched published Redis figures
+- ✅ Focused Phase 0.5 tests and full compatibility validation
+
+### Delivery order
+
+The issues are intentionally ordered by risk and dependency. The first workstream should establish the measurement baseline; the remaining workstreams can then be delivered independently where their prerequisites are satisfied.
+
+#### 0.5.1 — Establish the performance baseline ✅
+
+- Add a release-build benchmark harness covering the current generic path, synchronous `sqlite3`, each optimized candidate, and local `redis.asyncio` where available.
+- Separate individual-call latency from aggregate throughput. Run sequential calls and concurrency levels such as 1, 8, and 32.
+- Record p50/p95/p99 latency, throughput, event-loop delay, lock/busy errors, cancellations, and memory use for representative key/value sizes.
+- Keep benchmark inputs and output stable enough to detect regressions in CI or a scheduled performance job.
+
+#### 0.5.2 — Remove unconditional hot-path overhead ✅
+
+Deliver these low-risk changes before introducing new execution APIs:
+
+- [#41](https://github.com/eddiethedean/rapsqlite/issues/41) Apply connection PRAGMAs once per physical SQLite connection.
+- [#46](https://github.com/eddiethedean/rapsqlite/issues/46) Make query usage tracking and SQL normalization opt-in.
+- [#36](https://github.com/eddiethedean/rapsqlite/issues/36) Collapse no-op feature checks on the query hot path.
+- [#45](https://github.com/eddiethedean/rapsqlite/issues/45) Optimize common Python parameter conversion paths.
+
+These changes must leave callback, adapter, converter, transaction, close, and `set_pragma()` behavior unchanged. Diagnostic features remain available when explicitly enabled.
+
+#### 0.5.3 — Avoid general result construction for narrow results ✅
+
+- [#39](https://github.com/eddiethedean/rapsqlite/issues/39) Add scalar and BLOB fetch fast paths.
+
+Define and test the behavior for no rows, SQL `NULL`, non-scalar queries, row factories, transactions, and all supported scalar types. The existing DB-API-compatible row path remains the compatibility default.
+
+#### 0.5.4 — Retain execution affinity when requested ✅
+
+- [#38](https://github.com/eddiethedean/rapsqlite/issues/38) Retain per-Connection SQLite sessions for low-latency workloads.
+
+Make the resource trade-off explicit: a retained session consumes pool capacity. Test sequential reuse, serialized concurrent use of one logical connection, transactions, close/reopen, pool exhaustion, connection replacement, and shared named in-memory databases.
+
+#### 0.5.5 — Reuse statement and dispatch metadata ✅
+
+- [#37](https://github.com/eddiethedean/rapsqlite/issues/37) Add prepared query objects for repeated async operations.
+
+Prepared objects must be connection/session-aware and define behavior for pooled connections, transaction routing, invalidation, and close/reopen. They should reduce repeated SQL and dispatch setup without changing one-shot query behavior.
+
+#### 0.5.6 — Evaluate the narrow raw SQLite path ✅
+
+- [#35](https://github.com/eddiethedean/rapsqlite/issues/35) Add an opt-in raw SQLite low-latency execution path.
+
+Start with one prepared statement and zero/one scalar result. Reuse existing handle locking and transaction routing. Do not make this path the default until correctness, cancellation, `sqlite3_interrupt`, error mapping, connection lifetime, and event-loop delay are demonstrated.
 
 ### 0.5 release criteria
 
-- Preserve callback, transaction, cancellation, and connection-close semantics
-- Report p50/p95/p99 latency, throughput, and event-loop delay
-- Benchmark generic SQLx execution, optimized paths, synchronous `sqlite3`, and local Redis on the same machine
-- Keep all optimizations opt-in when their behavior or resource trade-offs differ from the compatibility path
+- Every completed workstream has focused correctness tests, documentation, and before/after release-build measurements.
+- The default compatibility path preserves callback, adapter, converter, row-factory, transaction, cancellation, connection-close, and error semantics.
+- No optimization causes a statistically meaningful regression in representative one-shot DB-API operations or existing CI tests.
+- Benchmarks report p50/p95/p99 latency, throughput, event-loop delay, lock/busy errors, cancellation behavior, and memory use at concurrency 1, 8, and 32.
+- The benchmark report separates SQLite execution, pool/session acquisition, Python/Rust conversion, and async scheduling overhead where measurable.
+- Opt-in paths document their resource and behavioral trade-offs, including retained pool capacity and raw-handle restrictions.
+- Results are compared on the same machine and payloads for current rapsqlite, optimized rapsqlite, synchronous `sqlite3`, and local Redis; unmatched published figures are not used as speedup claims.
+- 0.6 work remains API-compatible with the 0.5 foundation and is not pulled into this release merely to improve batch throughput.
 
 ## 0.6 — Cache APIs, batching, and concurrent workloads 📋
 
@@ -162,9 +234,9 @@ All currently open GitHub issues are assigned to a future release phase:
 | --- | --- | --- |
 | 0.1.x | Core functionality | ✅ Complete |
 | 0.2.x | Feature-complete drop-in foundation | ✅ Complete |
-| 0.3.x | Advanced features and aiosqlite parity | ✅ Complete; latest tag `v0.3.3` |
-| 0.4.x | Post-0.3.3 compatibility, security, and release stabilization | 🔄 In progress |
-| 0.5.x | Low-latency execution and session affinity | 📋 Planned |
+| 0.3.x | Advanced features and aiosqlite parity | ✅ Complete; latest pre-0.4 tag `v0.3.3` |
+| 0.4.x | Post-0.3.3 compatibility, security, and release stabilization | ✅ Complete; latest tag `v0.4.0` |
+| 0.5.x | Low-latency execution and session affinity | ✅ Implementation complete; release validation |
 | 0.6.x | Cache APIs, batching, and concurrent workloads | 📋 Planned |
 | 0.7.x | Pooling, observability, and reliability | 📋 Planned |
 | 0.8.x | Type, framework, and database tooling | 📋 Planned |

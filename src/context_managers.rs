@@ -23,9 +23,9 @@ use crate::conversion::{
     build_description_empty_result, build_description_tuple, row_to_py_with_factory,
 };
 use crate::pool::{
-    acquire_with_pragmas, ensure_callback_connection, execute_init_hook_if_needed,
-    get_or_create_pool, has_callbacks, lock_session_connection, release_session_connection,
-    PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
+    acquire_with_pragmas, callbacks_enabled, ensure_callback_connection,
+    execute_init_hook_if_needed, get_or_create_pool, lock_session_connection,
+    release_session_connection, PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{SqliteParam, TransactionState};
@@ -86,13 +86,7 @@ impl ExecuteContextManager {
             let transaction_state = Arc::clone(&state.transaction_state);
             let transaction_connection = Arc::clone(&state.transaction_connection);
             let callback_connection = Arc::clone(&state.callback_connection);
-            let callback_connection_required = Arc::clone(&state.callback_connection_required);
-            let user_functions = Arc::clone(&state.user_functions);
-            let user_aggregates = Arc::clone(&state.user_aggregates);
-            let user_collations = Arc::clone(&state.user_collations);
             let trace_callback = Arc::clone(&state.trace_callback);
-            let authorizer_callback = Arc::clone(&state.authorizer_callback);
-            let progress_handler = Arc::clone(&state.progress_handler);
             let init_hook = Arc::clone(&state.init_hook);
             let init_hook_called = Arc::clone(&state.init_hook_called);
             let last_rowid = Arc::clone(&state.last_rowid);
@@ -166,15 +160,7 @@ impl ExecuteContextManager {
                     // callbacks on non-Python threads).
                     maybe_trace_sql(&trace_callback, &query);
 
-                    let has_callbacks_flag = has_callbacks(
-                        &callback_connection_required,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
+                    let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                     let _callback_operation_guard = if has_callbacks_flag {
                         Some(callback_context.callback_operation_lock.lock().await)
                     } else {
@@ -251,6 +237,51 @@ impl ExecuteContextManager {
                             Err(error) => {
                                 clear_active_handle(&callback_connection);
                                 clear_active_handle(&transaction_connection);
+                                return Err(error);
+                            }
+                        };
+                        {
+                            let mut g = transaction_state.lock().await;
+                            *g = TransactionState::Active;
+                        }
+                        {
+                            let mut g = transaction_connection.lock().await;
+                            g.0 = Some(conn);
+                        }
+                        {
+                            let mut ex_guard = explicit_transaction.lock().await;
+                            *ex_guard = true;
+                        }
+                        DmlOutcome::Executed(result)
+                    } else if is_begin_query(&query) {
+                        // Raw "BEGIN" without callbacks must retain the physical connection too.
+                        // Returning it to the pool would allow another logical Connection to reuse
+                        // a handle that is still inside this transaction.
+                        let mut conn_guard = lock_session_connection(
+                            &path,
+                            &pool,
+                            &session_connection,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?;
+                        let mut conn = conn_guard.0.take().ok_or_else(|| {
+                            OperationalError::new_err("Session connection not available")
+                        })?;
+                        let result = bind_and_execute_on_connection(
+                            &query,
+                            &param_values,
+                            &mut conn,
+                            &path,
+                            include_query_in_errors,
+                        )
+                        .await;
+                        let result = match result {
+                            Ok(result) => result,
+                            Err(error) => {
+                                clear_active_handle(&session_connection.raw_slot());
                                 return Err(error);
                             }
                         };
@@ -477,9 +508,9 @@ impl ExecuteContextManager {
                         }
                         clear_active_handle(&callback_connection);
                         clear_active_handle(&transaction_connection);
-                        if has_callbacks_flag {
-                            let mut conn_guard = transaction_connection.lock().await;
-                            if let Some(mut conn) = conn_guard.0.take() {
+                        let mut conn_guard = transaction_connection.lock().await;
+                        if let Some(mut conn) = conn_guard.0.take() {
+                            if has_callbacks_flag {
                                 conn.close_on_drop();
                             }
                         }
@@ -603,15 +634,7 @@ impl ExecuteContextManager {
                         let g = transaction_state.lock().await;
                         *g == TransactionState::Active
                     };
-                    let has_callbacks_flag = has_callbacks(
-                        &callback_connection_required,
-                        &user_functions,
-                        &user_aggregates,
-                        &user_collations,
-                        &trace_callback,
-                        &authorizer_callback,
-                        &progress_handler,
-                    );
+                    let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                     let _callback_operation_guard = if has_callbacks_flag {
                         Some(callback_context.callback_operation_lock.lock().await)
                     } else {
@@ -795,15 +818,7 @@ impl TransactionContextManager {
             let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
             let trace_callback = Arc::clone(&slf.borrow(py).trace_callback);
             let callback_context = slf.borrow(py).callback_context.clone();
-            let has_callbacks_flag = has_callbacks(
-                &callback_context.callback_connection_required,
-                &callback_context.user_functions,
-                &callback_context.user_aggregates,
-                &callback_context.user_collations,
-                &callback_context.trace_callback,
-                &callback_context.authorizer_callback,
-                &callback_context.progress_handler,
-            );
+            let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
             let future = async move {
                 let _callback_operation_guard = if has_callbacks_flag {
                     Some(callback_context.callback_operation_lock.lock().await)
@@ -993,15 +1008,7 @@ impl TransactionContextManager {
             let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
             let trace_callback = Arc::clone(&slf.borrow(py).trace_callback);
             let callback_context = slf.borrow(py).callback_context.clone();
-            let has_callbacks_flag = has_callbacks(
-                &callback_context.callback_connection_required,
-                &callback_context.user_functions,
-                &callback_context.user_aggregates,
-                &callback_context.user_collations,
-                &callback_context.trace_callback,
-                &callback_context.authorizer_callback,
-                &callback_context.progress_handler,
-            );
+            let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
             let future = async move {
                 let _callback_operation_guard =
                     callback_context.callback_operation_lock.lock().await;

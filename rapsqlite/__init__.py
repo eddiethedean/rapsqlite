@@ -59,6 +59,7 @@ from urllib.parse import quote
 from rapsqlite._compat import apply_compat
 from rapsqlite._connection_state import apply_state
 from rapsqlite._metrics import PoolMetrics, PoolMetricsGauges, pool_metrics_gauges
+from rapsqlite._prepared import PreparedQuery
 from rapsqlite._query_helpers import (
     _StreamChunksIterator,
     analyze_query_plan,
@@ -156,6 +157,37 @@ apply_compat(Connection, Cursor, operational_error=OperationalError)
 apply_state(Connection)
 
 
+async def _connection_fetch_blob(
+    self: ConnectionT,
+    query: str,
+    parameters: Any | None = None,
+) -> bytes | None:
+    """Fetch one BLOB value without constructing a general row."""
+
+    value = await self.fetch_scalar(query, parameters)
+    if value is None:
+        return None
+    if not isinstance(value, bytes):
+        raise TypeError("fetch_blob() requires a BLOB or NULL result")
+    return value
+
+
+def _connection_prepare(
+    self: ConnectionT,
+    query: str,
+    *,
+    raw: bool = False,
+    blob: bool = False,
+) -> PreparedQuery:
+    """Create a reusable connection-bound query object."""
+
+    return PreparedQuery(self, query, raw=raw, blob=blob)
+
+
+Connection.fetch_blob = _connection_fetch_blob  # type: ignore[attr-defined]
+Connection.prepare = _connection_prepare  # type: ignore[attr-defined]
+
+
 # Connection.execute_iter (streaming helper) - uses Connection.fetch_all
 def _connection_execute_iter(
     self: ConnectionT,
@@ -185,6 +217,7 @@ __all__: list[str] = [
     "OperationalError",
     "PoolMetrics",
     "PoolMetricsGauges",
+    "PreparedQuery",
     "ProgrammingError",
     "Row",
     "ValueError",
@@ -212,6 +245,7 @@ def connect_memory(
     iter_chunk_size: int = 64,
     idle_timeout: int | None = None,
     pool_size: int | None = None,
+    session_affinity: bool = False,
 ) -> ConnectionT:
     """Create an isolated or explicitly shared in-memory SQLite database.
 
@@ -231,6 +265,7 @@ def connect_memory(
         iter_chunk_size=iter_chunk_size,
         idle_timeout=idle_timeout,
         pool_size=pool_size,
+        session_affinity=session_affinity,
     )
 
 
@@ -244,6 +279,7 @@ def connect(
     loop: Any = None,
     aiosqlite_compat: bool = False,
     pool_size: int | None = None,
+    session_affinity: bool = False,
     **kwargs: Any,
 ) -> ConnectionT:
     """Connect to a SQLite database.
@@ -280,6 +316,10 @@ def connect(
             An explicit value is honored (0 is normalized to 1). If another live
             Connection already created this shared pool, its existing maximum is
             used. Default None selects the internal shared-pool default (25).
+        session_affinity: Retain one physical SQLite session between operations
+            on this Connection. This can reduce repeated pool acquisition for
+            low-latency workloads but consumes one pool slot while the Connection
+            is idle. Default False.
         **kwargs: Additional arguments (currently ignored, reserved for future use)
 
     Returns:
@@ -379,6 +419,7 @@ def connect(
         conn.idle_timeout = idle_timeout
     if pool_size is not None:
         conn.pool_size = pool_size
+    conn.session_affinity = session_affinity
     if aiosqlite_compat:
         conn.row_factory = "tuple"
     return cast(ConnectionT, conn)

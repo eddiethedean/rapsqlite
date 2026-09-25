@@ -33,6 +33,23 @@ SQLite stores an absolute expiration timestamp and checks it in the indexed
 read query. Redis's internal active-expiration work is server-side, so it is
 not represented as a client cleanup call in the matched latency rows.
 
+## Phase 0.5 hot-path benchmark
+
+`phase5_hotpath.py` measures the actual rapsqlite APIs introduced for the
+low-latency cache path: `fetch_one`, `fetch_scalar`, `raw_fetch_scalar`, and
+reusable `PreparedQuery` objects in normal and raw/BLOB modes. It reports
+session-affinity on/off, a synchronous `sqlite3` baseline, and `redis.asyncio`
+when a local Redis server is reachable. Sequential latency and concurrent
+throughput/event-loop delay are separate results.
+
+```bash
+python benchmarks/phase5_hotpath.py --ops 20000 \
+  --json-out benchmarks/phase5_hotpath_results.json
+```
+
+Run all backends on the same machine and compare the same workload shape. A
+raw SQLite baseline is not a substitute for measuring the rapsqlite client API.
+
 ## Benchmark Suite
 
 Each benchmark is run **multiple times** (see `BENCHMARK_RUNS` in `benchmark_suite.py`, default 5); reported values are **averages** across runs.

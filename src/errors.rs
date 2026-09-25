@@ -580,9 +580,10 @@ pub(crate) fn map_sqlite_error_from_msg(
         libsqlite3_sys::SQLITE_BUSY | libsqlite3_sys::SQLITE_LOCKED => {
             OperationalError::new_err(error_msg)
         }
-        libsqlite3_sys::SQLITE_MISUSE | libsqlite3_sys::SQLITE_ERROR => {
-            ProgrammingError::new_err(error_msg)
-        }
+        libsqlite3_sys::SQLITE_MISUSE
+        | libsqlite3_sys::SQLITE_ERROR
+        | libsqlite3_sys::SQLITE_MISMATCH
+        | libsqlite3_sys::SQLITE_RANGE => ProgrammingError::new_err(error_msg),
         _ => DatabaseError::new_err(error_msg),
     }
 }

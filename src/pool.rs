@@ -9,8 +9,11 @@ use pyo3_async_runtimes::tokio::into_future;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -168,17 +171,31 @@ struct RegisteredPool {
 #[derive(Clone)]
 pub(crate) struct SessionConnectionSlot {
     slot: Arc<Mutex<PoolConnectionSlot>>,
+    retain: Arc<AtomicBool>,
 }
 
 impl SessionConnectionSlot {
     fn new() -> Self {
         Self {
             slot: Arc::new(Mutex::new(PoolConnectionSlot::default())),
+            retain: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(crate) async fn lock(&self) -> tokio::sync::OwnedMutexGuard<PoolConnectionSlot> {
         Arc::clone(&self.slot).lock_owned().await
+    }
+
+    pub(crate) fn set_retain(&self, retain: bool) {
+        self.retain.store(retain, Ordering::Release);
+    }
+
+    pub(crate) fn retain(&self) -> bool {
+        self.retain.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn raw_slot(&self) -> Arc<Mutex<PoolConnectionSlot>> {
+        Arc::clone(&self.slot)
     }
 }
 
@@ -187,6 +204,7 @@ impl SessionConnectionSlot {
 /// the pool's bounded capacity.
 pub(crate) struct SessionConnectionGuard {
     guard: tokio::sync::OwnedMutexGuard<PoolConnectionSlot>,
+    retain: bool,
 }
 
 impl Deref for SessionConnectionGuard {
@@ -205,7 +223,9 @@ impl DerefMut for SessionConnectionGuard {
 
 impl Drop for SessionConnectionGuard {
     fn drop(&mut self) {
-        self.guard.0.take();
+        if !self.retain {
+            self.guard.0.take();
+        }
     }
 }
 
@@ -345,6 +365,22 @@ pub(crate) async fn apply_pragmas_to_connection(
     pragmas: &[(String, String)],
     path: &str,
 ) -> Result<(), PyErr> {
+    if pragmas.is_empty() {
+        return Ok(());
+    }
+    let connection_id = {
+        let sqlite_conn: &mut sqlx::SqliteConnection = conn;
+        let mut handle = sqlite_conn
+            .lock_handle()
+            .await
+            .map_err(|e| OperationalError::new_err(format!("Failed to lock SQLite handle: {e}")))?;
+        handle.as_raw_handle().as_ptr() as usize
+    };
+    let fingerprint = pragma_fingerprint(pragmas);
+    if pragmas_are_applied(connection_id, fingerprint) {
+        return Ok(());
+    }
+
     for (name, value) in pragmas {
         let pragma_query = format!("PRAGMA {name} = {value}");
         sqlx::query(&pragma_query)
@@ -354,7 +390,37 @@ pub(crate) async fn apply_pragmas_to_connection(
                 crate::errors::map_sqlx_error_with_visibility(e, path, &pragma_query, false)
             })?;
     }
+    mark_pragmas_applied(connection_id, fingerprint);
     Ok(())
+}
+
+fn pragma_fingerprint(pragmas: &[(String, String)]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    pragmas.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn applied_pragmas() -> &'static StdMutex<HashMap<usize, u64>> {
+    static APPLIED: OnceLock<StdMutex<HashMap<usize, u64>>> = OnceLock::new();
+    APPLIED.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn pragmas_are_applied(connection_id: usize, fingerprint: u64) -> bool {
+    applied_pragmas()
+        .lock()
+        .map(|applied| applied.get(&connection_id).copied() == Some(fingerprint))
+        .unwrap_or(false)
+}
+
+fn mark_pragmas_applied(connection_id: usize, fingerprint: u64) {
+    if let Ok(mut applied) = applied_pragmas().lock() {
+        // Physical handles are normally reused by SQLx. Keep this bounded in case a
+        // workload repeatedly creates and destroys pools with unique addresses.
+        if applied.len() >= 4096 {
+            applied.clear();
+        }
+        applied.insert(connection_id, fingerprint);
+    }
 }
 
 /// Acquire a connection from the pool and apply the Connection's pragmas to it.
@@ -439,24 +505,33 @@ pub(crate) async fn get_or_create_pool(
     if let Some(idle) = idle_secs {
         opts = opts.idle_timeout(Some(Duration::from_secs(idle)));
     }
+    let after_connect_pragmas = pragmas.lock().unwrap().clone();
+    if !after_connect_pragmas.is_empty() {
+        opts = opts.after_connect(move |conn, _| {
+            let pragmas = after_connect_pragmas.clone();
+            Box::pin(async move {
+                // SQLx invokes this hook exactly when a physical SQLite
+                // connection is created. Always apply the snapshot here; a
+                // raw sqlite3 pointer can be reused after a connection is
+                // replaced, so a pointer-only cache cannot safely identify a
+                // newly-created handle.
+                let connection_id = {
+                    let mut handle = conn.lock_handle().await?;
+                    handle.as_raw_handle().as_ptr() as usize
+                };
+                for (name, value) in &pragmas {
+                    let pragma_query = format!("PRAGMA {name} = {value}");
+                    sqlx::query(&pragma_query).execute(&mut *conn).await?;
+                }
+                mark_pragmas_applied(connection_id, pragma_fingerprint(&pragmas));
+                Ok(())
+            })
+        });
+    }
     let url = sqlite_url_for_path(path);
     let new_pool = opts.connect(&url).await.map_err(|e| {
         OperationalError::new_err(format!("Failed to connect to database at {path}: {e}"))
     })?;
-
-    let pragmas_list = {
-        let pragmas_guard = pragmas.lock().unwrap();
-        pragmas_guard.clone()
-    };
-    for (name, value) in pragmas_list {
-        let pragma_query = format!("PRAGMA {name} = {value}");
-        sqlx::query(&pragma_query)
-            .execute(&new_pool)
-            .await
-            .map_err(|e| {
-                crate::errors::map_sqlx_error_with_visibility(e, path, &pragma_query, false)
-            })?;
-    }
 
     let to_use = {
         let mut reg = registry.lock().unwrap();
@@ -589,6 +664,20 @@ pub(crate) async fn execute_init_hook_if_needed(
     Ok(())
 }
 
+/// Fast wrapper for hot paths: most connections have no init hook, so an atomic
+/// presence check avoids taking the per-connection mutex on every operation.
+pub(crate) async fn execute_init_hook_if_needed_fast(
+    init_hook: &Arc<StdMutex<Option<Py<PyAny>>>>,
+    init_hook_called: &Arc<StdMutex<bool>>,
+    init_hook_present: &AtomicBool,
+    connection: Py<crate::Connection>,
+) -> Result<(), PyErr> {
+    if !init_hook_present.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    execute_init_hook_if_needed(init_hook, init_hook_called, connection).await
+}
+
 /// Ensure the Connection has a session connection from the pool (acquire and store if None).
 /// Used to reuse one connection per Connection for many queries when not in a transaction
 /// and not using callbacks, matching aiosqlite behavior and improving concurrent-read performance.
@@ -621,7 +710,10 @@ pub(crate) async fn lock_session_connection(
         let pragmas_list = pragmas.lock().unwrap().clone();
         apply_pragmas_to_connection(conn, &pragmas_list, path).await?;
     }
-    Ok(SessionConnectionGuard { guard })
+    Ok(SessionConnectionGuard {
+        retain: session_connection.retain(),
+        guard,
+    })
 }
 
 /// Release the session connection (return to pool). Call on close() and when starting a transaction.
@@ -651,4 +743,43 @@ pub(crate) fn has_callbacks(
     let has_progress = progress_handler.lock().unwrap().is_some();
 
     load_ext || has_functions || has_aggregates || has_collations || has_authorizer || has_progress
+}
+
+// Callback configuration is almost always empty for cache-style workloads. Keep a
+// compact, lock-free summary for the hot path and update it only when callback
+// configuration changes. The detailed registries remain the source of truth for
+// installation/rebinding and compatibility behavior.
+pub(crate) const CALLBACK_FEATURE_EXTENSION: u8 = 1 << 0;
+pub(crate) const CALLBACK_FEATURE_FUNCTIONS: u8 = 1 << 1;
+pub(crate) const CALLBACK_FEATURE_AGGREGATES: u8 = 1 << 2;
+pub(crate) const CALLBACK_FEATURE_COLLATIONS: u8 = 1 << 3;
+pub(crate) const CALLBACK_FEATURE_AUTHORIZER: u8 = 1 << 4;
+pub(crate) const CALLBACK_FEATURE_PROGRESS: u8 = 1 << 5;
+
+#[inline]
+pub(crate) fn callbacks_enabled(features: &Arc<AtomicU8>) -> bool {
+    features.load(Ordering::Relaxed) != 0
+}
+
+pub(crate) fn refresh_callback_features(ctx: &crate::connection::CallbackContext) {
+    let mut features = 0u8;
+    if *ctx.callback_connection_required.lock().unwrap() {
+        features |= CALLBACK_FEATURE_EXTENSION;
+    }
+    if !ctx.user_functions.lock().unwrap().is_empty() {
+        features |= CALLBACK_FEATURE_FUNCTIONS;
+    }
+    if !ctx.user_aggregates.lock().unwrap().is_empty() {
+        features |= CALLBACK_FEATURE_AGGREGATES;
+    }
+    if !ctx.user_collations.lock().unwrap().is_empty() {
+        features |= CALLBACK_FEATURE_COLLATIONS;
+    }
+    if ctx.authorizer_callback.lock().unwrap().is_some() {
+        features |= CALLBACK_FEATURE_AUTHORIZER;
+    }
+    if ctx.progress_handler.lock().unwrap().is_some() {
+        features |= CALLBACK_FEATURE_PROGRESS;
+    }
+    ctx.callback_features.store(features, Ordering::Release);
 }
