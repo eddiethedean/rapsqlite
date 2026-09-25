@@ -21,9 +21,9 @@ test-rust:
 
 # Run Python tests (creates .venv, installs extension + test deps including alembic/sqlalchemy, runs pytest)
 test-python:
-	@if [ ! -d .venv ]; then python3 -m venv .venv; fi
+	@if [ ! -x .venv/bin/python ]; then python3 -m venv .venv; fi
 	. .venv/bin/activate && pip install -q maturin && pip install -q -r requirements-test.txt && pip install -q alembic sqlalchemy greenlet fastapi httpx aiohttp
-	. .venv/bin/activate && maturin develop
+	. .venv/bin/activate && python -m maturin develop
 	. .venv/bin/activate && pytest tests/ -v
 
 # Run all tests
@@ -64,14 +64,18 @@ outdated:
 
 # Python lint and type checks. Uses the same .venv as test-python.
 lint-python:
-	@if [ ! -d .venv ]; then python3 -m venv .venv; fi
-	. .venv/bin/activate && pip install -q -r requirements-ci.txt -r requirements-test.txt && pip install -q alembic aiohttp fastapi greenlet httpx redis sqlalchemy
+	@if [ ! -x .venv/bin/python ]; then python3 -m venv .venv; fi
+	. .venv/bin/activate && pip install -q -r requirements-ci.txt -r requirements-test.txt && pip install -q alembic aiohttp fastapi greenlet httpx redis sqlalchemy maturin
+	. .venv/bin/activate && python -m maturin develop --release
 	. .venv/bin/activate && ./scripts/check_python_types.sh
 
-# Run only the strict Pyright checks in the active environment.
+# Run the strict Pyright checks in the local development environment.
 typecheck:
-	pyright
-	pyright --verifytypes rapsqlite --ignoreexternal
+	@if [ ! -x .venv/bin/python ]; then python3 -m venv .venv; fi
+	. .venv/bin/activate && pip install -q -r requirements-ci.txt -r requirements-test.txt && pip install -q alembic aiohttp fastapi greenlet httpx redis sqlalchemy maturin
+	. .venv/bin/activate && python -m maturin develop --release
+	. .venv/bin/activate && pyright
+	. .venv/bin/activate && pyright --verifytypes rapsqlite --ignoreexternal
 
 # Clean
 clean:
