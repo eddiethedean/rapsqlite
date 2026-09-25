@@ -1,9 +1,10 @@
 """Measure the Phase 0.5 scalar and raw-cache paths through real client APIs.
 
 This is intentionally a diagnostic benchmark, not a claim that the backends are
-matched across machines.  It reports sequential latency and a small concurrent
-workload separately.  Redis is skipped when the optional client or local server
-is unavailable.
+matched across machines. It reports sequential latency and a small concurrent
+workload separately, with each repeated independently. Redis is skipped when
+the optional client or local server is unavailable; temporary Redis keys are
+unique to each run and deleted afterward.
 
 Example::
 
@@ -16,6 +17,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import sqlite3
 import statistics
 import sys
@@ -30,8 +32,10 @@ except ImportError:  # pragma: no cover - Windows does not provide resource
     resource = None
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+PACKAGE_ROOT = os.environ.get("RAPSQLITE_BENCHMARK_PACKAGE_PATH")
+IMPORT_ROOT = PACKAGE_ROOT or str(REPO_ROOT)
+if IMPORT_ROOT not in sys.path:
+    sys.path.insert(0, IMPORT_ROOT)
 
 import rapsqlite  # noqa: E402
 
@@ -113,51 +117,82 @@ async def measure_sequential(
 
 
 async def measure_concurrent(
-    operation: Callable[[], Awaitable[Any]], ops: int, concurrency: int
+    operation: Callable[[], Awaitable[Any]],
+    ops: int,
+    concurrency: int,
+    runs: int,
 ) -> dict[str, Any]:
+    if ops < 1 or concurrency < 1 or runs < 1:
+        raise ValueError("ops, concurrency, and runs must all be positive")
     per_worker = ops // concurrency
     remainder = ops % concurrency
-    latencies: list[float] = []
-    errors: list[str] = []
 
-    async def worker(count: int) -> None:
-        for _ in range(count):
-            started = time.perf_counter_ns()
-            try:
-                await operation()
-            except Exception as exc:  # measured as part of the result
-                errors.append(type(exc).__name__)
-            latencies.append((time.perf_counter_ns() - started) / 1_000.0)
+    async def measure_once() -> dict[str, Any]:
+        latencies: list[float] = []
+        errors: list[str] = []
 
-    async def ticker(stop: asyncio.Event, delays: list[float]) -> None:
-        loop = asyncio.get_running_loop()
-        next_tick = loop.time() + 0.001
-        while not stop.is_set():
-            await asyncio.sleep(max(0.0, next_tick - loop.time()))
-            delays.append(max(0.0, loop.time() - next_tick) * 1_000_000.0)
-            next_tick += 0.001
+        async def worker(count: int) -> None:
+            for _ in range(count):
+                started = time.perf_counter_ns()
+                try:
+                    await operation()
+                except Exception as exc:  # measured as part of the result
+                    errors.append(type(exc).__name__)
+                latencies.append((time.perf_counter_ns() - started) / 1_000.0)
 
-    delays: list[float] = []
-    stop = asyncio.Event()
-    ticker_task = asyncio.create_task(ticker(stop, delays))
-    started = time.perf_counter()
-    await asyncio.gather(
-        *[
-            worker(per_worker + int(worker_id < remainder))
-            for worker_id in range(concurrency)
-        ]
-    )
-    elapsed = time.perf_counter() - started
-    stop.set()
-    await ticker_task
+        async def ticker(stop: asyncio.Event, delays: list[float]) -> None:
+            loop = asyncio.get_running_loop()
+            next_tick = loop.time() + 0.001
+            while not stop.is_set():
+                await asyncio.sleep(max(0.0, next_tick - loop.time()))
+                delays.append(max(0.0, loop.time() - next_tick) * 1_000_000.0)
+                next_tick += 0.001
+
+        delays: list[float] = []
+        stop = asyncio.Event()
+        ticker_task = asyncio.create_task(ticker(stop, delays))
+        started = time.perf_counter()
+        await asyncio.gather(
+            *[
+                worker(per_worker + int(worker_id < remainder))
+                for worker_id in range(concurrency)
+            ]
+        )
+        elapsed = time.perf_counter() - started
+        stop.set()
+        await ticker_task
+        return {
+            **summarize(latencies, elapsed),
+            "errors": len(errors),
+            "error_types": {name: errors.count(name) for name in sorted(set(errors))},
+            "event_loop_delay_p95_us": percentile(delays, 0.95),
+            "event_loop_delay_max_us": max(delays, default=0.0),
+        }
+
+    run_results = [await measure_once() for _ in range(runs)]
+    elapsed = sum(result["elapsed_seconds"] for result in run_results)
+    error_types: dict[str, int] = {}
+    for result in run_results:
+        for name, count in result["error_types"].items():
+            error_types[name] = error_types.get(name, 0) + count
     return {
-        **summarize(latencies, elapsed),
-        "total_ops": ops,
-        "errors": len(errors),
-        "error_types": {name: errors.count(name) for name in sorted(set(errors))},
+        "p50_us": statistics.median(result["p50_us"] for result in run_results),
+        "p95_us": statistics.median(result["p95_us"] for result in run_results),
+        "p99_us": statistics.median(result["p99_us"] for result in run_results),
+        "ops_per_second": ops * runs / elapsed if elapsed else 0.0,
+        "elapsed_seconds": elapsed,
+        "total_ops": ops * runs,
+        "ops_per_run": ops,
+        "runs": run_results,
+        "errors": sum(result["errors"] for result in run_results),
+        "error_types": error_types,
         "concurrency": concurrency,
-        "event_loop_delay_p95_us": percentile(delays, 0.95),
-        "event_loop_delay_max_us": max(delays, default=0.0),
+        "event_loop_delay_p95_us": statistics.median(
+            result["event_loop_delay_p95_us"] for result in run_results
+        ),
+        "event_loop_delay_max_us": max(
+            result["event_loop_delay_max_us"] for result in run_results
+        ),
     }
 
 
@@ -165,9 +200,10 @@ async def setup_sqlite(session_affinity: bool) -> Any:
     conn = rapsqlite.connect_memory(
         name=f"phase5-{uuid.uuid4().hex}",
         pool_size=1,
-        session_affinity=session_affinity,
     )
     await conn.__aenter__()
+    if hasattr(conn, "session_affinity"):
+        conn.session_affinity = session_affinity
     await conn.execute(SCHEMA_SQL)
     await conn.execute(EXPIRATION_INDEX_SQL)
     await conn.execute(
@@ -177,13 +213,13 @@ async def setup_sqlite(session_affinity: bool) -> Any:
     return conn
 
 
-async def setup_redis(host: str, port: int) -> Any | None:
+async def setup_redis(host: str, port: int, key: str) -> Any | None:
     if redis is None:
         return None
     client: Any = redis.Redis(host=host, port=port, decode_responses=False)
     try:
         await cast(Awaitable[Any], client.ping())
-        await client.set("phase5-hot-key", b"x" * 1024, ex=3600)
+        await client.set(key, b"x" * 1024, ex=3600)
     except Exception:
         await client.aclose()
         return None
@@ -198,7 +234,7 @@ async def close_handle(handle: Any) -> None:
 
 
 def sqlite3_baseline(ops: int, runs: int) -> dict[str, Any]:
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", isolation_level=None)
     conn.execute(SCHEMA_SQL)
     conn.execute(EXPIRATION_INDEX_SQL)
     conn.execute(
@@ -227,29 +263,70 @@ def sqlite3_baseline(ops: int, runs: int) -> dict[str, Any]:
     }
 
 
+def sqlite3_write_baseline(ops: int, runs: int) -> dict[str, Any]:
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.execute(SCHEMA_SQL)
+    conn.execute(EXPIRATION_INDEX_SQL)
+    conn.execute(
+        "INSERT INTO cache VALUES (?, ?, ?)",
+        (CACHE_KEY, CACHE_VALUE, time.time() + 3600),
+    )
+    run_results: list[dict[str, float]] = []
+    for _ in range(runs):
+        samples: list[float] = []
+        started = time.perf_counter()
+        for _ in range(ops):
+            op_started = time.perf_counter_ns()
+            conn.execute(WRITE_SQL, (CACHE_KEY, CACHE_VALUE, time.time() + 3600))
+            samples.append((time.perf_counter_ns() - op_started) / 1_000.0)
+        run_results.append(summarize(samples, time.perf_counter() - started))
+    conn.close()
+    return {
+        "runs": run_results,
+        "median_run_mean_us": statistics.median(r["mean_us"] for r in run_results),
+        "median_run_p50_us": statistics.median(r["p50_us"] for r in run_results),
+        "median_run_p95_us": statistics.median(r["p95_us"] for r in run_results),
+        "median_run_p99_us": statistics.median(r["p99_us"] for r in run_results),
+        "mean_ops_per_second": statistics.mean(
+            r["ops_per_second"] for r in run_results
+        ),
+    }
+
+
 async def main(args: argparse.Namespace) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
-    for affinity in (False, True):
+    for affinity in (False,) if args.legacy else (False, True):
         conn = await setup_sqlite(affinity)
-        cache = rapsqlite.SQLiteCache(conn, table_name="cache")
-        await cache.set(CACHE_KEY, CACHE_VALUE, ttl=3600)
-        prepared = conn.prepare(READ_SQL)
-        raw_prepared = conn.prepare(READ_SQL, raw=True, blob=True)
-        operations = {
-            "fetch_one": lambda: conn.fetch_one(READ_SQL, [CACHE_KEY, time.time()]),
-            "fetch_scalar": lambda: conn.fetch_scalar(
-                READ_SQL, [CACHE_KEY, time.time()]
-            ),
-            "fetch_blob": lambda: conn.fetch_blob(READ_SQL, [CACHE_KEY, time.time()]),
-            "raw_fetch_scalar": lambda: conn.raw_fetch_scalar(
-                READ_SQL, [CACHE_KEY, time.time()], True
-            ),
-            "prepared_scalar": lambda: prepared.fetch_scalar([CACHE_KEY, time.time()]),
-            "prepared_raw_blob": lambda: raw_prepared.fetch_blob(
-                [CACHE_KEY, time.time()]
-            ),
-            "sqlite_cache_get": lambda: cache.get(CACHE_KEY),
-        }
+        cache: Any = None
+        if args.legacy:
+            operations = {
+                "fetch_one": lambda: conn.fetch_one(READ_SQL, [CACHE_KEY, time.time()])
+            }
+        else:
+            cache = rapsqlite.SQLiteCache(conn, table_name="cache")
+            await cache.set(CACHE_KEY, CACHE_VALUE, ttl=3600)
+            prepared = conn.prepare(READ_SQL)
+            raw_prepared = conn.prepare(READ_SQL, raw=True, blob=True)
+            prepared_write = conn.prepare(WRITE_SQL)
+            operations = {
+                "fetch_one": lambda: conn.fetch_one(READ_SQL, [CACHE_KEY, time.time()]),
+                "fetch_scalar": lambda: conn.fetch_scalar(
+                    READ_SQL, [CACHE_KEY, time.time()]
+                ),
+                "fetch_blob": lambda: conn.fetch_blob(
+                    READ_SQL, [CACHE_KEY, time.time()]
+                ),
+                "raw_fetch_scalar": lambda: conn.raw_fetch_scalar(
+                    READ_SQL, [CACHE_KEY, time.time()], True
+                ),
+                "prepared_scalar": lambda: prepared.fetch_scalar(
+                    [CACHE_KEY, time.time()]
+                ),
+                "prepared_raw_blob": lambda: raw_prepared.fetch_blob(
+                    [CACHE_KEY, time.time()]
+                ),
+                "sqlite_cache_get": lambda: cache.get(CACHE_KEY),
+            }
 
         async def generic_set() -> None:
             cursor = await conn.execute(
@@ -257,10 +334,33 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
             )
             await cursor.close()
 
+        batch_parameters = [
+            [CACHE_KEY, CACHE_VALUE, time.time() + 3600] for _ in range(16)
+        ]
+
+        async def execute_many_upsert() -> None:
+            await conn.execute_many(WRITE_SQL, batch_parameters)
+
         write_operations = {
             "execute_upsert": generic_set,
-            "sqlite_cache_set": lambda: cache.set(CACHE_KEY, CACHE_VALUE, ttl=3600),
+            "execute_many_upsert_16": execute_many_upsert,
         }
+        if not args.legacy:
+
+            async def prepared_set() -> None:
+                cursor = await prepared_write.execute(
+                    [CACHE_KEY, CACHE_VALUE, time.time() + 3600]
+                )
+                await cursor.close()
+
+            write_operations.update(
+                {
+                    "prepared_execute_upsert": prepared_set,
+                    "sqlite_cache_set": lambda: cache.set(
+                        CACHE_KEY, CACHE_VALUE, ttl=3600
+                    ),
+                }
+            )
         try:
             for name, operation in operations.items():
                 row = await measure_sequential(operation, args.ops, args.runs)
@@ -274,7 +374,10 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                     }
                 )
                 concurrent = await measure_concurrent(
-                    operation, args.concurrent_ops, args.concurrency
+                    operation,
+                    args.concurrent_ops,
+                    args.concurrency,
+                    args.concurrent_runs,
                 )
                 results.append(
                     {
@@ -285,6 +388,103 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                         **concurrent,
                     }
                 )
+
+            if not args.legacy:
+                conn.query_usage_tracking = True
+                try:
+
+                    async def tracked_operation() -> Any:
+                        return await conn.fetch_scalar(
+                            READ_SQL, [CACHE_KEY, time.time()]
+                        )
+
+                    tracked_sequential = await measure_sequential(
+                        tracked_operation, args.ops, args.runs
+                    )
+                    results.append(
+                        {
+                            "backend": "rapsqlite",
+                            "variant": "fetch_scalar_query_usage_enabled",
+                            "session_affinity": affinity,
+                            "workload": "sequential",
+                            **tracked_sequential,
+                        }
+                    )
+                    tracked_concurrent = await measure_concurrent(
+                        tracked_operation,
+                        args.concurrent_ops,
+                        args.concurrency,
+                        args.concurrent_runs,
+                    )
+                    results.append(
+                        {
+                            "backend": "rapsqlite",
+                            "variant": "fetch_scalar_query_usage_enabled",
+                            "session_affinity": affinity,
+                            "workload": "concurrent",
+                            **tracked_concurrent,
+                        }
+                    )
+
+                    tracked_operations = {
+                        "execute_upsert": write_operations["execute_upsert"],
+                        "execute_many_upsert_16": write_operations[
+                            "execute_many_upsert_16"
+                        ],
+                        "sqlite_cache_get": operations["sqlite_cache_get"],
+                    }
+                    for variant, tracked_operation in tracked_operations.items():
+                        tracked_result = await measure_sequential(
+                            tracked_operation, args.ops, args.runs
+                        )
+                        results.append(
+                            {
+                                "backend": "rapsqlite",
+                                "variant": f"{variant}_query_usage_enabled",
+                                "session_affinity": affinity,
+                                "workload": "sequential",
+                                **tracked_result,
+                            }
+                        )
+                finally:
+                    conn.query_usage_tracking = False
+
+                def trace_noop(_query: str) -> None:
+                    return None
+
+                await conn.set_trace_callback(trace_noop)
+                try:
+                    trace_result = await measure_sequential(
+                        operations["fetch_scalar"], args.ops, args.runs
+                    )
+                    results.append(
+                        {
+                            "backend": "rapsqlite",
+                            "variant": "fetch_scalar_trace_callback",
+                            "session_affinity": affinity,
+                            "workload": "sequential",
+                            **trace_result,
+                        }
+                    )
+                finally:
+                    await conn.set_trace_callback(None)
+
+                await conn.begin()
+                try:
+                    transaction_result = await measure_sequential(
+                        operations["fetch_scalar"], args.ops, args.runs
+                    )
+                    results.append(
+                        {
+                            "backend": "rapsqlite",
+                            "variant": "fetch_scalar_transaction_active",
+                            "session_affinity": affinity,
+                            "workload": "sequential",
+                            **transaction_result,
+                        }
+                    )
+                finally:
+                    await conn.rollback()
             for name, operation in write_operations.items():
                 row = await measure_sequential(operation, args.ops, args.runs)
                 results.append(
@@ -297,7 +497,10 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                     }
                 )
                 concurrent = await measure_concurrent(
-                    operation, args.concurrent_ops, args.concurrency
+                    operation,
+                    args.concurrent_ops,
+                    args.concurrency,
+                    args.concurrent_runs,
                 )
                 results.append(
                     {
@@ -319,14 +522,23 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
             **sqlite3_baseline(args.ops, args.runs),
         }
     )
+    results.append(
+        {
+            "backend": "sqlite3",
+            "variant": "synchronous_upsert_with_ttl",
+            "workload": "sequential_write",
+            **sqlite3_write_baseline(args.ops, args.runs),
+        }
+    )
 
-    redis_client = await setup_redis(args.host, args.port)
+    redis_key = f"phase5-hot-key:{uuid.uuid4().hex}"
+    redis_client = await setup_redis(args.host, args.port, redis_key)
     redis_version = None
     if redis_client is not None:
         try:
             redis_version = (await redis_client.info("server")).get("redis_version")
             redis_result = await measure_sequential(
-                lambda: redis_client.get("phase5-hot-key"), args.ops, args.runs
+                lambda: redis_client.get(redis_key), args.ops, args.runs
             )
             results.append(
                 {
@@ -337,7 +549,7 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
             redis_set_result = await measure_sequential(
-                lambda: redis_client.set("phase5-hot-key", CACHE_VALUE, ex=3600),
+                lambda: redis_client.set(redis_key, CACHE_VALUE, ex=3600),
                 args.ops,
                 args.runs,
             )
@@ -350,9 +562,10 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
             redis_concurrent = await measure_concurrent(
-                lambda: redis_client.get("phase5-hot-key"),
+                lambda: redis_client.get(redis_key),
                 args.concurrent_ops,
                 args.concurrency,
+                args.concurrent_runs,
             )
             results.append(
                 {
@@ -363,9 +576,10 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
             redis_concurrent_set = await measure_concurrent(
-                lambda: redis_client.set("phase5-hot-key", CACHE_VALUE, ex=3600),
+                lambda: redis_client.set(redis_key, CACHE_VALUE, ex=3600),
                 args.concurrent_ops,
                 args.concurrency,
+                args.concurrent_runs,
             )
             results.append(
                 {
@@ -376,7 +590,10 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
         finally:
-            await redis_client.aclose()
+            try:
+                await redis_client.delete(redis_key)
+            finally:
+                await redis_client.aclose()
 
     metadata = {
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -385,9 +602,11 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
         "rapsqlite": rapsqlite.__version__,
         "sqlite3": sqlite3.sqlite_version,
         "redis_version": redis_version,
+        "legacy_mode": args.legacy,
         "ops": args.ops,
         "runs": args.runs,
         "concurrent_ops": args.concurrent_ops,
+        "concurrent_runs": args.concurrent_runs,
         "concurrency": args.concurrency,
         # ru_maxrss is bytes on macOS and KiB on Linux.
         "max_rss_kib": (
@@ -422,7 +641,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ops", type=int, default=10_000)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--concurrent-ops", type=int, default=5_000)
+    parser.add_argument("--concurrent-runs", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=16)
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Measure only pre-Phase-0.5 APIs for a release-build baseline.",
+    )
     parser.add_argument("--json-out", type=Path)
     return parser.parse_args()
 

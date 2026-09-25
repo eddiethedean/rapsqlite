@@ -14,27 +14,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **v0.5.x**: Low-latency execution and session affinity - **Unreleased implementation complete**
 - **v1.0.0**: Stable production API release after the 0.x phases
 
-## [Unreleased] - Phase 0.5 implementation
+## [0.5.0] - 2026-09-25
 
-The 0.5 implementation is complete and is undergoing release validation; no
-0.5.0 tag has been published yet.
+Phase 0.5 release candidate. Same-machine performance measurements and their
+limitations are documented in `benchmarks/phase5_hotpath_results.md`.
 
 ### Added
 
 - Release-build hot-path benchmark for generic rows, scalar/BLOB paths,
-  prepared queries, session affinity, synchronous `sqlite3`, and optional
-  local `redis.asyncio`.
+  prepared queries, session affinity, no-op versus trace/query-tracking and
+  active-transaction paths, synchronous `sqlite3`, and optional local
+  `redis.asyncio`.
 - `Connection.fetch_scalar()` and `Connection.fetch_blob()` for narrow result
   shapes.
 - Opt-in `Connection.raw_fetch_scalar()` for trusted scalar/BLOB lookups,
   including transaction routing, error mapping, and interrupt support.
 - Connection-bound `PreparedQuery` objects through `Connection.prepare()`.
 - Opt-in `session_affinity` and query-usage diagnostics.
+- `query_usage_dropped()` for executions omitted by bounded diagnostic limits.
 
 ### Changed
 
 - Reduced unconditional query-path work through one-time PRAGMA application,
-  atomic feature-presence checks, and fast common parameter conversion.
+  atomic no-op callback/trace/init-hook/adapter/converter and transaction-state
+  checks, one-time immutable pool handles, and fast common parameter conversion.
+- Bounded query-usage retention and raw statement caching; the empty raw-cache
+  cleanup path does not acquire its mutex on ordinary non-affinity operations.
 - Documented the latency/throughput trade-offs between embedded SQLite,
   asynchronous client overhead, and batched Redis workloads.
 

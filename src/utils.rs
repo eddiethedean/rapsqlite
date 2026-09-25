@@ -6,6 +6,25 @@ use std::ffi::{c_char, CStr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
+/// Bound diagnostic retention independently of workload cardinality and query size.
+pub(crate) const MAX_QUERY_USAGE_ENTRIES: usize = 1_024;
+pub(crate) const MAX_QUERY_USAGE_QUERY_BYTES: usize = 2_048;
+
+/// Bounded, opt-in query analytics. `dropped` counts query executions omitted
+/// because the normalized query was too large or the distinct-query cap was hit.
+#[derive(Default)]
+pub(crate) struct QueryUsageStats {
+    pub(crate) counts: HashMap<String, u64>,
+    pub(crate) dropped: u64,
+}
+
+impl QueryUsageStats {
+    pub(crate) fn clear(&mut self) {
+        self.counts.clear();
+        self.dropped = 0;
+    }
+}
+
 /// Detect if a query is a SELECT query (for determining execution strategy).
 pub(crate) fn is_select_query(query: &str) -> bool {
     let trimmed = first_statement_after_comments(query).to_uppercase();
@@ -68,63 +87,80 @@ fn first_statement_after_comments(mut query: &str) -> &str {
     }
 }
 
-/// Normalize a SQL query by removing extra whitespace and standardizing formatting.
-/// This helps improve prepared statement cache hit rates by ensuring queries with
-/// different whitespace are treated as identical.
-///
-/// **Prepared Statement Caching (Phase 2.13):**
-/// sqlx (the underlying database library) automatically caches prepared statements
-/// per connection. When the same query is executed multiple times on the same
-/// connection, sqlx reuses the prepared statement, providing significant performance
-/// benefits. This normalization function ensures that queries with only whitespace
-/// differences are treated as identical, maximizing cache hit rates.
-///
-/// The prepared statement cache is managed entirely by sqlx and does not require
-/// explicit configuration. Each connection in the pool maintains its own cache,
-/// and statements are automatically prepared on first use and reused for subsequent
-/// executions of the same query.
+/// Normalize SQL only for the opt-in usage-analytics key. This does not modify
+/// the query sent to SQLite or SQLx's per-connection prepared-statement cache key.
 pub(crate) fn normalize_query(query: &str) -> String {
-    // Remove leading/trailing whitespace
     let trimmed = query.trim();
-    // Replace multiple whitespace characters with single space
-    let normalized: String = trimmed
-        .chars()
-        .fold((String::new(), false), |(acc, was_space), ch| {
-            let is_space = ch.is_whitespace();
-            if is_space && was_space {
-                // Skip multiple consecutive spaces
-                (acc, true)
-            } else if is_space {
-                // Replace any whitespace with single space
-                (acc + " ", true)
-            } else {
-                (acc + &ch.to_string(), false)
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_space = false;
+    for ch in trimmed.chars() {
+        if ch.is_whitespace() {
+            if !previous_was_space {
+                normalized.push(' ');
             }
-        })
-        .0;
+            previous_was_space = true;
+        } else {
+            normalized.push(ch);
+            previous_was_space = false;
+        }
+    }
     normalized
 }
 
-/// Track query usage in the cache for analytics and optimization.
-/// This helps identify frequently used queries that benefit from prepared statement caching.
-pub(crate) fn track_query_usage(query_cache: &Arc<StdMutex<HashMap<String, u64>>>, query: &str) {
+/// Track query usage for diagnostics without retaining unbounded query text.
+pub(crate) fn track_query_usage(query_usage: &Arc<StdMutex<QueryUsageStats>>, query: &str) {
+    track_query_usage_count(query_usage, query, 1);
+}
+
+/// Track `count` executions while normalizing and locking only once. This is
+/// used by executemany(), where one Python call can execute the same SQL many
+/// times.
+pub(crate) fn track_query_usage_count(
+    query_usage: &Arc<StdMutex<QueryUsageStats>>,
+    query: &str,
+    count: usize,
+) {
+    if count == 0 {
+        return;
+    }
     let normalized = normalize_query(query);
-    // Safety: StdMutex::lock() only fails if the mutex is poisoned (another thread panicked).
-    // In Python's GIL context and with proper error handling, this is extremely unlikely.
-    // If it happens, unwrap() will panic which is acceptable for this non-critical operation.
-    let mut cache = query_cache.lock().unwrap();
-    *cache.entry(normalized).or_insert(0) += 1;
+    let mut usage = query_usage.lock().unwrap();
+    let increment = u64::try_from(count).unwrap_or(u64::MAX);
+    if normalized.len() > MAX_QUERY_USAGE_QUERY_BYTES {
+        usage.dropped = usage.dropped.saturating_add(increment);
+        return;
+    }
+    if let Some(current) = usage.counts.get_mut(&normalized) {
+        *current = current.saturating_add(increment);
+    } else if usage.counts.len() < MAX_QUERY_USAGE_ENTRIES {
+        usage.counts.insert(normalized, increment);
+    } else {
+        usage.dropped = usage.dropped.saturating_add(increment);
+    }
 }
 
 /// Track query usage only when diagnostics are explicitly enabled. Query analytics
 /// are intentionally absent from the normal execution hot path.
 pub(crate) fn track_query_usage_if_enabled(
     enabled: &AtomicBool,
-    query_cache: &Arc<StdMutex<HashMap<String, u64>>>,
+    query_usage: &Arc<StdMutex<QueryUsageStats>>,
     query: &str,
 ) {
-    if enabled.load(Ordering::Relaxed) {
-        track_query_usage(query_cache, query);
+    if enabled.load(Ordering::Acquire) {
+        track_query_usage(query_usage, query);
+    }
+}
+
+/// Track a batch only when diagnostics are enabled. The SQL is normalized once
+/// and the count is added under the existing bounded-map lock.
+pub(crate) fn track_query_usage_count_if_enabled(
+    enabled: &AtomicBool,
+    query_usage: &Arc<StdMutex<QueryUsageStats>>,
+    query: &str,
+    count: usize,
+) {
+    if enabled.load(Ordering::Acquire) {
+        track_query_usage_count(query_usage, query, count);
     }
 }
 

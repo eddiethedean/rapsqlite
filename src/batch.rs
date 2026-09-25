@@ -3,10 +3,10 @@
 
 use libsqlite3_sys::{
     sqlite3, sqlite3_bind_blob, sqlite3_bind_double, sqlite3_bind_int64, sqlite3_bind_null,
-    sqlite3_bind_parameter_count, sqlite3_bind_text, sqlite3_changes, sqlite3_column_blob,
-    sqlite3_column_bytes, sqlite3_column_count, sqlite3_column_double, sqlite3_column_int64,
-    sqlite3_column_text, sqlite3_column_type, sqlite3_errmsg, sqlite3_finalize,
-    sqlite3_last_insert_rowid, sqlite3_prepare_v2, sqlite3_reset, sqlite3_step,
+    sqlite3_bind_parameter_count, sqlite3_bind_text, sqlite3_changes, sqlite3_clear_bindings,
+    sqlite3_column_blob, sqlite3_column_bytes, sqlite3_column_count, sqlite3_column_double,
+    sqlite3_column_int64, sqlite3_column_text, sqlite3_column_type, sqlite3_errmsg,
+    sqlite3_finalize, sqlite3_last_insert_rowid, sqlite3_prepare_v2, sqlite3_reset, sqlite3_step,
     sqlite3_total_changes, SQLITE_BLOB, SQLITE_DONE, SQLITE_ERROR, SQLITE_FLOAT, SQLITE_INTEGER,
     SQLITE_MISMATCH, SQLITE_MISUSE, SQLITE_NULL, SQLITE_OK, SQLITE_RANGE, SQLITE_ROW,
     SQLITE_STATIC, SQLITE_TEXT,
@@ -14,6 +14,7 @@ use libsqlite3_sys::{
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
+use crate::pool::RawStatementCache;
 use crate::types::SqliteParam;
 
 /// A scalar returned by the narrow raw SQLite path. It is converted to Python
@@ -269,16 +270,41 @@ pub(crate) fn fetch_scalar_raw_core(
     query: &str,
     params: &[SqliteParam],
     blob_only: bool,
+    statement_cache: Option<&RawStatementCache>,
 ) -> Result<Option<RawScalar>, (i32, String)> {
     if db.is_null() {
         return Err((SQLITE_MISUSE, "db pointer is null".to_string()));
     }
-    let query_c = CString::new(query).map_err(|e| (SQLITE_ERROR, e.to_string()))?;
-    let stmt = prepare_single_statement(db, &query_c)?;
+    let cached_stmt = statement_cache.and_then(|cache| cache.get(query));
+    let cached = cached_stmt.is_some();
+    let stmt = if let Some(statement) = cached_stmt {
+        let stmt = statement as *mut libsqlite3_sys::sqlite3_stmt;
+        unsafe {
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+        }
+        stmt
+    } else {
+        let query_c = CString::new(query).map_err(|e| (SQLITE_ERROR, e.to_string()))?;
+        prepare_single_statement(db, &query_c)?
+    };
+
+    let reset_or_finalize = |stmt: *mut libsqlite3_sys::sqlite3_stmt| {
+        if cached {
+            unsafe {
+                sqlite3_reset(stmt);
+                sqlite3_clear_bindings(stmt);
+            }
+        } else {
+            unsafe {
+                sqlite3_finalize(stmt);
+            }
+        }
+    };
 
     let expected_params = unsafe { sqlite3_bind_parameter_count(stmt) } as usize;
     if params.len() != expected_params {
-        let _ = unsafe { sqlite3_finalize(stmt) };
+        reset_or_finalize(stmt);
         return Err((
             SQLITE_RANGE,
             format!(
@@ -290,12 +316,15 @@ pub(crate) fn fetch_scalar_raw_core(
 
     let columns = unsafe { sqlite3_column_count(stmt) };
     if columns != 1 {
-        let _ = unsafe { sqlite3_finalize(stmt) };
+        reset_or_finalize(stmt);
         return Err((
             SQLITE_ERROR,
             format!("raw scalar queries must return exactly one column; got {columns}"),
         ));
     }
+
+    let retained = cached
+        || statement_cache.is_some_and(|cache| cache.insert(query.to_string(), stmt as usize));
 
     let result = (|| {
         for (index, param) in params.iter().enumerate() {
@@ -392,9 +421,16 @@ pub(crate) fn fetch_scalar_raw_core(
         }
     })();
 
-    let finalize_rc = unsafe { sqlite3_finalize(stmt) };
-    if finalize_rc != SQLITE_OK && result.is_ok() {
-        return Err((finalize_rc, errmsg_from_db(db)));
+    if retained {
+        unsafe {
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+        }
+    } else {
+        let finalize_rc = unsafe { sqlite3_finalize(stmt) };
+        if finalize_rc != SQLITE_OK && result.is_ok() {
+            return Err((finalize_rc, errmsg_from_db(db)));
+        }
     }
     result
 }

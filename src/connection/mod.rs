@@ -35,8 +35,9 @@ use crate::parameters::process_parameters;
 use crate::pool::{
     acquire_with_pragmas, apply_pragmas_to_connection, callbacks_enabled,
     close_registered_pool_if_last, execute_init_hook_if_needed, execute_init_hook_if_needed_fast,
-    get_or_create_pool, has_callbacks, lock_session_connection, release_session_connection,
-    PoolConnectionSlot, PoolRegistryLease, PoolSlot, SessionConnectionSlot,
+    get_or_create_pool, has_callbacks, lock_session_connection, lock_session_connection_from_pool,
+    release_session_connection, PoolConnectionSlot, PoolHandle, PoolRegistryLease,
+    SessionConnectionSlot,
 };
 use crate::query::{
     bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
@@ -44,12 +45,13 @@ use crate::query::{
     bind_and_fetch_optional_with_column_count_on_connection,
 };
 use crate::types::{
-    Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
-    UserCollations, UserFunctions,
+    Adapters, Converters, ProgressHandler, SqliteParam, TraceCallback, TraceCallbackState,
+    TransactionState, TransactionStateTracker, UserAggregates, UserCollations, UserFunctions,
 };
 use crate::utils::{
     cstr_from_c_char_ptr, is_select_query, parse_connection_string, returns_result_rows,
-    track_query_usage_if_enabled, validate_path,
+    track_query_usage_count_if_enabled, track_query_usage_if_enabled, validate_path,
+    QueryUsageStats,
 };
 use crate::{
     Cursor, ExecuteContextManager, NotSupportedError, ProgrammingError, SavepointContextManager,
@@ -62,8 +64,8 @@ use crate::{InterfaceError, InternalError, OperationalError};
 pub(crate) struct Connection {
     path: String,
     pool_registry_lease: Arc<StdMutex<Option<PoolRegistryLease>>>,
-    pool: Arc<Mutex<PoolSlot>>,
-    transaction_state: Arc<Mutex<TransactionState>>,
+    pool: Arc<PoolHandle>,
+    transaction_state: Arc<TransactionStateTracker>,
     // Store the connection used for active transaction
     // All operations within a transaction must use this same connection
     transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
@@ -71,20 +73,16 @@ pub(crate) struct Connection {
     last_changes: Arc<Mutex<u64>>,
     pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Store PRAGMA settings
     init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,   // Optional initialization hook
-    init_hook_called: Arc<StdMutex<bool>>,         // Track if init_hook has been executed
+    init_hook_called: Arc<AtomicBool>,
     init_hook_present: Arc<AtomicBool>,
     pool_size: Arc<StdMutex<Option<usize>>>, // Configurable pool size
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>, // Connection timeout in seconds
     idle_timeout_secs: Arc<StdMutex<Option<u64>>>, // Idle connection timeout (pool closes idle conns after this)
     row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // None | "dict" | "tuple" | callable
     text_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Callable(bytes) -> str, or None for default UTF-8
-    // Prepared statement cache tracking (Phase 2.13)
-    // Tracks normalized query strings and usage counts for analytics/optimization.
-    // This is separate from sqlx's internal prepared statement cache, which automatically
-    // caches prepared statements per connection. This field tracks query usage patterns
-    // for analytics and optimization insights, while sqlx handles the actual statement
-    // caching and reuse for performance.
-    query_cache: Arc<StdMutex<HashMap<String, u64>>>, // normalized_query -> usage_count
+    // Opt-in, bounded query analytics. This is separate from SQLx's own
+    // per-connection prepared statement cache.
+    query_usage_stats: Arc<StdMutex<QueryUsageStats>>,
     query_usage_enabled: Arc<AtomicBool>,
     // Callback infrastructure (Phase 2.7)
     callback_connection: Arc<Mutex<PoolConnectionSlot>>, // Dedicated connection for callbacks
@@ -98,9 +96,9 @@ pub(crate) struct Connection {
     user_collations: UserCollations, // name -> user_data ptr for cleanup on remove
     adapters: Adapters,              // (type, callable) for register_adapter
     converters: Converters,          // typename -> callable(bytes)->Any for register_converter
-    trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Trace callback
+    trace_callback: TraceCallback,
     authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>, // Authorizer callback
-    progress_handler: ProgressHandler, // (n, callback)
+    progress_handler: ProgressHandler,                     // (n, callback)
     // Raw SQLite callback contexts (Box<Py<PyAny>> as void*) so we can free on replace/clear.
     // Stored as usize for Send/Sync; 0 means none installed.
     authorizer_callback_ctx_ptr: Arc<StdMutex<usize>>,
@@ -138,15 +136,8 @@ pub(crate) struct Connection {
 // - Use async context managers: `async with rapsqlite.connect(...) as db:`
 // - Or call close() explicitly: `await db.close()`
 
-fn invoke_trace_callback(trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>, sql: &str) {
-    #[allow(deprecated)]
-    let callback = Python::attach(|py| {
-        trace_callback
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|callback| callback.clone_ref(py))
-    });
+fn invoke_trace_callback(trace_callback: &TraceCallback, sql: &str) {
+    let callback = trace_callback.clone_callback();
     if let Some(callback) = callback {
         #[allow(deprecated)]
         Python::attach(|py| {
@@ -160,22 +151,23 @@ fn invoke_trace_callback(trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>, sql:
 #[derive(Clone)]
 pub(crate) struct ConnectionExecutionState {
     pub(crate) path: String,
-    pub(crate) pool: Arc<Mutex<PoolSlot>>,
+    pub(crate) pool: Arc<PoolHandle>,
     pub(crate) session_connection: SessionConnectionSlot,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
-    pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
+    pub(crate) transaction_state: Arc<TransactionStateTracker>,
     pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) callback_context: CallbackContext,
     #[allow(dead_code)] // used when binding parameters; ExecuteContextManager may not read
     pub(crate) adapters: Adapters,
     pub(crate) converters: Converters,
-    pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) trace_callback: TraceCallback,
     pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub(crate) init_hook_called: Arc<StdMutex<bool>>,
+    pub(crate) init_hook_called: Arc<AtomicBool>,
+    pub(crate) init_hook_present: Arc<AtomicBool>,
     pub(crate) last_rowid: Arc<Mutex<i64>>,
     pub(crate) last_changes: Arc<Mutex<u64>>,
     pub(crate) timeout: Arc<StdMutex<f64>>,
@@ -255,6 +247,7 @@ impl Connection {
             progress_handler: Arc::clone(&self_.progress_handler),
             init_hook: Arc::clone(&self_.init_hook),
             init_hook_called: Arc::clone(&self_.init_hook_called),
+            init_hook_present: Arc::clone(&self_.init_hook_present),
             include_query_in_errors: Arc::clone(&self_.include_query_in_errors),
             closed: Arc::clone(&self_.closed),
             connection_self: self_.into(),
@@ -385,22 +378,21 @@ impl Connection {
         Ok(Connection {
             path: db_path,
             pool_registry_lease: Arc::new(StdMutex::new(Some(pool_registry_lease))),
-            pool: Arc::new(Mutex::new(PoolSlot::default())),
-            transaction_state: Arc::new(Mutex::new(TransactionState::None)),
+            pool: Arc::new(PoolHandle::default()),
+            transaction_state: Arc::new(TransactionStateTracker::new()),
             transaction_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
             last_rowid: Arc::new(Mutex::new(0)),
             last_changes: Arc::new(Mutex::new(0)),
             pragmas: Arc::new(StdMutex::new(all_pragmas)),
             init_hook: Arc::new(StdMutex::new(init_hook)),
-            init_hook_called: Arc::new(StdMutex::new(false)),
+            init_hook_called: Arc::new(AtomicBool::new(false)),
             init_hook_present: Arc::new(AtomicBool::new(init_hook_present)),
             pool_size: Arc::new(StdMutex::new(None)),
             connection_timeout_secs: Arc::new(StdMutex::new(None)),
             idle_timeout_secs: Arc::new(StdMutex::new(None)),
             row_factory: Arc::new(StdMutex::new(None)),
             text_factory: Arc::new(StdMutex::new(None)),
-            // Prepared statement cache tracking (Phase 2.13)
-            query_cache: Arc::new(StdMutex::new(HashMap::new())),
+            query_usage_stats: Arc::new(StdMutex::new(QueryUsageStats::default())),
             query_usage_enabled: Arc::new(AtomicBool::new(false)),
             // Callback infrastructure (Phase 2.7)
             callback_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
@@ -414,7 +406,7 @@ impl Connection {
             user_collations: Arc::new(StdMutex::new(HashMap::new())),
             adapters: Arc::new(crate::types::AdapterRegistry::new()),
             converters: Arc::new(crate::types::ConverterRegistry::new()),
-            trace_callback: Arc::new(StdMutex::new(None)),
+            trace_callback: Arc::new(TraceCallbackState::new()),
             authorizer_callback: Arc::new(StdMutex::new(None)),
             progress_handler: Arc::new(StdMutex::new(None)),
             authorizer_callback_ctx_ptr: Arc::new(StdMutex::new(0)),
@@ -438,7 +430,7 @@ impl Connection {
     /// normalization and the analytics mutex are absent from normal queries.
     #[getter(query_usage_tracking)]
     fn query_usage_tracking(&self) -> bool {
-        self.query_usage_enabled.load(Ordering::Relaxed)
+        self.query_usage_enabled.load(Ordering::Acquire)
     }
 
     #[setter(query_usage_tracking)]
@@ -447,22 +439,32 @@ impl Connection {
     }
 
     /// Return a snapshot of normalized query usage counts collected while
-    /// ``query_usage_tracking`` was enabled.
+    /// ``query_usage_tracking`` was enabled. Retention is bounded; see
+    /// ``query_usage_dropped`` for executions omitted by the diagnostic caps.
     fn query_usage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let snapshot = self
-            .query_cache
+        let usage = self
+            .query_usage_stats
             .lock()
             .map_err(|_| InternalError::new_err("internal error: query usage mutex poisoned"))?;
         let result = PyDict::new(py);
-        for (query, count) in snapshot.iter() {
+        for (query, count) in usage.counts.iter() {
             result.set_item(query, *count)?;
         }
         Ok(result.into_any().unbind())
     }
 
+    /// Return the number of query executions omitted because a query exceeded
+    /// the diagnostic size cap or the distinct-query limit was reached.
+    fn query_usage_dropped(&self) -> PyResult<u64> {
+        self.query_usage_stats
+            .lock()
+            .map(|usage| usage.dropped)
+            .map_err(|_| InternalError::new_err("internal error: query usage mutex poisoned"))
+    }
+
     /// Clear collected query-usage analytics without changing the enabled state.
     fn clear_query_usage(&self) -> PyResult<()> {
-        self.query_cache
+        self.query_usage_stats
             .lock()
             .map_err(|_| InternalError::new_err("internal error: query usage mutex poisoned"))?
             .clear();
@@ -532,10 +534,7 @@ impl Connection {
             let future = async move {
                 ensure_not_closed(&closed)?;
                 // Check if we're in a transaction - if so, use transaction connection
-                let in_transaction = {
-                    let trans_guard = transaction_state.lock().await;
-                    *trans_guard == TransactionState::Active
-                };
+                let in_transaction = transaction_state.is_exact_active().await;
 
                 let raw_db = if in_transaction {
                     // Use transaction connection
@@ -730,10 +729,8 @@ impl Connection {
                     &idle_timeout_secs,
                 )
                 .await?;
-                let guard = pool.lock().await;
-                let p = guard
-                    .0
-                    .as_ref()
+                let p = pool
+                    .get()
                     .ok_or_else(|| OperationalError::new_err("Pool not available"))?;
                 let size = p.size();
                 let num_idle = p.num_idle();
@@ -944,7 +941,6 @@ impl Connection {
         _exc_tb: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
         let commit_on_exit = exc_type.is_none();
-        let pool = Arc::clone(&self.pool);
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let explicit_transaction = Arc::clone(&self.explicit_transaction);
@@ -965,10 +961,7 @@ impl Connection {
                 }
 
                 // Clear trace callback
-                {
-                    let mut trace_guard = trace_callback.lock().unwrap();
-                    *trace_guard = None;
-                }
+                trace_callback.replace(None);
 
                 // Clear authorizer callback
                 {
@@ -1019,9 +1012,6 @@ impl Connection {
                 }
 
                 // Release our reference to the pool (do not close: pool is shared via global registry).
-                let mut pool_guard = pool.lock().await;
-                let _ = pool_guard.0.take();
-
                 Ok(())
             };
             future_into_py(py, future).map(|bound| bound.unbind())
@@ -1030,7 +1020,6 @@ impl Connection {
 
     /// Close the connection.
     fn close(&self) -> PyResult<Py<PyAny>> {
-        let pool = Arc::clone(&self.pool);
         let session_connection = self.session_connection.clone();
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_connection = Arc::clone(&self.transaction_connection);
@@ -1060,10 +1049,7 @@ impl Connection {
                     let mut funcs_guard = user_functions.lock().unwrap();
                     funcs_guard.clear();
                 }
-                {
-                    let mut trace_guard = trace_callback.lock().unwrap();
-                    *trace_guard = None;
-                }
+                trace_callback.replace(None);
                 {
                     let mut auth_guard = authorizer_callback.lock().unwrap();
                     *auth_guard = None;
@@ -1097,9 +1083,6 @@ impl Connection {
                 }
 
                 // Release our reference to the pool (do not close: pool is shared via global registry).
-                let mut pool_guard = pool.lock().await;
-                let _ = pool_guard.0.take();
-                drop(pool_guard);
                 if let Some(identity) = pool_registry_identity.as_deref() {
                     close_registered_pool_if_last(identity).await;
                 }
@@ -1135,6 +1118,7 @@ impl Connection {
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let init_hook_present = Arc::clone(&self_.init_hook_present);
         let timeout = Arc::clone(&self_.timeout);
         let isolation_level = Arc::clone(&self_.isolation_level);
         let closed = Arc::clone(&self_.closed);
@@ -1153,11 +1137,7 @@ impl Connection {
                         let mut conn_guard = transaction_connection.lock().await;
                         if let Some(mut conn) = conn_guard.0.take() {
                             drop(trans_guard);
-                            #[allow(deprecated)]
-                            let trace_cb = Python::attach(|py| {
-                                let g = trace_callback.lock().unwrap();
-                                g.as_ref().map(|c| c.clone_ref(py))
-                            });
+                            let trace_cb = trace_callback.clone_callback();
                             if let Some(cb) = trace_cb {
                                 #[allow(deprecated)]
                                 Python::attach(|py| {
@@ -1178,11 +1158,7 @@ impl Connection {
                                 .clone()
                                 .unwrap_or_else(|| "IMMEDIATE".to_string());
                             let begin_sql = format!("BEGIN {level}");
-                            #[allow(deprecated)]
-                            let trace_cb = Python::attach(|py| {
-                                let g = trace_callback.lock().unwrap();
-                                g.as_ref().map(|c| c.clone_ref(py))
-                            });
+                            let trace_cb = trace_callback.clone_callback();
                             if let Some(cb) = trace_cb {
                                 #[allow(deprecated)]
                                 Python::attach(|py| {
@@ -1295,11 +1271,7 @@ impl Connection {
                         .clone()
                         .unwrap_or_else(|| "IMMEDIATE".to_string());
                     let begin_sql = format!("BEGIN {level}");
-                    #[allow(deprecated)]
-                    let trace_cb = Python::attach(|py| {
-                        let g = trace_callback.lock().unwrap();
-                        g.as_ref().map(|c| c.clone_ref(py))
-                    });
+                    let trace_cb = trace_callback.clone_callback();
                     if let Some(cb) = trace_cb {
                         #[allow(deprecated)]
                         Python::attach(|py| {
@@ -1328,8 +1300,13 @@ impl Connection {
                     }
 
                     // Run init_hook after transaction is active so hook's conn.execute() uses this connection
-                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self)
-                        .await?;
+                    execute_init_hook_if_needed(
+                        &init_hook,
+                        &init_hook_present,
+                        &init_hook_called,
+                        connection_self,
+                    )
+                    .await?;
                     Ok(())
                 }
                 .await;
@@ -1417,11 +1394,7 @@ impl Connection {
                 }
 
                 // Execute COMMIT on the same connection that started the transaction
-                #[allow(deprecated)]
-                let trace_cb = Python::attach(|py| {
-                    let g = trace_callback.lock().unwrap();
-                    g.as_ref().map(|c| c.clone_ref(py))
-                });
+                let trace_cb = trace_callback.clone_callback();
                 if let Some(cb) = trace_cb {
                     #[allow(deprecated)]
                     Python::attach(|py| {
@@ -1501,11 +1474,7 @@ impl Connection {
                 }
 
                 // Execute ROLLBACK on the same connection that started the transaction
-                #[allow(deprecated)]
-                let trace_cb = Python::attach(|py| {
-                    let g = trace_callback.lock().unwrap();
-                    g.as_ref().map(|c| c.clone_ref(py))
-                });
+                let trace_cb = trace_callback.clone_callback();
                 if let Some(cb) = trace_cb {
                     #[allow(deprecated)]
                     Python::attach(|py| {
@@ -1601,11 +1570,12 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let trace_callback = Arc::clone(&self_.trace_callback);
         // Prepared statement cache tracking (Phase 2.13)
-        let query_cache = Arc::clone(&self_.query_cache);
+        let query_usage_stats = Arc::clone(&self_.query_usage_stats);
         let query_usage_enabled = Arc::clone(&self_.query_usage_enabled);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let init_hook_present = Arc::clone(&self_.init_hook_present);
         let row_factory = Arc::clone(&self_.row_factory);
         let text_factory = Arc::clone(&self_.text_factory);
         let timeout = Arc::clone(&self_.timeout);
@@ -1629,7 +1599,7 @@ impl Connection {
             Python::attach(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         // Track query usage for prepared statement cache analytics (Phase 2.13)
-        track_query_usage_if_enabled(&query_usage_enabled, &query_cache, &processed_query);
+        track_query_usage_if_enabled(&query_usage_enabled, &query_usage_stats, &processed_query);
 
         // Check if this is a SELECT query (for lazy execution)
         let is_select = is_select_query(&processed_query);
@@ -1742,6 +1712,7 @@ impl Connection {
                 trace_callback: Arc::clone(&trace_callback),
                 init_hook: Arc::clone(&init_hook),
                 init_hook_called: Arc::clone(&init_hook_called),
+                init_hook_present: Arc::clone(&init_hook_present),
                 last_rowid: Arc::clone(&last_rowid),
                 last_changes: Arc::clone(&last_changes),
                 timeout,
@@ -1785,9 +1756,12 @@ impl Connection {
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let init_hook_present = Arc::clone(&self_.init_hook_present);
         let closed = Arc::clone(&self_.closed);
         let _timeout = Arc::clone(&self_.timeout);
         let adapters = Arc::clone(&self_.adapters);
+        let query_usage_stats = Arc::clone(&self_.query_usage_stats);
+        let query_usage_enabled = Arc::clone(&self_.query_usage_enabled);
         let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         let callback_context = self_.callback_context();
         let connection_self = self_.into();
@@ -1826,33 +1800,47 @@ impl Connection {
                 Ok((processed_query.unwrap_or(query), result))
             })?;
 
+        track_query_usage_count_if_enabled(
+            &query_usage_enabled,
+            &query_usage_stats,
+            &query,
+            processed_params.len(),
+        );
+
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
                 // Priority: transaction > callbacks > pool
                 // Note: Only check for Active state, not Starting (Starting means transaction is being set up,
                 // and init_hook may need to execute queries using pool connection)
-                let in_transaction = {
-                    let trans_guard = transaction_state.lock().await;
-                    *trans_guard == TransactionState::Active
+                let in_transaction = transaction_state.is_exact_active().await;
+
+                // Resolve the pool once before init hooks; the common session path
+                // reuses this handle rather than locking the pool slot again.
+                let pool_for_operation = if !in_transaction {
+                    Some(
+                        get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
                 };
 
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
                 // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
+                execute_init_hook_if_needed(
+                    &init_hook,
+                    &init_hook_present,
+                    &init_hook_called,
+                    connection_self,
+                )
+                .await?;
 
                 let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                 let _callback_operation_guard = if has_callbacks_flag {
@@ -1912,14 +1900,16 @@ impl Connection {
                     // Reuse the connection pinned to this logical Connection. Acquiring another
                     // pool connection here can deadlock when pool_size=1 because the session
                     // connection remains checked out between operations.
-                    let mut conn_guard = lock_session_connection(
+                    let pool_clone = pool_for_operation.as_ref().ok_or_else(|| {
+                        OperationalError::new_err("Pool not available for session query")
+                    })?;
+                    let mut conn_guard = lock_session_connection_from_pool(
                         &path,
-                        &pool,
+                        pool_clone,
                         &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
-                        &idle_timeout_secs,
                     )
                     .await?;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
@@ -2017,11 +2007,12 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let trace_callback = Arc::clone(&self_.trace_callback);
         // Prepared statement cache tracking (Phase 2.13)
-        let query_cache = Arc::clone(&self_.query_cache);
+        let query_usage_stats = Arc::clone(&self_.query_usage_stats);
         let query_usage_enabled = Arc::clone(&self_.query_usage_enabled);
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let init_hook_present = Arc::clone(&self_.init_hook_present);
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
@@ -2035,18 +2026,14 @@ impl Connection {
             Python::attach(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         // Track query usage for prepared statement cache analytics (Phase 2.13)
-        track_query_usage_if_enabled(&query_usage_enabled, &query_cache, &processed_query);
+        track_query_usage_if_enabled(&query_usage_enabled, &query_usage_stats, &processed_query);
 
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
 
                 // Python-level trace callback.
-                #[allow(deprecated)]
-                let trace_cb = Python::attach(|py| {
-                    let g = trace_callback.lock().unwrap();
-                    g.as_ref().map(|c| c.clone_ref(py))
-                });
+                let trace_cb = trace_callback.clone_callback();
                 if let Some(cb) = trace_cb {
                     #[allow(deprecated)]
                     Python::attach(|py| {
@@ -2054,27 +2041,33 @@ impl Connection {
                     });
                 }
                 // Priority: transaction > callbacks > pool
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
+                let in_transaction = transaction_state.is_routing_active().await;
+
+                // Resolve once before init hooks and reuse for session acquisition.
+                let pool_for_operation = if !in_transaction {
+                    Some(
+                        get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
                 };
 
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
                 // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
+                execute_init_hook_if_needed(
+                    &init_hook,
+                    &init_hook_present,
+                    &init_hook_called,
+                    connection_self,
+                )
+                .await?;
 
                 let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                 let _callback_operation_guard = if has_callbacks_flag {
@@ -2116,14 +2109,16 @@ impl Connection {
                     callbacks::discard_callback_connection(&callback_context).await;
                     rows_result?
                 } else {
-                    let mut conn_guard = lock_session_connection(
+                    let pool_clone = pool_for_operation.as_ref().ok_or_else(|| {
+                        OperationalError::new_err("Pool not available for session query")
+                    })?;
+                    let mut conn_guard = lock_session_connection_from_pool(
                         &path,
-                        &pool,
+                        pool_clone,
                         &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
-                        &idle_timeout_secs,
                     )
                     .await?;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
@@ -2214,6 +2209,7 @@ impl Connection {
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let init_hook_present = Arc::clone(&self_.init_hook_present);
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
@@ -2231,11 +2227,7 @@ impl Connection {
                 ensure_not_closed(&closed)?;
 
                 // Python-level trace callback.
-                #[allow(deprecated)]
-                let trace_cb = Python::attach(|py| {
-                    let g = trace_callback.lock().unwrap();
-                    g.as_ref().map(|c| c.clone_ref(py))
-                });
+                let trace_cb = trace_callback.clone_callback();
                 if let Some(cb) = trace_cb {
                     #[allow(deprecated)]
                     Python::attach(|py| {
@@ -2243,27 +2235,33 @@ impl Connection {
                     });
                 }
                 // Priority: transaction > callbacks > pool
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
+                let in_transaction = transaction_state.is_routing_active().await;
+
+                // Resolve once before init hooks and reuse for session acquisition.
+                let pool_for_operation = if !in_transaction {
+                    Some(
+                        get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
                 };
 
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
                 // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
+                execute_init_hook_if_needed(
+                    &init_hook,
+                    &init_hook_present,
+                    &init_hook_called,
+                    connection_self,
+                )
+                .await?;
 
                 let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                 let _callback_operation_guard = if has_callbacks_flag {
@@ -2305,14 +2303,16 @@ impl Connection {
                     callbacks::discard_callback_connection(&callback_context).await;
                     row_result?
                 } else {
-                    let mut conn_guard = lock_session_connection(
+                    let pool_clone = pool_for_operation.as_ref().ok_or_else(|| {
+                        OperationalError::new_err("Pool not available for session query")
+                    })?;
+                    let mut conn_guard = lock_session_connection_from_pool(
                         &path,
-                        &pool,
+                        pool_clone,
                         &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
-                        &idle_timeout_secs,
                     )
                     .await?;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
@@ -2401,6 +2401,7 @@ impl Connection {
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let init_hook_present = Arc::clone(&self_.init_hook_present);
         let closed = Arc::clone(&self_.closed);
         let adapters = Arc::clone(&self_.adapters);
         let converters = Arc::clone(&self_.converters);
@@ -2417,27 +2418,33 @@ impl Connection {
             let future = async move {
                 ensure_not_closed(&closed)?;
                 // Priority: transaction > callbacks > pool
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
+                let in_transaction = transaction_state.is_routing_active().await;
+
+                // Resolve once before init hooks and reuse for session acquisition.
+                let pool_for_operation = if !in_transaction {
+                    Some(
+                        get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
                 };
 
-                // Ensure pool exists before calling init_hook (init_hook needs pool to execute queries)
-                // Skip if in transaction (transaction has its own connection)
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
-                    )
-                    .await?;
-                }
-
                 // Execute init_hook if needed (before any operations)
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
+                execute_init_hook_if_needed(
+                    &init_hook,
+                    &init_hook_present,
+                    &init_hook_called,
+                    connection_self,
+                )
+                .await?;
 
                 let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                 let _callback_operation_guard = if has_callbacks_flag {
@@ -2479,14 +2486,16 @@ impl Connection {
                     callbacks::discard_callback_connection(&callback_context).await;
                     opt_result?
                 } else {
-                    let mut conn_guard = lock_session_connection(
+                    let pool_clone = pool_for_operation.as_ref().ok_or_else(|| {
+                        OperationalError::new_err("Pool not available for session query")
+                    })?;
+                    let mut conn_guard = lock_session_connection_from_pool(
                         &path,
-                        &pool,
+                        pool_clone,
                         &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
-                        &idle_timeout_secs,
                     )
                     .await?;
                     let conn = conn_guard.0.as_mut().ok_or_else(|| {
@@ -2568,25 +2577,26 @@ impl Connection {
                     ));
                 }
 
-                let in_transaction = {
-                    let guard = transaction_state.lock().await;
-                    guard.is_active()
-                };
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
+                let in_transaction = transaction_state.is_routing_active().await;
+                let pool_for_operation = if !in_transaction {
+                    Some(
+                        get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?,
                     )
-                    .await?;
-                }
+                } else {
+                    None
+                };
                 execute_init_hook_if_needed_fast(
                     &init_hook,
-                    &init_hook_called,
                     &init_hook_present,
+                    &init_hook_called,
                     connection_self,
                 )
                 .await?;
@@ -2613,19 +2623,22 @@ impl Connection {
                             &processed_query,
                             &param_values,
                             blob,
+                            None,
                         )
                     });
                     callbacks::clear_active_handle(&transaction_connection);
                     result
                 } else {
-                    let mut guard = lock_session_connection(
+                    let pool_clone = pool_for_operation.as_ref().ok_or_else(|| {
+                        OperationalError::new_err("Pool not available for raw query")
+                    })?;
+                    let mut guard = lock_session_connection_from_pool(
                         &path,
-                        &pool,
+                        pool_clone,
                         &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
-                        &idle_timeout_secs,
                     )
                     .await?;
                     let conn = guard.0.as_mut().ok_or_else(|| {
@@ -2638,12 +2651,18 @@ impl Connection {
                     let db = handle.as_raw_handle().as_ptr();
                     let active_slot = session_connection.raw_slot();
                     callbacks::register_active_handle(&active_slot, db as usize);
+                    let statement_cache = if session_connection.retain() {
+                        Some(session_connection.raw_statement_cache())
+                    } else {
+                        None
+                    };
                     let result = tokio::task::block_in_place(|| {
                         crate::batch::fetch_scalar_raw_core(
                             db,
                             &processed_query,
                             &param_values,
                             blob,
+                            statement_cache.as_deref(),
                         )
                     });
                     callbacks::clear_active_handle(&active_slot);
@@ -2764,38 +2783,39 @@ impl Connection {
         let converters = Arc::clone(&self_.converters);
         let text_factory = Arc::clone(&self_.text_factory);
         let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
-        let query_cache = Arc::clone(&self_.query_cache);
+        let query_usage_stats = Arc::clone(&self_.query_usage_stats);
         let query_usage_enabled = Arc::clone(&self_.query_usage_enabled);
         let connection_self = self_.into();
 
         #[allow(deprecated)]
         let (processed_query, param_values) =
             Python::attach(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
-        track_query_usage_if_enabled(&query_usage_enabled, &query_cache, &processed_query);
+        track_query_usage_if_enabled(&query_usage_enabled, &query_usage_stats, &processed_query);
 
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
                 invoke_trace_callback(&trace_callback, &processed_query);
-                let in_transaction = {
-                    let guard = transaction_state.lock().await;
-                    guard.is_active()
-                };
-                if !in_transaction {
-                    get_or_create_pool(
-                        &path,
-                        &pool,
-                        &pragmas,
-                        &pool_size,
-                        &connection_timeout_secs,
-                        &idle_timeout_secs,
+                let in_transaction = transaction_state.is_routing_active().await;
+                let pool_for_operation = if !in_transaction {
+                    Some(
+                        get_or_create_pool(
+                            &path,
+                            &pool,
+                            &pragmas,
+                            &pool_size,
+                            &connection_timeout_secs,
+                            &idle_timeout_secs,
+                        )
+                        .await?,
                     )
-                    .await?;
-                }
+                } else {
+                    None
+                };
                 execute_init_hook_if_needed_fast(
                     &init_hook,
-                    &init_hook_called,
                     &init_hook_present,
+                    &init_hook_called,
                     connection_self,
                 )
                 .await?;
@@ -2841,14 +2861,16 @@ impl Connection {
                     callbacks::discard_callback_connection(&callback_context).await;
                     result?
                 } else {
-                    let mut guard = lock_session_connection(
+                    let pool_clone = pool_for_operation.as_ref().ok_or_else(|| {
+                        OperationalError::new_err("Pool not available for session query")
+                    })?;
+                    let mut guard = lock_session_connection_from_pool(
                         &path,
-                        &pool,
+                        pool_clone,
                         &session_connection,
                         &pragmas,
                         &pool_size,
                         &connection_timeout_secs,
-                        &idle_timeout_secs,
                     )
                     .await?;
                     let conn = guard.0.as_mut().ok_or_else(|| {
@@ -2942,10 +2964,7 @@ impl Connection {
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    *g == TransactionState::Active
-                };
+                let in_transaction = transaction_state.is_exact_active().await;
 
                 let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                 let _callback_operation_guard = if has_callbacks_flag {
@@ -2958,7 +2977,7 @@ impl Connection {
                 }
 
                 let result = if !in_transaction {
-                    get_or_create_pool(
+                    let pool_clone = get_or_create_pool(
                         &path,
                         &pool,
                         &pragmas,
@@ -2985,14 +3004,13 @@ impl Connection {
                         callbacks::discard_callback_connection(&callback_context).await;
                         query_result?
                     } else {
-                        let mut conn_guard = lock_session_connection(
+                        let mut conn_guard = lock_session_connection_from_pool(
                             &path,
-                            &pool,
+                            &pool_clone,
                             &session_connection,
                             &pragmas,
                             &pool_size,
                             &connection_timeout_secs,
-                            &idle_timeout_secs,
                         )
                         .await?;
                         let conn = conn_guard.0.as_mut().ok_or_else(|| {
@@ -3178,6 +3196,7 @@ impl Connection {
         let transaction_connection = Arc::clone(&slf.transaction_connection);
         let init_hook = Arc::clone(&slf.init_hook);
         let init_hook_called = Arc::clone(&slf.init_hook_called);
+        let init_hook_present = Arc::clone(&slf.init_hook_present);
         let timeout = Arc::clone(&slf.timeout);
         let isolation_level = Arc::clone(&slf.isolation_level);
         let explicit_transaction = Arc::clone(&slf.explicit_transaction);
@@ -3197,6 +3216,7 @@ impl Connection {
             connection,
             init_hook,
             init_hook_called,
+            init_hook_present,
             timeout,
             isolation_level,
             explicit_transaction,
@@ -3240,6 +3260,7 @@ impl Connection {
         // Init hook infrastructure (Phase 2.11)
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
+        let init_hook_present = Arc::clone(&self_.init_hook_present);
         let closed = Arc::clone(&self_.closed);
         let connection_self = self_.into();
 
@@ -3326,7 +3347,13 @@ impl Connection {
                 )
                 .await?;
 
-                execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_self).await?;
+                execute_init_hook_if_needed(
+                    &init_hook,
+                    &init_hook_present,
+                    &init_hook_called,
+                    connection_self,
+                )
+                .await?;
 
                 let pool_size_val = {
                     let g = pool_size.lock().unwrap();
@@ -3746,8 +3773,7 @@ impl Connection {
         Python::attach(|py| {
             let callback_clone = callback.as_ref().map(|c| c.clone_ref(py));
             {
-                let mut trace_guard = ctx.trace_callback.lock().unwrap();
-                *trace_guard = callback_clone;
+                ctx.trace_callback.replace(callback_clone);
             }
             future_into_py(py, callbacks::set_trace_callback_impl(ctx, callback))
                 .map(|bound| bound.unbind())
@@ -3852,10 +3878,7 @@ impl Connection {
             let future = async move {
                 ensure_not_closed(&closed)?;
                 // Priority: transaction > callbacks > pool
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
+                let in_transaction = transaction_state.is_routing_active().await;
 
                 let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                 let _callback_operation_guard = if has_callbacks_flag {

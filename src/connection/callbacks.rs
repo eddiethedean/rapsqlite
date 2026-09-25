@@ -19,8 +19,8 @@ use pyo3::types::{PyString, PyTuple};
 use sqlx::sqlite::SqliteConnection;
 
 use crate::conversion::{py_to_sqlite_c_result, sqlite_c_value_to_py};
-use crate::pool::{ensure_callback_connection, has_callbacks, PoolConnectionSlot, PoolSlot};
-use crate::types::{ProgressHandler, UserAggregates, UserCollations, UserFunctions};
+use crate::pool::{ensure_callback_connection, has_callbacks, PoolConnectionSlot, PoolHandle};
+use crate::types::{ProgressHandler, TraceCallback, UserAggregates, UserCollations, UserFunctions};
 use crate::utils::cstr_from_c_char_ptr;
 use crate::OperationalError;
 
@@ -32,7 +32,7 @@ use super::ensure_not_closed;
 pub(crate) struct CallbackContext {
     pub closed: Arc<StdMutex<bool>>,
     pub path: String,
-    pub pool: Arc<Mutex<PoolSlot>>,
+    pub pool: Arc<PoolHandle>,
     pub pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub pool_size: Arc<StdMutex<Option<usize>>>,
     pub connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
@@ -47,7 +47,7 @@ pub(crate) struct CallbackContext {
     pub user_aggregates: UserAggregates,
     pub user_collations: UserCollations,
     pub loaded_extensions: Arc<StdMutex<Vec<String>>>,
-    pub trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub trace_callback: TraceCallback,
     pub authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub progress_handler: ProgressHandler,
     pub authorizer_callback_ctx_ptr: Arc<StdMutex<usize>>,

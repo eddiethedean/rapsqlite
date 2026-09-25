@@ -4,6 +4,7 @@
 //! connecting to the same database path share one SqlitePool, improving
 //! concurrent operation performance (e.g. many `connect(path)` calls).
 
+use libsqlite3_sys::{sqlite3_finalize, sqlite3_stmt};
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::into_future;
 use sqlx::pool::PoolConnection;
@@ -18,7 +19,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use crate::types::{ProgressHandler, UserAggregates, UserCollations, UserFunctions};
+use crate::types::{ProgressHandler, TraceCallback, UserAggregates, UserCollations, UserFunctions};
 use crate::OperationalError;
 
 fn sqlite_url_for_path(path: &str) -> String {
@@ -104,6 +105,35 @@ impl Drop for PoolSlot {
     }
 }
 
+/// Immutable per-Connection reference to its initialized shared pool.
+/// Pool handles are initialized once, then cloned without an async mutex.
+#[derive(Default)]
+pub(crate) struct PoolHandle(OnceLock<SqlitePool>);
+
+impl PoolHandle {
+    pub(crate) fn get(&self) -> Option<&SqlitePool> {
+        self.0.get()
+    }
+
+    fn set(&self, pool: SqlitePool) {
+        // A concurrent first operation may already have initialized this handle.
+        // Dropping a redundant SQLx clone here occurs inside the Tokio runtime.
+        let _ = self.0.set(pool);
+    }
+}
+
+impl Drop for PoolHandle {
+    fn drop(&mut self) {
+        if let Some(pool) = self.0.take() {
+            if tokio::runtime::Handle::try_current().is_err() {
+                drop_on_background_tokio(pool);
+            } else {
+                drop(pool);
+            }
+        }
+    }
+}
+
 /// RAII guard for a PoolConnection taken out of a slot (e.g. during backup).
 /// When dropped, never runs sqlx's PoolConnection::Drop (which requires Tokio);
 /// instead forgets the connection if still held. Callers must explicitly restore
@@ -159,6 +189,77 @@ impl Drop for TakenConnectionGuard {
 /// Connection objects to the same path can acquire connections.
 const SHARED_POOL_MIN_CONNECTIONS: u32 = 25;
 
+/// A small per-logical-connection cache for raw statements. Statements are
+/// only reused while session affinity retains their physical SQLite handle.
+pub(crate) struct RawStatementCache {
+    statements: StdMutex<HashMap<String, usize>>,
+    has_statements: AtomicBool,
+}
+
+impl Default for RawStatementCache {
+    fn default() -> Self {
+        Self {
+            statements: StdMutex::new(HashMap::new()),
+            has_statements: AtomicBool::new(false),
+        }
+    }
+}
+
+impl RawStatementCache {
+    const MAX_STATEMENTS: usize = 64;
+    const MAX_QUERY_BYTES: usize = 2_048;
+
+    pub(crate) fn get(&self, query: &str) -> Option<usize> {
+        self.statements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(query)
+            .copied()
+    }
+
+    pub(crate) fn insert(&self, query: String, statement: usize) -> bool {
+        if query.len() > Self::MAX_QUERY_BYTES {
+            return false;
+        }
+        let mut statements = self
+            .statements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if statements.len() >= Self::MAX_STATEMENTS || statements.contains_key(&query) {
+            return false;
+        }
+        statements.insert(query, statement);
+        self.has_statements.store(true, Ordering::Release);
+        true
+    }
+
+    pub(crate) fn clear(&self) {
+        if !self.has_statements.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut statements = self
+            .statements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending: Vec<usize> = statements.drain().map(|(_, statement)| statement).collect();
+        self.has_statements.store(false, Ordering::Release);
+        drop(statements);
+        for statement in pending {
+            // Statements are finalized before their retained PoolConnection is
+            // returned or closed. The slot lock excludes concurrent users.
+            unsafe {
+                sqlite3_finalize(statement as *mut sqlite3_stmt);
+            }
+        }
+    }
+}
+
+impl Drop for RawStatementCache {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 /// A registry entry stays alive while at least one Connection uses this identity.
 #[derive(Default)]
 struct RegisteredPool {
@@ -170,6 +271,10 @@ struct RegisteredPool {
 /// Per-Connection slot for retaining one pooled connection across operations.
 #[derive(Clone)]
 pub(crate) struct SessionConnectionSlot {
+    // Drop raw statements before the slot can drop its last pooled connection.
+    // Explicit close/release clears these earlier while holding the slot lock;
+    // this field order also makes implicit object destruction safe.
+    raw_statement_cache: Arc<RawStatementCache>,
     slot: Arc<Mutex<PoolConnectionSlot>>,
     retain: Arc<AtomicBool>,
 }
@@ -177,6 +282,7 @@ pub(crate) struct SessionConnectionSlot {
 impl SessionConnectionSlot {
     fn new() -> Self {
         Self {
+            raw_statement_cache: Arc::new(RawStatementCache::default()),
             slot: Arc::new(Mutex::new(PoolConnectionSlot::default())),
             retain: Arc::new(AtomicBool::new(false)),
         }
@@ -197,6 +303,10 @@ impl SessionConnectionSlot {
     pub(crate) fn raw_slot(&self) -> Arc<Mutex<PoolConnectionSlot>> {
         Arc::clone(&self.slot)
     }
+
+    pub(crate) fn raw_statement_cache(&self) -> Arc<RawStatementCache> {
+        Arc::clone(&self.raw_statement_cache)
+    }
 }
 
 /// Holds a logical Connection's session slot for one operation. Return the lease
@@ -205,6 +315,7 @@ impl SessionConnectionSlot {
 pub(crate) struct SessionConnectionGuard {
     guard: tokio::sync::OwnedMutexGuard<PoolConnectionSlot>,
     retain: bool,
+    raw_statement_cache: Arc<RawStatementCache>,
 }
 
 impl Deref for SessionConnectionGuard {
@@ -224,6 +335,7 @@ impl DerefMut for SessionConnectionGuard {
 impl Drop for SessionConnectionGuard {
     fn drop(&mut self) {
         if !self.retain {
+            self.raw_statement_cache.clear();
             self.guard.0.take();
         }
     }
@@ -446,18 +558,15 @@ pub(crate) async fn acquire_with_pragmas(
 /// Uses a global path-based registry so connections to the same path share one pool.
 pub(crate) async fn get_or_create_pool(
     path: &str,
-    pool: &Arc<Mutex<PoolSlot>>,
+    pool: &PoolHandle,
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: &Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
     idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
 ) -> Result<SqlitePool, PyErr> {
-    // Fast path: this connection already has a pool (from registry or prior creation).
-    {
-        let pool_guard = pool.lock().await;
-        if let Some(ref p) = pool_guard.0 {
-            return Ok(p.clone());
-        }
+    // Fast path: initialized once per Connection, with no async mutex lookup.
+    if let Some(pool) = pool.get() {
+        return Ok(pool.clone());
     }
 
     let registry = global_registry();
@@ -468,9 +577,8 @@ pub(crate) async fn get_or_create_pool(
         reg.get(path).and_then(|entry| entry.pool.0.clone())
     };
     if let Some(shared_clone) = from_registry {
-        let mut pool_guard = pool.lock().await;
-        pool_guard.0 = Some(shared_clone.clone());
-        return Ok(shared_clone);
+        pool.set(shared_clone);
+        return Ok(pool.get().expect("pool handle initialized").clone());
     }
 
     // No pool for this path: create one, then register or use existing (race).
@@ -545,14 +653,12 @@ pub(crate) async fn get_or_create_pool(
     };
     match to_use {
         Some(existing) => {
-            let mut pool_guard = pool.lock().await;
-            pool_guard.0 = Some(existing.clone());
-            Ok(existing)
+            pool.set(existing);
+            Ok(pool.get().expect("pool handle initialized").clone())
         }
         None => {
-            let mut pool_guard = pool.lock().await;
-            pool_guard.0 = Some(new_pool.clone());
-            Ok(new_pool)
+            pool.set(new_pool);
+            Ok(pool.get().expect("pool handle initialized").clone())
         }
     }
 }
@@ -564,7 +670,7 @@ pub(crate) async fn get_or_create_pool(
 /// into sqlx 0.8's API. This is a known limitation that needs to be resolved.
 pub(crate) async fn ensure_callback_connection(
     path: &str,
-    pool: &Arc<Mutex<PoolSlot>>,
+    pool: &PoolHandle,
     callback_connection: &Arc<Mutex<PoolConnectionSlot>>,
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: &Arc<StdMutex<Option<usize>>>,
@@ -605,16 +711,16 @@ pub(crate) async fn ensure_callback_connection(
 /// This should be called from the first operation method that uses the pool.
 pub(crate) async fn execute_init_hook_if_needed(
     init_hook: &Arc<StdMutex<Option<Py<PyAny>>>>,
-    init_hook_called: &Arc<StdMutex<bool>>,
+    init_hook_present: &AtomicBool,
+    init_hook_called: &AtomicBool,
     connection: Py<crate::Connection>,
 ) -> Result<(), PyErr> {
-    // Check if init_hook has already been called
-    let already_called = {
-        let guard = init_hook_called.lock().unwrap();
-        *guard
-    };
-
-    if already_called {
+    if !init_hook_present.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    // Mark before running to preserve re-entrancy behavior: if the hook itself
+    // calls the Connection, nested operations must not wait on the same hook.
+    if init_hook_called.swap(true, Ordering::AcqRel) {
         return Ok(());
     }
 
@@ -628,12 +734,6 @@ pub(crate) async fn execute_init_hook_if_needed(
     });
 
     if let Some(hook) = hook_opt {
-        // Mark as called before execution (to avoid re-entry if hook calls other methods)
-        {
-            let mut guard = init_hook_called.lock().unwrap();
-            *guard = true;
-        }
-
         // Call the hook with the Connection object and await the coroutine
         // Note: Python::attach is used here because this is a sync helper function
         // called from async contexts. The deprecation warning is acceptable here.
@@ -668,14 +768,11 @@ pub(crate) async fn execute_init_hook_if_needed(
 /// presence check avoids taking the per-connection mutex on every operation.
 pub(crate) async fn execute_init_hook_if_needed_fast(
     init_hook: &Arc<StdMutex<Option<Py<PyAny>>>>,
-    init_hook_called: &Arc<StdMutex<bool>>,
     init_hook_present: &AtomicBool,
+    init_hook_called: &AtomicBool,
     connection: Py<crate::Connection>,
 ) -> Result<(), PyErr> {
-    if !init_hook_present.load(Ordering::Relaxed) {
-        return Ok(());
-    }
-    execute_init_hook_if_needed(init_hook, init_hook_called, connection).await
+    execute_init_hook_if_needed(init_hook, init_hook_present, init_hook_called, connection).await
 }
 
 /// Ensure the Connection has a session connection from the pool (acquire and store if None).
@@ -683,14 +780,13 @@ pub(crate) async fn execute_init_hook_if_needed_fast(
 /// and not using callbacks, matching aiosqlite behavior and improving concurrent-read performance.
 pub(crate) async fn lock_session_connection(
     path: &str,
-    pool: &Arc<Mutex<PoolSlot>>,
+    pool: &PoolHandle,
     session_connection: &SessionConnectionSlot,
     pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: &Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
     idle_timeout_secs: &Arc<StdMutex<Option<u64>>>,
 ) -> Result<SessionConnectionGuard, PyErr> {
-    let mut guard = session_connection.lock().await;
     let pool_clone = get_or_create_pool(
         path,
         pool,
@@ -700,11 +796,35 @@ pub(crate) async fn lock_session_connection(
         idle_timeout_secs,
     )
     .await?;
+    lock_session_connection_from_pool(
+        path,
+        &pool_clone,
+        session_connection,
+        pragmas,
+        pool_size,
+        connection_timeout_secs,
+    )
+    .await
+}
+
+/// Lock a session connection using a pool handle the caller already resolved.
+/// Query paths that must initialize the pool before running an init hook can
+/// reuse that handle here instead of taking the pool-slot mutex a second time.
+pub(crate) async fn lock_session_connection_from_pool(
+    path: &str,
+    pool_clone: &SqlitePool,
+    session_connection: &SessionConnectionSlot,
+    pragmas: &Arc<StdMutex<Vec<(String, String)>>>,
+    pool_size: &Arc<StdMutex<Option<usize>>>,
+    connection_timeout_secs: &Arc<StdMutex<Option<u64>>>,
+) -> Result<SessionConnectionGuard, PyErr> {
+    let mut guard = session_connection.lock().await;
     if guard.0.is_none() {
+        session_connection.raw_statement_cache.clear();
         let pool_size_val = *pool_size.lock().unwrap();
         let timeout_val = *connection_timeout_secs.lock().unwrap();
         let conn =
-            acquire_with_pragmas(&pool_clone, pragmas, path, pool_size_val, timeout_val).await?;
+            acquire_with_pragmas(pool_clone, pragmas, path, pool_size_val, timeout_val).await?;
         guard.0 = Some(conn);
     } else if let Some(conn) = guard.0.as_mut() {
         let pragmas_list = pragmas.lock().unwrap().clone();
@@ -713,12 +833,14 @@ pub(crate) async fn lock_session_connection(
     Ok(SessionConnectionGuard {
         retain: session_connection.retain(),
         guard,
+        raw_statement_cache: session_connection.raw_statement_cache(),
     })
 }
 
 /// Release the session connection (return to pool). Call on close() and when starting a transaction.
 pub(crate) async fn release_session_connection(session_connection: &SessionConnectionSlot) {
     let mut guard = session_connection.lock().await;
+    session_connection.raw_statement_cache.clear();
     let _ = guard.0.take();
 }
 
@@ -728,7 +850,7 @@ pub(crate) fn has_callbacks(
     user_functions: &UserFunctions,
     user_aggregates: &UserAggregates,
     user_collations: &UserCollations,
-    _trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
+    _trace_callback: &TraceCallback,
     authorizer_callback: &Arc<StdMutex<Option<Py<PyAny>>>>,
     progress_handler: &ProgressHandler,
 ) -> bool {
@@ -758,7 +880,7 @@ pub(crate) const CALLBACK_FEATURE_PROGRESS: u8 = 1 << 5;
 
 #[inline]
 pub(crate) fn callbacks_enabled(features: &Arc<AtomicU8>) -> bool {
-    features.load(Ordering::Relaxed) != 0
+    features.load(Ordering::Acquire) != 0
 }
 
 pub(crate) fn refresh_callback_features(ctx: &crate::connection::CallbackContext) {

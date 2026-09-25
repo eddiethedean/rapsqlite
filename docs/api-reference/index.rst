@@ -22,4 +22,4 @@ Module Functions
    :members:
    :undoc-members:
    :show-inheritance:
-   :exclude-members: Connection, Cursor, Row, Error, Warning, DatabaseError, OperationalError, ProgrammingError, IntegrityError, ValueError
+   :exclude-members: Connection, Cursor, Row, SQLiteCache, Error, Warning, DatabaseError, OperationalError, ProgrammingError, IntegrityError, ValueError

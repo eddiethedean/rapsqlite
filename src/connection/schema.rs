@@ -4,16 +4,18 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString};
 use sqlx::Row;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
 use crate::pool::{
     acquire_with_pragmas, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
-    PoolConnectionSlot, PoolSlot,
+    PoolConnectionSlot, PoolHandle,
 };
 use crate::query::bind_and_fetch_all_on_connection;
 use crate::types::{
-    ProgressHandler, SqliteParam, TransactionState, UserAggregates, UserCollations, UserFunctions,
+    ProgressHandler, SqliteParam, TraceCallback, TransactionStateTracker, UserAggregates,
+    UserCollations, UserFunctions,
 };
 use crate::OperationalError;
 
@@ -34,23 +36,24 @@ type TableIntrospection = (
 pub(crate) struct SchemaContext {
     pub callback_context: CallbackContext,
     pub path: String,
-    pub pool: Arc<Mutex<PoolSlot>>,
+    pub pool: Arc<PoolHandle>,
     pub pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub pool_size: Arc<StdMutex<Option<usize>>>,
     pub connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
-    pub transaction_state: Arc<Mutex<TransactionState>>,
+    pub transaction_state: Arc<TransactionStateTracker>,
     pub transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_connection_required: Arc<StdMutex<bool>>,
     pub user_functions: UserFunctions,
     pub user_aggregates: UserAggregates,
     pub user_collations: UserCollations,
-    pub trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub trace_callback: TraceCallback,
     pub authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub progress_handler: ProgressHandler,
     pub init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub init_hook_called: Arc<StdMutex<bool>>,
+    pub init_hook_called: Arc<AtomicBool>,
+    pub init_hook_present: Arc<AtomicBool>,
     pub include_query_in_errors: Arc<StdMutex<bool>>,
     pub closed: Arc<StdMutex<bool>>,
     pub connection_self: Py<Connection>,
@@ -73,10 +76,7 @@ async fn run_introspection_query_with_params(
     ensure_not_closed(&ctx.closed)?;
     let include_query_in_errors = *ctx.include_query_in_errors.lock().unwrap();
 
-    let in_transaction = {
-        let g = ctx.transaction_state.lock().await;
-        g.is_active()
-    };
+    let in_transaction = ctx.transaction_state.is_routing_active().await;
 
     if !in_transaction {
         get_or_create_pool(
@@ -92,7 +92,13 @@ async fn run_introspection_query_with_params(
 
     #[allow(deprecated)]
     let connection_for_hook = Python::attach(|py| ctx.connection_self.clone_ref(py));
-    execute_init_hook_if_needed(&ctx.init_hook, &ctx.init_hook_called, connection_for_hook).await?;
+    execute_init_hook_if_needed(
+        &ctx.init_hook,
+        &ctx.init_hook_present,
+        &ctx.init_hook_called,
+        connection_for_hook,
+    )
+    .await?;
 
     let has_callbacks_flag = has_callbacks(
         &ctx.callback_connection_required,

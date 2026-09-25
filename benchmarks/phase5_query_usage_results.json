@@ -1,0 +1,610 @@
+{
+  "metadata": {
+    "timestamp_utc": "2026-09-25T17:31:06Z",
+    "python": "3.10.19 (main, Jan 30 2026, 20:13:20) [Clang 17.0.0 (clang-1700.6.3.2)]",
+    "platform": "darwin",
+    "rapsqlite": "0.5.0",
+    "sqlite3": "3.51.0",
+    "redis_version": "8.10.2",
+    "ops": 3000,
+    "runs": 3,
+    "session_affinity": [
+      false,
+      true
+    ]
+  },
+  "results": [
+    {
+      "backend": "rapsqlite",
+      "variant": "fetch_scalar",
+      "session_affinity": false,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 52.545813333333335,
+          "p50_us": 51.625,
+          "p95_us": 57.79309999999999,
+          "p99_us": 72.25041999999999,
+          "ops_per_second": 18982.496074676095,
+          "elapsed_seconds": 0.1580403329571709
+        },
+        {
+          "mean_us": 52.670225,
+          "p50_us": 51.583,
+          "p95_us": 58.58604999999999,
+          "p99_us": 83.33507999999995,
+          "ops_per_second": 18935.429216356628,
+          "elapsed_seconds": 0.15843316598329693
+        },
+        {
+          "mean_us": 52.183787,
+          "p50_us": 51.209,
+          "p95_us": 57.208,
+          "p99_us": 71.90291999999934,
+          "ops_per_second": 19112.738880642,
+          "elapsed_seconds": 0.1569633749895729
+        }
+      ],
+      "median_run_mean_us": 52.545813333333335,
+      "median_run_p50_us": 51.583,
+      "median_run_p95_us": 57.79309999999999,
+      "median_run_p99_us": 72.25041999999999,
+      "mean_ops_per_second": 19010.22139055824
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "sqlite_cache_get",
+      "session_affinity": false,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 56.91573066666667,
+          "p50_us": 55.667,
+          "p95_us": 68.17944999999993,
+          "p99_us": 106.6753299999998,
+          "ops_per_second": 17529.823901010466,
+          "elapsed_seconds": 0.17113691597478464
+        },
+        {
+          "mean_us": 56.49908466666667,
+          "p50_us": 55.458,
+          "p95_us": 63.58305,
+          "p99_us": 88.45924999999997,
+          "ops_per_second": 17656.696367954683,
+          "elapsed_seconds": 0.16990720899775624
+        },
+        {
+          "mean_us": 56.719416333333335,
+          "p50_us": 55.709,
+          "p95_us": 64.29105,
+          "p99_us": 94.83573999999896,
+          "ops_per_second": 17585.161643625514,
+          "elapsed_seconds": 0.17059837497072294
+        }
+      ],
+      "median_run_mean_us": 56.719416333333335,
+      "median_run_p50_us": 55.667,
+      "median_run_p95_us": 64.29105,
+      "median_run_p99_us": 94.83573999999896,
+      "mean_ops_per_second": 17590.56063753022
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "fetch_scalar_query_usage_enabled",
+      "session_affinity": false,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 50.842869,
+          "p50_us": 51.459,
+          "p95_us": 58.333,
+          "p99_us": 66.04449999999994,
+          "ops_per_second": 19620.143042050382,
+          "elapsed_seconds": 0.15290408401051536
+        },
+        {
+          "mean_us": 49.552104,
+          "p50_us": 50.375,
+          "p95_us": 58.29309999999999,
+          "p99_us": 75.10190999999958,
+          "ops_per_second": 20132.173220348242,
+          "elapsed_seconds": 0.14901520899729803
+        },
+        {
+          "mean_us": 49.64817266666667,
+          "p50_us": 50.3955,
+          "p95_us": 58.79105,
+          "p99_us": 76.33883999999986,
+          "ops_per_second": 20090.732016162256,
+          "elapsed_seconds": 0.1493225830490701
+        }
+      ],
+      "median_run_mean_us": 49.64817266666667,
+      "median_run_p50_us": 50.3955,
+      "median_run_p95_us": 58.333,
+      "median_run_p99_us": 75.10190999999958,
+      "mean_ops_per_second": 19947.682759520292
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "execute_upsert_query_usage_enabled",
+      "session_affinity": false,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 89.71021766666667,
+          "p50_us": 86.833,
+          "p95_us": 100.91605,
+          "p99_us": 127.91891999999993,
+          "ops_per_second": 11132.515433825225,
+          "elapsed_seconds": 0.2694808749947697
+        },
+        {
+          "mean_us": 88.486275,
+          "p50_us": 86.666,
+          "p95_us": 98.08809999999998,
+          "p99_us": 109.42073999999991,
+          "ops_per_second": 11287.120504729515,
+          "elapsed_seconds": 0.2657896669697948
+        },
+        {
+          "mean_us": 88.909945,
+          "p50_us": 86.667,
+          "p95_us": 99.625,
+          "p99_us": 123.25457999999989,
+          "ops_per_second": 11233.053856406943,
+          "elapsed_seconds": 0.26706895901588723
+        }
+      ],
+      "median_run_mean_us": 88.909945,
+      "median_run_p50_us": 86.667,
+      "median_run_p95_us": 99.625,
+      "median_run_p99_us": 123.25457999999989,
+      "mean_ops_per_second": 11217.563264987228
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "execute_many_upsert_16_query_usage_enabled",
+      "session_affinity": false,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 204.07353333333333,
+          "p50_us": 199.1875,
+          "p95_us": 231.32324999999983,
+          "p99_us": 311.91643,
+          "ops_per_second": 4897.192287225207,
+          "elapsed_seconds": 0.6125959170167334
+        },
+        {
+          "mean_us": 204.49058966666666,
+          "p50_us": 199.0205,
+          "p95_us": 244.68989999999988,
+          "p99_us": 327.2976699999998,
+          "ops_per_second": 4886.999339647862,
+          "elapsed_seconds": 0.6138736249995418
+        },
+        {
+          "mean_us": 206.19273466666667,
+          "p50_us": 199.209,
+          "p95_us": 245.6791999999997,
+          "p99_us": 352.12584,
+          "ops_per_second": 4846.626814301874,
+          "elapsed_seconds": 0.618987207999453
+        }
+      ],
+      "median_run_mean_us": 204.49058966666666,
+      "median_run_p50_us": 199.1875,
+      "median_run_p95_us": 244.68989999999988,
+      "median_run_p99_us": 327.2976699999998,
+      "mean_ops_per_second": 4876.9394803916475
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "sqlite_cache_get_query_usage_enabled",
+      "session_affinity": false,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 60.07506733333334,
+          "p50_us": 57.125,
+          "p95_us": 75.50624999999997,
+          "p99_us": 126.54241999999999,
+          "ops_per_second": 16606.062289155372,
+          "elapsed_seconds": 0.1806569159962237
+        },
+        {
+          "mean_us": 60.43070866666667,
+          "p50_us": 56.917,
+          "p95_us": 78.04409999999999,
+          "p99_us": 118.67073999999991,
+          "ops_per_second": 16508.373557649873,
+          "elapsed_seconds": 0.18172595801297575
+        },
+        {
+          "mean_us": 60.290964333333335,
+          "p50_us": 57.791,
+          "p95_us": 75.87704999999998,
+          "p99_us": 90.42099999999988,
+          "ops_per_second": 16546.57000506364,
+          "elapsed_seconds": 0.18130645802011713
+        }
+      ],
+      "median_run_mean_us": 60.290964333333335,
+      "median_run_p50_us": 57.125,
+      "median_run_p95_us": 75.87704999999998,
+      "median_run_p99_us": 118.67073999999991,
+      "mean_ops_per_second": 16553.66861728963
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "execute_upsert",
+      "session_affinity": false,
+      "workload": "sequential_write",
+      "runs": [
+        {
+          "mean_us": 88.270195,
+          "p50_us": 86.625,
+          "p95_us": 96.792,
+          "p99_us": 115.08782999999892,
+          "ops_per_second": 11314.654409312643,
+          "elapsed_seconds": 0.26514287502504885
+        },
+        {
+          "mean_us": 88.54364366666667,
+          "p50_us": 86.667,
+          "p95_us": 96.08924999999996,
+          "p99_us": 116.65332999999933,
+          "ops_per_second": 11280.056062331776,
+          "elapsed_seconds": 0.26595612498931587
+        },
+        {
+          "mean_us": 87.222939,
+          "p50_us": 83.833,
+          "p95_us": 109.17739999999995,
+          "p99_us": 172.17323999999985,
+          "ops_per_second": 11446.739038168875,
+          "elapsed_seconds": 0.26208337501157075
+        }
+      ],
+      "median_run_mean_us": 88.270195,
+      "median_run_p50_us": 86.625,
+      "median_run_p95_us": 96.792,
+      "median_run_p99_us": 116.65332999999933,
+      "mean_ops_per_second": 11347.14983660443
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "execute_many_upsert_16",
+      "session_affinity": false,
+      "workload": "sequential_write",
+      "runs": [
+        {
+          "mean_us": 191.02262633333333,
+          "p50_us": 189.0,
+          "p95_us": 221.167,
+          "p99_us": 308.54699999999985,
+          "ops_per_second": 5231.25830553649,
+          "elapsed_seconds": 0.5734757920145057
+        },
+        {
+          "mean_us": 179.67257566666666,
+          "p50_us": 173.875,
+          "p95_us": 211.917,
+          "p99_us": 281.69782999999927,
+          "ops_per_second": 5561.8796190862895,
+          "elapsed_seconds": 0.5393859999603592
+        },
+        {
+          "mean_us": 186.62253633333333,
+          "p50_us": 177.792,
+          "p95_us": 217.09644999999995,
+          "p99_us": 299.9249099999998,
+          "ops_per_second": 5354.754732358061,
+          "elapsed_seconds": 0.5602497499785386
+        }
+      ],
+      "median_run_mean_us": 186.62253633333333,
+      "median_run_p50_us": 177.792,
+      "median_run_p95_us": 217.09644999999995,
+      "median_run_p99_us": 299.9249099999998,
+      "mean_ops_per_second": 5382.63088566028
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "fetch_scalar",
+      "session_affinity": true,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 48.215445,
+          "p50_us": 49.667,
+          "p95_us": 55.667,
+          "p99_us": 61.50041999999999,
+          "ops_per_second": 20685.494248953946,
+          "elapsed_seconds": 0.14502916700439528
+        },
+        {
+          "mean_us": 50.295568333333335,
+          "p50_us": 50.5,
+          "p95_us": 56.792,
+          "p99_us": 68.12624999999997,
+          "ops_per_second": 19830.941228482334,
+          "elapsed_seconds": 0.15127874998142943
+        },
+        {
+          "mean_us": 49.903127,
+          "p50_us": 50.5,
+          "p95_us": 56.79105,
+          "p99_us": 68.75166999999996,
+          "ops_per_second": 19987.674271407028,
+          "elapsed_seconds": 0.1500924999709241
+        }
+      ],
+      "median_run_mean_us": 49.903127,
+      "median_run_p50_us": 50.5,
+      "median_run_p95_us": 56.79105,
+      "median_run_p99_us": 68.12624999999997,
+      "mean_ops_per_second": 20168.03658294777
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "sqlite_cache_get",
+      "session_affinity": true,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 53.095142,
+          "p50_us": 51.917,
+          "p95_us": 64.458,
+          "p99_us": 102.09841999999963,
+          "ops_per_second": 18788.894068605085,
+          "elapsed_seconds": 0.15966879099141806
+        },
+        {
+          "mean_us": 54.191012666666666,
+          "p50_us": 53.334,
+          "p95_us": 65.00209999999998,
+          "p99_us": 104.4341699999986,
+          "ops_per_second": 18410.17882119309,
+          "elapsed_seconds": 0.16295333299785852
+        },
+        {
+          "mean_us": 59.25798833333333,
+          "p50_us": 57.375,
+          "p95_us": 76.54105,
+          "p99_us": 102.2961599999999,
+          "ops_per_second": 16837.5089160826,
+          "elapsed_seconds": 0.17817362502682954
+        }
+      ],
+      "median_run_mean_us": 54.191012666666666,
+      "median_run_p50_us": 53.334,
+      "median_run_p95_us": 65.00209999999998,
+      "median_run_p99_us": 102.2961599999999,
+      "mean_ops_per_second": 18012.19393529359
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "fetch_scalar_query_usage_enabled",
+      "session_affinity": true,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 48.874471666666665,
+          "p50_us": 50.208,
+          "p95_us": 56.25204999999999,
+          "p99_us": 63.91808999999995,
+          "ops_per_second": 20408.678064549797,
+          "elapsed_seconds": 0.14699629199458286
+        },
+        {
+          "mean_us": 47.745012,
+          "p50_us": 49.3125,
+          "p95_us": 55.25209999999999,
+          "p99_us": 66.59216999999978,
+          "ops_per_second": 20892.158979950804,
+          "elapsed_seconds": 0.14359454199438915
+        },
+        {
+          "mean_us": 46.122652333333335,
+          "p50_us": 44.3955,
+          "p95_us": 54.042,
+          "p99_us": 62.21065999999996,
+          "ops_per_second": 21626.563856371482,
+          "elapsed_seconds": 0.1387182920007035
+        }
+      ],
+      "median_run_mean_us": 47.745012,
+      "median_run_p50_us": 49.3125,
+      "median_run_p95_us": 55.25209999999999,
+      "median_run_p99_us": 63.91808999999995,
+      "mean_ops_per_second": 20975.800300290695
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "execute_upsert_query_usage_enabled",
+      "session_affinity": true,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 83.84829133333334,
+          "p50_us": 83.833,
+          "p95_us": 95.33509999999998,
+          "p99_us": 122.2541699999999,
+          "ops_per_second": 11909.939042214779,
+          "elapsed_seconds": 0.2518904579919763
+        },
+        {
+          "mean_us": 84.34660933333333,
+          "p50_us": 83.875,
+          "p95_us": 96.79309999999998,
+          "p99_us": 123.04824999999985,
+          "ops_per_second": 11839.887216887339,
+          "elapsed_seconds": 0.25338079198263586
+        },
+        {
+          "mean_us": 84.78931566666667,
+          "p50_us": 83.8335,
+          "p95_us": 97.37914999999998,
+          "p99_us": 136.25124999999997,
+          "ops_per_second": 11776.944666874846,
+          "elapsed_seconds": 0.254735000024084
+        }
+      ],
+      "median_run_mean_us": 84.34660933333333,
+      "median_run_p50_us": 83.8335,
+      "median_run_p95_us": 96.79309999999998,
+      "median_run_p99_us": 123.04824999999985,
+      "mean_ops_per_second": 11842.256975325654
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "execute_many_upsert_16_query_usage_enabled",
+      "session_affinity": true,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 193.24110833333333,
+          "p50_us": 192.75,
+          "p95_us": 224.67114999999998,
+          "p99_us": 302.1512499999994,
+          "ops_per_second": 5171.525860367928,
+          "elapsed_seconds": 0.5800995839526877
+        },
+        {
+          "mean_us": 194.56960633333333,
+          "p50_us": 193.0625,
+          "p95_us": 230.9326999999999,
+          "p99_us": 318.1283399999999,
+          "ops_per_second": 5136.157761509714,
+          "elapsed_seconds": 0.5840942080249079
+        },
+        {
+          "mean_us": 196.33528533333333,
+          "p50_us": 195.875,
+          "p95_us": 230.13749999999993,
+          "p99_us": 311.6715799999999,
+          "ops_per_second": 5089.977007839814,
+          "elapsed_seconds": 0.589393625035882
+        }
+      ],
+      "median_run_mean_us": 194.56960633333333,
+      "median_run_p50_us": 193.0625,
+      "median_run_p95_us": 230.13749999999993,
+      "median_run_p99_us": 311.6715799999999,
+      "mean_ops_per_second": 5132.553543239152
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "sqlite_cache_get_query_usage_enabled",
+      "session_affinity": true,
+      "workload": "sequential",
+      "runs": [
+        {
+          "mean_us": 58.32667333333333,
+          "p50_us": 55.0,
+          "p95_us": 82.00414999999998,
+          "p99_us": 106.37790999999993,
+          "ops_per_second": 17107.745495154253,
+          "elapsed_seconds": 0.17535916704218835
+        },
+        {
+          "mean_us": 57.109985,
+          "p50_us": 53.542,
+          "p95_us": 70.04614999999998,
+          "p99_us": 99.91808999999995,
+          "ops_per_second": 17468.439815021535,
+          "elapsed_seconds": 0.1717382909846492
+        },
+        {
+          "mean_us": 57.766279,
+          "p50_us": 54.4165,
+          "p95_us": 72.25209999999998,
+          "p99_us": 112.00749999999982,
+          "ops_per_second": 17273.76354714187,
+          "elapsed_seconds": 0.17367379099596292
+        }
+      ],
+      "median_run_mean_us": 57.766279,
+      "median_run_p50_us": 54.4165,
+      "median_run_p95_us": 72.25209999999998,
+      "median_run_p99_us": 106.37790999999993,
+      "mean_ops_per_second": 17283.31628577255
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "execute_upsert",
+      "session_affinity": true,
+      "workload": "sequential_write",
+      "runs": [
+        {
+          "mean_us": 83.106387,
+          "p50_us": 83.667,
+          "p95_us": 95.00209999999998,
+          "p99_us": 117.20966999999996,
+          "ops_per_second": 12016.21386241092,
+          "elapsed_seconds": 0.24966266698902473
+        },
+        {
+          "mean_us": 83.55916633333334,
+          "p50_us": 83.75,
+          "p95_us": 96.25204999999998,
+          "p99_us": 133.87708999999995,
+          "ops_per_second": 11951.155627891418,
+          "elapsed_seconds": 0.25102174998028204
+        },
+        {
+          "mean_us": 82.13080966666666,
+          "p50_us": 79.417,
+          "p95_us": 93.16904999999998,
+          "p99_us": 156.1832399999996,
+          "ops_per_second": 12157.90275556185,
+          "elapsed_seconds": 0.2467530840076506
+        }
+      ],
+      "median_run_mean_us": 83.106387,
+      "median_run_p50_us": 83.667,
+      "median_run_p95_us": 95.00209999999998,
+      "median_run_p99_us": 133.87708999999995,
+      "mean_ops_per_second": 12041.757415288062
+    },
+    {
+      "backend": "rapsqlite",
+      "variant": "execute_many_upsert_16",
+      "session_affinity": true,
+      "workload": "sequential_write",
+      "runs": [
+        {
+          "mean_us": 189.191219,
+          "p50_us": 189.083,
+          "p95_us": 217.29104999999998,
+          "p99_us": 295.88999999999965,
+          "ops_per_second": 5282.120242828587,
+          "elapsed_seconds": 0.567953750025481
+        },
+        {
+          "mean_us": 190.56411966666667,
+          "p50_us": 189.83350000000002,
+          "p95_us": 219.04104999999998,
+          "p99_us": 300.23773999999935,
+          "ops_per_second": 5243.920599562442,
+          "elapsed_seconds": 0.5720910420059226
+        },
+        {
+          "mean_us": 189.24841733333332,
+          "p50_us": 189.792,
+          "p95_us": 218.71009999999998,
+          "p99_us": 282.7321699999994,
+          "ops_per_second": 5280.564069944246,
+          "elapsed_seconds": 0.5681211249902844
+        }
+      ],
+      "median_run_mean_us": 189.24841733333332,
+      "median_run_p50_us": 189.792,
+      "median_run_p95_us": 218.71009999999998,
+      "median_run_p99_us": 295.88999999999965,
+      "mean_ops_per_second": 5268.868304111758
+    }
+  ]
+}

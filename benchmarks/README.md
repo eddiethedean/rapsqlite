@@ -39,16 +39,35 @@ not represented as a client cleanup call in the matched latency rows.
 low-latency cache path: `fetch_one`, `fetch_scalar`, `raw_fetch_scalar`, the
 `SQLiteCache` API, and reusable `PreparedQuery` objects in normal and raw/BLOB
 modes. It compares TTL-aware reads and writes, reports session-affinity on/off,
-and includes `redis.asyncio` when a local Redis server is reachable. Sequential
-latency and concurrent throughput/event-loop delay are separate results.
+and measures query-usage tracking, trace-callback, and active-transaction
+variants. It includes `redis.asyncio` when a local Redis server is reachable.
+Sequential latency and concurrent throughput/event-loop delay are separate
+results. Both workloads repeat three times by default. Concurrent latency percentiles are the
+median of per-run percentiles; throughput is total operations divided by total
+elapsed time. Redis uses a unique temporary key that is deleted afterward.
+The query-usage diagnostic variants compare tracking off/on for scalar reads,
+single upserts, 16-statement `execute_many()` calls, and `SQLiteCache.get()`;
+the supplementary raw measurements are in
+[`phase5_query_usage_results.json`](phase5_query_usage_results.json).
 
 ```bash
 python benchmarks/phase5_hotpath.py --ops 20000 \
-  --json-out benchmarks/phase5_hotpath_results.json
+  --json-out phase5_hotpath_local.json
 ```
 
-Run all backends on the same machine and compare the same workload shape. A
-raw SQLite baseline is not a substitute for measuring the rapsqlite client API.
+Use a separate output filename for ad hoc runs; the checked-in
+`phase5_hotpath_results.json` is the combined baseline/candidate artifact.
+
+For a side-by-side release comparison, build/install the `v0.4.0` wheel into an
+isolated site directory, then set `RAPSQLITE_BENCHMARK_PACKAGE_PATH` to that
+directory and pass `--legacy`. Run the candidate without `--legacy` in its
+release-build environment. The checked-in
+[`phase5_hotpath_results.md`](phase5_hotpath_results.md) describes the recorded
+same-machine comparison, and [`phase5_hotpath_results.json`](phase5_hotpath_results.json)
+contains all raw runs. These are diagnostic measurements, not CI thresholds or
+universal speedup claims. Redis pipelining is not enabled, and synchronous
+`sqlite3` results exclude async-client overhead. A raw SQLite baseline is not a
+substitute for measuring the rapsqlite client API.
 
 ## Benchmark Suite
 
@@ -66,20 +85,27 @@ All benchmarks use the **same structure for both packages** (no special-casing);
 
 ## Expected Results
 
-### Key Advantages of rapsqlite
+### Design characteristics
 
-- **True async**: All operations execute outside the Python GIL
-- **Better concurrency**: No event loop stalls under load
-- **Connection pooling**: Efficient connection reuse
-- **Prepared statement caching**: Automatic query optimization
+- **Async execution**: The normal SQLx path is scheduled through Tokio; the
+  narrow raw SQLite path has separate blocking/cancellation constraints.
+- **Connection pooling**: Concurrent behavior depends on pool size, session
+  affinity, SQLite locks, and the workload shape.
+- **Prepared statements**: SQLx caches statements per physical connection for
+  identical SQL text; query-usage normalization does not rewrite cache keys.
 
 ### Performance Characteristics
 
-- **Latency**: rapsqlite typically shows similar or better latency than aiosqlite
-- **Throughput**: Better throughput under concurrent load due to GIL independence
-- **Scalability**: Better performance scaling with concurrent operations
+- Latency and throughput depend on the actual client API, pool settings, and
+  concurrency. Use the repeated Phase 0.5 benchmark above for the latest
+  release-build cache-path sample rather than assuming a general advantage.
 
 ## Benchmark Results
+
+The results below are historical measurements from rapsqlite 0.3.1. Use the
+Phase 0.5 report above for current release-build cache-path measurements.
+The observations that follow describe those recorded benchmark runs only and
+are not general performance guarantees for later releases or other workloads.
 
 **Test Date**: 2026-01-29  
 **System**: macOS (Darwin arm64)  

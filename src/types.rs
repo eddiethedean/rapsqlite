@@ -3,7 +3,8 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyFloat, PyInt, PyString, PyTuple};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 // Type aliases for complex types to reduce clippy warnings
@@ -33,7 +34,7 @@ impl AdapterRegistry {
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed)
+        self.enabled.load(Ordering::Acquire)
     }
 
     pub(crate) fn set_enabled(&self, enabled: bool) {
@@ -64,7 +65,7 @@ impl ConverterRegistry {
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed)
+        self.enabled.load(Ordering::Acquire)
     }
 
     pub(crate) fn set_enabled(&self, enabled: bool) {
@@ -76,6 +77,47 @@ pub(crate) type Adapters = Arc<AdapterRegistry>;
 pub(crate) type Converters = Arc<ConverterRegistry>;
 pub(crate) type ProgressHandler = Arc<StdMutex<Option<(i32, Py<PyAny>)>>>;
 
+/// Optional trace callback with a lock-free disabled check for query hot paths.
+pub(crate) struct TraceCallbackState {
+    callback: StdMutex<Option<Py<PyAny>>>,
+    enabled: AtomicBool,
+}
+
+impl TraceCallbackState {
+    pub(crate) fn new() -> Self {
+        Self {
+            callback: StdMutex::new(None),
+            enabled: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn replace(&self, callback: Option<Py<PyAny>>) {
+        let enabled = callback.is_some();
+        *self.callback.lock().unwrap() = callback;
+        self.enabled.store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn clone_callback(&self) -> Option<Py<PyAny>> {
+        if !self.is_enabled() {
+            return None;
+        }
+        #[allow(deprecated)]
+        Python::attach(|py| {
+            self.callback
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|callback| callback.clone_ref(py))
+        })
+    }
+}
+
+pub(crate) type TraceCallback = Arc<TraceCallbackState>;
+
 /// Max adapter chain depth to avoid infinite loops when adapters return adapted types.
 const MAX_ADAPTER_DEPTH: usize = 10;
 
@@ -86,6 +128,90 @@ pub(crate) enum TransactionState {
     /// A transaction is in the process of starting (connection is being acquired / BEGIN pending).
     Starting,
     Active,
+}
+
+/// Async transaction state with an atomic routing summary. Read-only checks can
+/// avoid taking the Tokio mutex when no transaction is active or starting.
+pub(crate) struct TransactionStateTracker {
+    state: tokio::sync::Mutex<TransactionState>,
+    routing_active: AtomicBool,
+    state_lockers: AtomicUsize,
+}
+
+pub(crate) struct TransactionStateGuard<'a> {
+    guard: tokio::sync::MutexGuard<'a, TransactionState>,
+    routing_active: &'a AtomicBool,
+    _reservation: TransactionStateReservation<'a>,
+}
+
+struct TransactionStateReservation<'a>(&'a AtomicUsize);
+
+impl Drop for TransactionStateReservation<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl TransactionStateTracker {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(TransactionState::None),
+            routing_active: AtomicBool::new(false),
+            state_lockers: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) async fn lock(&self) -> TransactionStateGuard<'_> {
+        self.state_lockers.fetch_add(1, Ordering::AcqRel);
+        let reservation = TransactionStateReservation(&self.state_lockers);
+        TransactionStateGuard {
+            guard: self.state.lock().await,
+            routing_active: &self.routing_active,
+            _reservation: reservation,
+        }
+    }
+
+    pub(crate) async fn is_exact_active(&self) -> bool {
+        if !self.routing_active.load(Ordering::Acquire)
+            && self.state_lockers.load(Ordering::Acquire) == 0
+        {
+            return false;
+        }
+        *self.lock().await == TransactionState::Active
+    }
+
+    pub(crate) async fn is_routing_active(&self) -> bool {
+        if !self.routing_active.load(Ordering::Acquire)
+            && self.state_lockers.load(Ordering::Acquire) == 0
+        {
+            return false;
+        }
+        self.lock().await.is_active()
+    }
+}
+
+impl Deref for TransactionStateGuard<'_> {
+    type Target = TransactionState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for TransactionStateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Publish the conservative state before exposing mutable access so a
+        // concurrent fast check cannot miss an in-progress state transition.
+        self.routing_active.store(true, Ordering::Release);
+        &mut self.guard
+    }
+}
+
+impl Drop for TransactionStateGuard<'_> {
+    fn drop(&mut self) {
+        self.routing_active
+            .store(self.guard.is_active(), Ordering::Release);
+    }
 }
 
 impl TransactionState {

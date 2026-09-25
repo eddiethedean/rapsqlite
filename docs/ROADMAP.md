@@ -94,16 +94,27 @@ Out of scope for 0.5:
 
 ### 0.5 implementation result
 
-The planned implementation work is complete. The release candidate includes:
+The planned implementation work is complete and the release build is being
+validated. Performance is workload-dependent: the same-machine benchmark shows
+modest read and write improvements in its tested pattern, but is not a promise
+of a universal win over Redis or a substitute for deployment-specific testing.
+The release candidate includes:
 
-- ✅ A release-build hot-path benchmark covering generic rows, scalar/BLOB paths, prepared-query dispatch, session affinity, synchronous `sqlite3`, and optional local `redis.asyncio`; one same-machine run is recorded in [`benchmarks/phase5_hotpath_results.md`](../benchmarks/phase5_hotpath_results.md)
-- ✅ One-time PRAGMA application per physical connection, opt-in query-usage tracking, atomic callback/feature presence checks, and fast common parameter conversion
+- ✅ A release-build hot-path benchmark covering generic rows, scalar/BLOB paths, prepared-query dispatch, session affinity, synchronous `sqlite3`, and optional local `redis.asyncio`; repeated same-machine results and raw run data are recorded in [`benchmarks/phase5_hotpath_results.md`](../benchmarks/phase5_hotpath_results.md) and [`benchmarks/phase5_hotpath_results.json`](../benchmarks/phase5_hotpath_results.json)
+- ✅ One-time PRAGMA application per physical connection; opt-in query-usage tracking; atomic no-op checks for callbacks, trace hooks, init hooks, converters, and transaction routing; one-time immutable per-connection pool handles; and fast common parameter conversion
+- ✅ Bounded query diagnostics with a dropped-execution counter and an empty raw-statement-cache cleanup path that avoids taking its mutex during ordinary non-affinity operations
 - ✅ Scalar and BLOB fetch APIs with documented behavior for misses, `NULL`, transactions, callbacks, and unsupported row factories
 - ✅ Opt-in session affinity with pool-capacity, transaction, close/reopen, and shared-memory behavior covered by tests
 - ✅ Connection-bound prepared query objects for repeated normal and raw scalar/BLOB operations
 - ✅ An opt-in raw scalar SQLite path with transaction routing, error mapping, callback restrictions, and `Connection.interrupt()` cancellation support
 - ✅ Performance guidance and API documentation that distinguish measured local results from unmatched published Redis figures
 - ✅ Focused Phase 0.5 tests and full compatibility validation
+
+The benchmark did not show a uniform advantage for every specialized API:
+`PreparedQuery` and the raw SQLite path remain opt-in, and the raw path was
+slower for the measured single-key BLOB lookup. Session affinity also showed
+small, workload-dependent differences. These results are documented without a
+blanket speedup claim.
 
 ### Delivery order
 
@@ -113,7 +124,7 @@ The issues are intentionally ordered by risk and dependency. The first workstrea
 
 - Add a release-build benchmark harness covering the current generic path, synchronous `sqlite3`, each optimized candidate, and local `redis.asyncio` where available.
 - Separate individual-call latency from aggregate throughput. Run sequential calls and concurrency levels such as 1, 8, and 32.
-- Record p50/p95/p99 latency, throughput, event-loop delay, operation errors, and peak process RSS for representative key/value sizes; cancellation correctness remains covered by focused tests.
+- Record p50/p95/p99 latency, throughput, event-loop delay, operation errors, and peak process RSS for representative key/value sizes; compare idle, trace-enabled, query-tracking-enabled, and active-transaction paths; cancellation correctness remains covered by focused tests.
 - Keep benchmark inputs and output stable enough for repeatable local and release-validation comparisons. Automated performance thresholds remain deferred until CI hardware and variance are controlled.
 
 #### 0.5.2 — Remove unconditional hot-path overhead ✅
@@ -155,9 +166,9 @@ Start with one prepared statement and zero/one scalar result. Reuse existing han
 
 - Every completed workstream has focused correctness tests, documentation, and before/after release-build measurements.
 - The default compatibility path preserves callback, adapter, converter, row-factory, transaction, cancellation, connection-close, and error semantics.
-- No optimization causes a statistically meaningful regression in representative one-shot DB-API operations or existing CI tests.
+- Repeated release-build comparisons cover the default path at concurrency 1, 8, and 32, report all errors and latency percentiles, and do not promote opt-in paths based on a single apparent win. This local run is not a substitute for controlled CI performance thresholds.
 - Benchmarks report p50/p95/p99 latency, throughput, event-loop delay, lock/busy errors, cancellation behavior, and memory use at concurrency 1, 8, and 32.
-- The benchmark report separates SQLite execution, pool/session acquisition, Python/Rust conversion, and async scheduling overhead where measurable.
+- The benchmark report compares synchronous `sqlite3`, end-to-end rapsqlite paths, optional session affinity, and event-loop delay so the major sources of overhead are visible where the harness can isolate them.
 - Opt-in paths document their resource and behavioral trade-offs, including retained pool capacity and raw-handle restrictions.
 - Results are compared on the same machine and payloads for current rapsqlite, optimized rapsqlite, synchronous `sqlite3`, and local Redis; unmatched published figures are not used as speedup claims.
 - 0.6 work remains API-compatible with the 0.5 foundation and is not pulled into this release merely to improve batch throughput.
