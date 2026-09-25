@@ -18,10 +18,11 @@ use sqlx::Sqlite;
 
 use crate::pool::{
     acquire_with_pragmas, ensure_callback_connection, get_or_create_pool, has_callbacks,
-    PoolConnectionSlot, PoolSlot, TakenConnectionGuard,
+    PoolConnectionSlot, PoolHandle, TakenConnectionGuard,
 };
 use crate::types::{
-    ProgressHandler, TransactionState, UserAggregates, UserCollations, UserFunctions,
+    ProgressHandler, TraceCallback, TransactionStateTracker, UserAggregates, UserCollations,
+    UserFunctions,
 };
 use crate::utils::cstr_from_c_char_ptr;
 use crate::{InternalError, OperationalError};
@@ -176,12 +177,12 @@ pub(crate) async fn run_backup_loop(params: BackupParams<'_>) -> Result<(), PyEr
 pub(crate) struct BackupSourceContext {
     pub closed: Arc<StdMutex<bool>>,
     pub path: String,
-    pub pool: Arc<Mutex<PoolSlot>>,
+    pub pool: Arc<PoolHandle>,
     pub pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub pool_size: Arc<StdMutex<Option<usize>>>,
     pub connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
-    pub transaction_state: Arc<Mutex<TransactionState>>,
+    pub transaction_state: Arc<TransactionStateTracker>,
     pub transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_operation_lock: Arc<Mutex<()>>,
@@ -189,7 +190,7 @@ pub(crate) struct BackupSourceContext {
     pub user_functions: UserFunctions,
     pub user_aggregates: UserAggregates,
     pub user_collations: UserCollations,
-    pub trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub trace_callback: TraceCallback,
     pub authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub progress_handler: ProgressHandler,
 }
@@ -197,12 +198,12 @@ pub(crate) struct BackupSourceContext {
 /// Context for the target connection when it is a rapsqlite Connection.
 pub(crate) struct BackupTargetRapsqliteContext {
     pub path: String,
-    pub pool: Arc<Mutex<PoolSlot>>,
+    pub pool: Arc<PoolHandle>,
     pub pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub pool_size: Arc<StdMutex<Option<usize>>>,
     pub connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
-    pub transaction_state: Arc<Mutex<TransactionState>>,
+    pub transaction_state: Arc<TransactionStateTracker>,
     pub transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_operation_lock: Arc<Mutex<()>>,
@@ -210,7 +211,7 @@ pub(crate) struct BackupTargetRapsqliteContext {
     pub user_functions: UserFunctions,
     pub user_aggregates: UserAggregates,
     pub user_collations: UserCollations,
-    pub trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub trace_callback: TraceCallback,
     pub authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub progress_handler: ProgressHandler,
 }

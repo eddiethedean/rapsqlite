@@ -15,38 +15,39 @@ use crate::batch::{fetch_scalar_raw_core, RawScalar};
 use crate::errors::{map_sqlite_error_from_msg, map_sqlx_error_with_visibility};
 use crate::pool::{
     callbacks_enabled, execute_init_hook_if_needed_fast, get_or_create_pool,
-    lock_session_connection, PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
+    lock_session_connection, PoolConnectionSlot, PoolHandle, SessionConnectionSlot,
 };
-use crate::types::SqliteParam;
+use crate::types::{SqliteParam, TraceCallback};
+use crate::utils::QueryUsageStats;
 use crate::{OperationalError, ProgrammingError, ValueError};
 
 use super::{
     clear_active_handle, discard_callback_connection, ensure_not_closed, invoke_trace_callback,
     rebind_callbacks, CallbackContext, Connection,
 };
-use crate::types::TransactionState;
+use crate::types::TransactionStateTracker;
 
 pub(super) struct CacheExecutionContext {
     path: String,
-    pool: Arc<Mutex<PoolSlot>>,
+    pool: Arc<PoolHandle>,
     pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
-    transaction_state: Arc<Mutex<TransactionState>>,
+    transaction_state: Arc<TransactionStateTracker>,
     transaction_connection: Arc<Mutex<crate::pool::PoolConnectionSlot>>,
     callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     callback_operation_lock: Arc<Mutex<()>>,
     callback_context: CallbackContext,
     session_connection: SessionConnectionSlot,
     callback_features: Arc<AtomicU8>,
-    trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    trace_callback: TraceCallback,
     init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
-    init_hook_called: Arc<StdMutex<bool>>,
+    init_hook_called: Arc<AtomicBool>,
     init_hook_present: Arc<AtomicBool>,
     closed: Arc<StdMutex<bool>>,
     include_query_in_errors: bool,
-    query_cache: Arc<StdMutex<std::collections::HashMap<String, u64>>>,
+    query_usage_stats: Arc<StdMutex<QueryUsageStats>>,
     query_usage_enabled: Arc<AtomicBool>,
 }
 
@@ -72,7 +73,7 @@ impl CacheExecutionContext {
             init_hook_present: Arc::clone(&connection.init_hook_present),
             closed: Arc::clone(&connection.closed),
             include_query_in_errors: *connection.include_query_in_errors.lock().unwrap(),
-            query_cache: Arc::clone(&connection.query_cache),
+            query_usage_stats: Arc::clone(&connection.query_usage_stats),
             query_usage_enabled: Arc::clone(&connection.query_usage_enabled),
         }
     }
@@ -248,7 +249,7 @@ pub(super) fn start_cache_operation(
     for query in operation.queries() {
         crate::utils::track_query_usage_if_enabled(
             &context.query_usage_enabled,
-            &context.query_cache,
+            &context.query_usage_stats,
             query,
         );
     }
@@ -303,7 +304,7 @@ async fn execute_cache_operation(
         invoke_trace_callback(&context.trace_callback, query);
     }
 
-    let in_transaction = context.transaction_state.lock().await.is_active();
+    let in_transaction = context.transaction_state.is_routing_active().await;
     if !in_transaction {
         get_or_create_pool(
             &context.path,
@@ -317,8 +318,8 @@ async fn execute_cache_operation(
     }
     execute_init_hook_if_needed_fast(
         &context.init_hook,
-        &context.init_hook_called,
         &context.init_hook_present,
+        &context.init_hook_called,
         connection_self,
     )
     .await?;
@@ -534,8 +535,9 @@ async fn fetch_blob_raw(
     let database = handle.as_raw_handle().as_ptr();
     super::callbacks::register_active_handle(active_handle_slot, database as usize);
     let parameters = [SqliteParam::Text(key.to_owned()), SqliteParam::Real(now)];
-    let result =
-        tokio::task::block_in_place(|| fetch_scalar_raw_core(database, query, &parameters, true));
+    let result = tokio::task::block_in_place(|| {
+        fetch_scalar_raw_core(database, query, &parameters, true, None)
+    });
     clear_active_handle(active_handle_slot);
     let value = result.map_err(|(code, message)| {
         map_sqlite_error_from_msg(path, query, code, &message, include_query_in_errors)

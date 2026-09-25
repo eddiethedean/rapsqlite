@@ -14,10 +14,11 @@ use crate::connection::{
 use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{
-    callbacks_enabled, lock_session_connection, PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
+    callbacks_enabled, lock_session_connection, PoolConnectionSlot, PoolHandle,
+    SessionConnectionSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
-use crate::types::{Adapters, Converters, SqliteParam, TransactionState};
+use crate::types::{Adapters, Converters, SqliteParam, TransactionStateTracker};
 use crate::utils::returns_result_rows;
 use crate::{Connection, OperationalError, ProgrammingError};
 
@@ -32,14 +33,14 @@ struct CursorFetchContext {
     processed_query: Option<String>,
     processed_params: Option<Vec<SqliteParam>>,
     path: String,
-    pool: Arc<Mutex<PoolSlot>>,
+    pool: Arc<PoolHandle>,
     pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pool_size: Arc<StdMutex<Option<usize>>>,
     connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     row_factory: Arc<StdMutex<Option<Py<PyAny>>>>,
     text_factory: Arc<StdMutex<Option<Py<PyAny>>>>,
-    transaction_state: Arc<Mutex<TransactionState>>,
+    transaction_state: Arc<TransactionStateTracker>,
     transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     session_connection: SessionConnectionSlot,
     callback_connection: Arc<Mutex<PoolConnectionSlot>>,
@@ -102,10 +103,7 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
             })?
         };
 
-    let in_transaction = {
-        let g = ctx.transaction_state.lock().await;
-        g.is_active()
-    };
+    let in_transaction = ctx.transaction_state.is_routing_active().await;
     let has_callbacks_flag = callbacks_enabled(&ctx.callback_context.callback_features);
     let _callback_operation_guard = if has_callbacks_flag {
         Some(ctx.callback_context.callback_operation_lock.lock().await)
@@ -228,7 +226,7 @@ pub(crate) struct Cursor {
     pub(crate) processed_query: Option<String>,
     pub(crate) processed_params: Option<Vec<SqliteParam>>,
     pub(crate) connection_path: String, // Store path for direct pool access
-    pub(crate) connection_pool: Arc<Mutex<PoolSlot>>, // Reference to connection's pool
+    pub(crate) connection_pool: Arc<PoolHandle>, // Reference to connection's pool
     pub(crate) connection_pragmas: Arc<StdMutex<Vec<(String, String)>>>, // Reference to connection's pragmas
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
@@ -236,7 +234,7 @@ pub(crate) struct Cursor {
     pub(crate) row_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's row_factory at cursor creation
     pub(crate) text_factory: Arc<StdMutex<Option<Py<PyAny>>>>, // Connection's text_factory
     // Transaction and callback state for proper connection priority
-    pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
+    pub(crate) transaction_state: Arc<TransactionStateTracker>,
     pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) session_connection: SessionConnectionSlot,
     pub(crate) callback_connection: Arc<Mutex<PoolConnectionSlot>>,
@@ -761,10 +759,7 @@ impl Cursor {
                 }
 
                 // Check transaction state and callback flags
-                let in_transaction = {
-                    let g = transaction_state.lock().await;
-                    g.is_active()
-                };
+                let in_transaction = transaction_state.is_routing_active().await;
 
                 let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                 let _callback_operation_guard = if has_callbacks_flag {

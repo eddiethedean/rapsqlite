@@ -39,7 +39,7 @@ Pool Size Guidelines
 Single connection vs larger pool
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* **Single connection (pool_size=1, default)**: Use when you have one logical worker (e.g. one async task doing DB work at a time), or when concurrency is low. Session-connection reuse means one connection handles many sequential queries efficiently.
+* **Single connection (pool_size=1, default)**: Use when you have one logical worker (e.g. one async task doing DB work at a time), or when concurrency is low. Opt-in session affinity can retain the physical connection across sequential operations.
 * **Larger pool (2–5 or more)**: Use when many concurrent coroutines perform database operations at the same time (e.g. many concurrent HTTP requests each hitting the DB). Increase ``pool_size`` before the first operation; it cannot be changed after the pool is created.
 
 Prepared Statement Caching
@@ -49,10 +49,28 @@ Prepared Statement Caching
 
 * **Automatic caching**: Prepared statements are cached automatically - no configuration needed
 * **Per-connection cache**: Each connection in the pool maintains its own cache
-* **Query normalization**: rapsqlite normalizes queries (removes extra whitespace) to maximize cache hits
 * **Performance benefit**: Repeated queries with the same structure reuse prepared statements
 
-To maximize cache hits:
+The cache key is the SQL text passed to SQLx. Query-usage normalization is a
+separate, opt-in diagnostic feature: it does not rewrite SQL or change SQLx's
+cache key. Keep the SQL text identical across repeated calls to reuse the same
+prepared statement; whitespace-only variants are distinct cache entries.
+
+No-op checks on repeated operations
+-----------------------------------
+
+The normal query path uses atomic summaries to avoid acquiring the transaction
+state mutex when no transaction is active, and a per-connection pool handle is
+initialized once and reused without a pool-slot mutex lookup. Unconfigured
+trace hooks, initialization hooks, callbacks, adapters, and converters also
+take fast paths; configuring these features preserves their normal behavior
+but may add work to each operation. Query-usage diagnostics remain opt-in and
+bounded. The release benchmark compares idle reads with trace-enabled,
+query-tracking-enabled, and active-transaction reads. See
+``benchmarks/phase5_hotpath_results.md`` in the repository for the measured
+sample and its limitations.
+
+To make repeated calls reuse the same statement:
 
 .. code-block:: python
 
@@ -61,14 +79,13 @@ To maximize cache hits:
        await conn.fetch_all("SELECT * FROM users WHERE id = ?", [user_id])
    # sqlx caches the prepared statement after first execution
 
-   # Also good: Query normalization handles whitespace differences
    await conn.execute("INSERT INTO test (value) VALUES (?)", ["a"])
    await conn.execute("INSERT  INTO  test  (value)  VALUES  (?)", ["b"])
-   # Both queries are normalized and benefit from the same prepared statement
+   # Each exact SQL string is cached separately
 
 Best practices:
 
-* Use consistent query formatting (normalization happens automatically)
+* Use consistent query formatting
 * Reuse the same query strings with different parameters
 * Keep connections alive for repeated queries (connection pooling helps)
 * Use parameterized queries (required for prepared statements)
@@ -76,11 +93,12 @@ Best practices:
 
 Performance impact:
 
-Prepared statement caching provides significant performance benefits for repeated queries:
+Prepared statement caching avoids preparing the same exact SQL text again on a
+given physical connection. The benefit depends on the workload and should be
+measured through the client API:
 
 * First execution: Statement is prepared and cached
-* Subsequent executions: Reuses cached prepared statement (much faster)
-* Typical improvement: 2-5x faster for repeated queries vs. unique queries
+* Subsequent executions: Reuses the cached prepared statement
 
 PRAGMA Optimization
 -------------------
@@ -174,6 +192,14 @@ It is intended for trusted, parameterized cache lookups, not as a replacement
 for the general query API. A raw operation registers its active SQLite handle
 so ``await conn.interrupt()`` can stop a long-running raw statement; ordinary
 task cancellation does not magically interrupt synchronous SQLite execution.
+With ``session_affinity=True``, raw statements are reused on the retained
+physical connection (up to 64 statements, with SQL text capped at 2,048 bytes
+per entry). The cache is cleared when that session is released, including
+connection close or after session affinity has been disabled and a subsequent
+operation completes. The affinity setter is synchronous, so the retained
+connection may remain until that next operation or ``close()``. Without session
+affinity, raw calls prepare and finalize on each acquired handle; statements
+inside explicit transactions are also prepared per operation.
 
 .. code-block:: python
 
@@ -182,9 +208,11 @@ task cancellation does not magically interrupt synchronous SQLite execution.
    )
 
 ``prepare()`` creates a reusable connection-bound operation object that keeps
-the SQL and mode selection out of a hot loop. Normal prepared operations still
-use SQLx's per-connection statement cache; raw operations retain the narrow
-raw contract and re-prepare through the current physical handle.
+the SQL and mode selection out of a hot loop and caches the bound connection
+methods. Normal prepared operations use SQLx's per-connection statement cache;
+raw prepared operations use the retained-handle statement cache when session
+affinity is enabled, subject to the same restrictions and limits as
+``raw_fetch_scalar()``.
 
 .. code-block:: python
 
@@ -211,6 +239,17 @@ Query-usage analytics are disabled by default. Set
 ``conn.query_usage_tracking = True`` only while diagnosing workload shape; the
 normal path then avoids SQL normalization and the analytics mutex. This
 analytics counter is separate from SQLx's internal prepared-statement cache.
+When enabled, it retains at most 1,024 distinct normalized queries and at most
+2,048 UTF-8 bytes per query. Larger queries and new distinct queries after the
+limit are omitted, while already-recorded queries continue accumulating counts.
+Use ``conn.query_usage_dropped()`` to see how many executions were omitted;
+``conn.clear_query_usage()`` clears both counts and the omitted-execution count.
+These limits bound retained SQL text (to roughly 2 MiB plus map/count overhead),
+not the temporary normalization allocation for one very large query. Treat the
+statistics as diagnostic samples when either limit is reached, not as complete
+workload accounting. For ``execute_many()``, each parameter set contributes
+one execution to the normalized query's count; the batch is normalized and
+recorded once rather than locking the diagnostics map for every item.
 
 Use ``benchmarks/phase5_hotpath.py`` to compare the actual client APIs. Report
 sequential latency (including p50/p95/p99), concurrent throughput, event-loop

@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::Row;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
@@ -25,21 +25,15 @@ use crate::conversion::{
 use crate::pool::{
     acquire_with_pragmas, callbacks_enabled, ensure_callback_connection,
     execute_init_hook_if_needed, get_or_create_pool, lock_session_connection,
-    release_session_connection, PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
+    release_session_connection, PoolConnectionSlot, PoolHandle, SessionConnectionSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
-use crate::types::{SqliteParam, TransactionState};
+use crate::types::{SqliteParam, TraceCallback, TransactionState, TransactionStateTracker};
 use crate::utils::{is_begin_query, is_commit_or_rollback_query, is_dml_query};
 use crate::{map_sqlx_error, Connection, Cursor, OperationalError};
 
-fn maybe_trace_sql(trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>, sql: &str) {
-    let cb = {
-        let g = trace_callback.lock().unwrap();
-        g.as_ref().map(|c| {
-            #[allow(deprecated)]
-            Python::attach(|py| c.clone_ref(py))
-        })
-    };
+fn maybe_trace_sql(trace_callback: &TraceCallback, sql: &str) {
+    let cb = trace_callback.clone_callback();
     if let Some(cb) = cb {
         #[allow(deprecated)]
         Python::attach(|py| {
@@ -89,6 +83,7 @@ impl ExecuteContextManager {
             let trace_callback = Arc::clone(&state.trace_callback);
             let init_hook = Arc::clone(&state.init_hook);
             let init_hook_called = Arc::clone(&state.init_hook_called);
+            let init_hook_present = Arc::clone(&state.init_hook_present);
             let last_rowid = Arc::clone(&state.last_rowid);
             let last_changes = Arc::clone(&state.last_changes);
             let connection = slf.borrow(py).connection.clone_ref(py);
@@ -119,18 +114,12 @@ impl ExecuteContextManager {
                 if !is_select {
                     // Check if we're currently executing init_hook FIRST (before checking transaction state)
                     // If we're inside init_hook, we should use pool connection, not transaction connection
-                    let hook_already_called = {
-                        let guard = init_hook_called.lock().unwrap();
-                        *guard
-                    };
+                    let hook_already_called = init_hook_called.load(Ordering::Acquire);
 
                     // Only check for Active state, not Starting (Starting means transaction is being set up).
                     // When inside init_hook and transaction is Active, use transaction_connection so we don't
                     // try to acquire a second connection from the pool (pool may have size 1).
-                    let in_transaction = {
-                        let g = transaction_state.lock().await;
-                        *g == TransactionState::Active
-                    };
+                    let in_transaction = transaction_state.is_exact_active().await;
 
                     if !in_transaction {
                         get_or_create_pool(
@@ -146,15 +135,18 @@ impl ExecuteContextManager {
 
                     // Only call init_hook if not already called (avoid re-entry during init_hook execution)
                     // This prevents deadlocks when init_hook calls conn.execute() which triggers __aenter__
-                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
+                    execute_init_hook_if_needed(
+                        &init_hook,
+                        &init_hook_present,
+                        &init_hook_called,
+                        connection,
+                    )
+                    .await?;
 
                     // Re-check transaction state after init_hook (state may have changed during hook execution).
                     // When inside init_hook and transaction is Active, use transaction_connection so init_hook's
                     // conn.execute() runs on the same connection (avoids pool timeout when pool size is 1).
-                    let in_transaction_after_hook = {
-                        let g = transaction_state.lock().await;
-                        *g == TransactionState::Active
-                    };
+                    let in_transaction_after_hook = transaction_state.is_exact_active().await;
 
                     // Python-level trace callback (avoid sqlite3_trace_v2, which can invoke
                     // callbacks on non-Python threads).
@@ -579,18 +571,12 @@ impl ExecuteContextManager {
                     // For SELECT queries, ensure pool exists for lazy execution
                     // Only check for Active state, not Starting (Starting means transaction is being set up,
                     // and init_hook may need to execute queries using pool connection)
-                    let in_transaction = {
-                        let g = transaction_state.lock().await;
-                        *g == TransactionState::Active
-                    };
+                    let in_transaction = transaction_state.is_exact_active().await;
 
                     // Check if init_hook is already being executed (to avoid deadlock)
                     // If init_hook is already called, we're likely inside an init_hook execution
                     // In this case, we should skip pool operations to avoid deadlock with begin()/transaction()
-                    let hook_already_called = {
-                        let guard = init_hook_called.lock().unwrap();
-                        *guard
-                    };
+                    let hook_already_called = init_hook_called.load(Ordering::Acquire);
 
                     // Only get/create pool if not in transaction and hook not already called
                     // If hook is already called, we're inside init_hook execution and should
@@ -610,7 +596,13 @@ impl ExecuteContextManager {
                     // Only call init_hook if not already called (avoid re-entry during init_hook execution)
                     // This prevents deadlocks when init_hook calls conn.execute() which triggers __aenter__
                     // Note: If hook is already called, we skip calling it again (returns early)
-                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection).await?;
+                    execute_init_hook_if_needed(
+                        &init_hook,
+                        &init_hook_present,
+                        &init_hook_called,
+                        connection,
+                    )
+                    .await?;
 
                     // If hook was already called and we're not in transaction, we need to ensure pool exists
                     // for the actual query execution (hook_already_called means we're inside hook execution,
@@ -630,10 +622,7 @@ impl ExecuteContextManager {
 
                     // Eager execution for SELECT: fetch now so "async for row in cursor" works (DBAPI spec).
                     // When inside init_hook and transaction is Active, use transaction_connection (same as non-SELECT).
-                    let in_transaction_after_hook = {
-                        let g = transaction_state.lock().await;
-                        *g == TransactionState::Active
-                    };
+                    let in_transaction_after_hook = transaction_state.is_exact_active().await;
                     let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                     let _callback_operation_guard = if has_callbacks_flag {
                         Some(callback_context.callback_operation_lock.lock().await)
@@ -778,21 +767,22 @@ impl ExecuteContextManager {
 #[pyclass]
 pub(crate) struct TransactionContextManager {
     pub(crate) path: String,
-    pub(crate) pool: Arc<Mutex<PoolSlot>>,
+    pub(crate) pool: Arc<PoolHandle>,
     pub(crate) session_connection: SessionConnectionSlot,
     pub(crate) pragmas: Arc<StdMutex<Vec<(String, String)>>>,
     pub(crate) pool_size: Arc<StdMutex<Option<usize>>>,
     pub(crate) connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub(crate) idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
-    pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
+    pub(crate) transaction_state: Arc<TransactionStateTracker>,
     pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) connection: Py<Connection>,
     pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
-    pub(crate) init_hook_called: Arc<StdMutex<bool>>,       // Track if init_hook has been executed
-    pub(crate) timeout: Arc<StdMutex<f64>>,                 // SQLite busy_timeout in seconds
+    pub(crate) init_hook_called: Arc<AtomicBool>,
+    pub(crate) init_hook_present: Arc<AtomicBool>,
+    pub(crate) timeout: Arc<StdMutex<f64>>, // SQLite busy_timeout in seconds
     pub(crate) isolation_level: Arc<StdMutex<Option<String>>>, // Phase 3.9: None | DEFERRED | IMMEDIATE | EXCLUSIVE
     pub(crate) explicit_transaction: Arc<Mutex<bool>>, // in_transaction() true only when explicit
-    pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
+    pub(crate) trace_callback: TraceCallback,
     pub(crate) callback_context: CallbackContext,
 }
 
@@ -813,6 +803,7 @@ impl TransactionContextManager {
             let connection = slf.borrow(py).connection.clone_ref(py);
             let init_hook = Arc::clone(&slf.borrow(py).init_hook);
             let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
+            let init_hook_present = Arc::clone(&slf.borrow(py).init_hook_present);
             let timeout = Arc::clone(&slf.borrow(py).timeout);
             let isolation_level = Arc::clone(&slf.borrow(py).isolation_level);
             let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
@@ -965,8 +956,13 @@ impl TransactionContextManager {
                     // Run init_hook after transaction is active so hook's conn.execute() uses this connection
                     #[allow(deprecated)]
                     let connection_for_hook = Python::attach(|py| connection.clone_ref(py));
-                    execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook)
-                        .await?;
+                    execute_init_hook_if_needed(
+                        &init_hook,
+                        &init_hook_present,
+                        &init_hook_called,
+                        connection_for_hook,
+                    )
+                    .await?;
                     Ok(connection.into())
                 }
                 .await;
@@ -1050,7 +1046,7 @@ impl TransactionContextManager {
 pub(crate) struct SavepointContextManager {
     pub(crate) path: String,
     pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
-    pub(crate) transaction_state: Arc<Mutex<TransactionState>>,
+    pub(crate) transaction_state: Arc<TransactionStateTracker>,
     pub(crate) name: String,
 }
 
