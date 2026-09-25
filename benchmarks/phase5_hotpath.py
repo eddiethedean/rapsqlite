@@ -240,6 +240,7 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
             "fetch_scalar": lambda: conn.fetch_scalar(
                 READ_SQL, [CACHE_KEY, time.time()]
             ),
+            "fetch_blob": lambda: conn.fetch_blob(READ_SQL, [CACHE_KEY, time.time()]),
             "raw_fetch_scalar": lambda: conn.raw_fetch_scalar(
                 READ_SQL, [CACHE_KEY, time.time()], True
             ),

@@ -1,10 +1,25 @@
 """Tests for the process-local SQLiteCache API."""
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 
 from rapsqlite import SQLiteCache, connect_memory
+
+
+class _TransactionalCacheConnection:
+    """Minimal connection double for transaction-scoped schema setup tests."""
+
+    def __init__(self) -> None:
+        self.initialization_calls = 0
+
+    async def _cache_initialize(self, table_name: str) -> bool:
+        self.initialization_calls += 1
+        return True
+
+    async def _cache_get(self, table_name: str, key: str) -> bytes | None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -32,6 +47,17 @@ async def test_cache_initialization_is_retried_after_transaction_rollback() -> N
         await conn.rollback()
 
         assert await cache.get("rolled-back") is None
+
+
+@pytest.mark.asyncio
+async def test_cache_does_not_repeat_schema_setup_inside_a_transaction() -> None:
+    connection = _TransactionalCacheConnection()
+    cache = SQLiteCache(cast(Any, connection))
+
+    assert await cache.get("first") is None
+    assert await cache.get("second") is None
+
+    assert connection.initialization_calls == 1
 
 
 @pytest.mark.asyncio

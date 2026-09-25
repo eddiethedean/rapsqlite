@@ -4,22 +4,25 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyInt};
 use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::pool::PoolConnection;
+use sqlx::sqlite::SqliteConnection;
 use sqlx::Sqlite;
 use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
-use crate::errors::map_sqlx_error_with_visibility;
+use crate::batch::{fetch_scalar_raw_core, RawScalar};
+use crate::errors::{map_sqlite_error_from_msg, map_sqlx_error_with_visibility};
 use crate::pool::{
     callbacks_enabled, execute_init_hook_if_needed_fast, get_or_create_pool,
     lock_session_connection, PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
 };
-use crate::{OperationalError, ValueError};
+use crate::types::SqliteParam;
+use crate::{OperationalError, ProgrammingError, ValueError};
 
 use super::{
-    discard_callback_connection, ensure_not_closed, invoke_trace_callback, rebind_callbacks,
-    CallbackContext, Connection,
+    clear_active_handle, discard_callback_connection, ensure_not_closed, invoke_trace_callback,
+    rebind_callbacks, CallbackContext, Connection,
 };
 use crate::types::TransactionState;
 
@@ -45,7 +48,6 @@ pub(super) struct CacheExecutionContext {
     include_query_in_errors: bool,
     query_cache: Arc<StdMutex<std::collections::HashMap<String, u64>>>,
     query_usage_enabled: Arc<AtomicBool>,
-    cache_operation_lock: Arc<Mutex<()>>,
 }
 
 impl CacheExecutionContext {
@@ -72,7 +74,6 @@ impl CacheExecutionContext {
             include_query_in_errors: *connection.include_query_in_errors.lock().unwrap(),
             query_cache: Arc::clone(&connection.query_cache),
             query_usage_enabled: Arc::clone(&connection.query_usage_enabled),
-            cache_operation_lock: Arc::clone(&connection.cache_operation_lock),
         }
     }
 }
@@ -319,8 +320,6 @@ async fn execute_cache_operation(
         connection_self,
     )
     .await?;
-
-    let _cache_guard = context.cache_operation_lock.lock().await;
     ensure_not_closed(&context.closed)?;
 
     let has_callbacks = callbacks_enabled(&context.callback_features);
@@ -332,6 +331,13 @@ async fn execute_cache_operation(
     if has_callbacks && !in_transaction {
         rebind_callbacks(context.callback_context.clone()).await?;
     }
+    let raw_handle_slot = if has_callbacks {
+        None
+    } else if in_transaction {
+        Some(Arc::clone(&context.transaction_connection))
+    } else {
+        Some(context.session_connection.raw_slot())
+    };
 
     if in_transaction {
         let mut guard = context.transaction_connection.lock().await;
@@ -344,6 +350,7 @@ async fn execute_cache_operation(
             &context.path,
             context.include_query_in_errors,
             in_transaction,
+            raw_handle_slot.as_ref(),
             &operation,
         )
         .await
@@ -358,6 +365,7 @@ async fn execute_cache_operation(
             &context.path,
             context.include_query_in_errors,
             in_transaction,
+            raw_handle_slot.as_ref(),
             &operation,
         )
         .await;
@@ -384,6 +392,7 @@ async fn execute_cache_operation(
             &context.path,
             context.include_query_in_errors,
             in_transaction,
+            raw_handle_slot.as_ref(),
             &operation,
         )
         .await
@@ -395,6 +404,7 @@ async fn execute_on_connection(
     path: &str,
     include_query_in_errors: bool,
     in_transaction: bool,
+    raw_handle_slot: Option<&Arc<Mutex<PoolConnectionSlot>>>,
     operation: &CacheOperation,
 ) -> PyResult<CacheResult> {
     match operation {
@@ -428,6 +438,19 @@ async fn execute_on_connection(
         }
         CacheOperation::Get { query, key } => {
             let now = unix_time_seconds()?;
+            if let Some(raw_handle_slot) = raw_handle_slot {
+                let value = fetch_blob_raw(
+                    connection,
+                    raw_handle_slot,
+                    path,
+                    query,
+                    key,
+                    now,
+                    include_query_in_errors,
+                )
+                .await?;
+                return Ok(CacheResult::Value(value));
+            }
             let value = sqlx::query_scalar::<_, Vec<u8>>(query)
                 .bind(key.as_str())
                 .bind(now)
@@ -490,6 +513,37 @@ async fn execute_on_connection(
                 })?;
             Ok(CacheResult::DeletedCount(result.rows_affected()))
         }
+    }
+}
+
+async fn fetch_blob_raw(
+    connection: &mut PoolConnection<Sqlite>,
+    active_handle_slot: &Arc<Mutex<PoolConnectionSlot>>,
+    path: &str,
+    query: &str,
+    key: &str,
+    now: f64,
+    include_query_in_errors: bool,
+) -> PyResult<Option<Vec<u8>>> {
+    let sqlite_connection: &mut SqliteConnection = connection;
+    let mut handle = sqlite_connection.lock_handle().await.map_err(|error| {
+        OperationalError::new_err(format!("Failed to lock SQLite handle: {error}"))
+    })?;
+    let database = handle.as_raw_handle().as_ptr();
+    super::callbacks::register_active_handle(active_handle_slot, database as usize);
+    let parameters = [SqliteParam::Text(key.to_owned()), SqliteParam::Real(now)];
+    let result =
+        tokio::task::block_in_place(|| fetch_scalar_raw_core(database, query, &parameters, true));
+    clear_active_handle(active_handle_slot);
+    let value = result.map_err(|(code, message)| {
+        map_sqlite_error_from_msg(path, query, code, &message, include_query_in_errors)
+    })?;
+    match value {
+        None | Some(RawScalar::Null) => Ok(None),
+        Some(RawScalar::Blob(value)) => Ok(Some(value)),
+        Some(_) => Err(ProgrammingError::new_err(
+            "cache reads require a BLOB or NULL result",
+        )),
     }
 }
 

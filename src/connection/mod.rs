@@ -89,8 +89,6 @@ pub(crate) struct Connection {
     // Callback infrastructure (Phase 2.7)
     callback_connection: Arc<Mutex<PoolConnectionSlot>>, // Dedicated connection for callbacks
     callback_operation_lock: Arc<Mutex<()>>,
-    /// Serializes cache-specialized operations shared by cache wrappers on this Connection.
-    cache_operation_lock: Arc<Mutex<()>>,
     callback_connection_required: Arc<StdMutex<bool>>, // Callback handle needed for extensions or callbacks
     callback_features: Arc<AtomicU8>,
     extension_loading_allowed: Arc<StdMutex<bool>>,
@@ -407,7 +405,6 @@ impl Connection {
             // Callback infrastructure (Phase 2.7)
             callback_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
             callback_operation_lock: Arc::new(Mutex::new(())),
-            cache_operation_lock: Arc::new(Mutex::new(())),
             callback_connection_required: Arc::new(StdMutex::new(false)),
             callback_features: Arc::new(AtomicU8::new(0)),
             extension_loading_allowed: Arc::new(StdMutex::new(false)),

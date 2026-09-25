@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-from collections.abc import Awaitable
-from typing import Protocol
+from collections.abc import Awaitable, Callable
+from typing import Protocol, TypeVar
+
+
+_Result = TypeVar("_Result")
 
 
 class _CacheConnection(Protocol):
@@ -37,11 +40,9 @@ class SQLiteCache:
 
     Expiration uses Unix wall-clock seconds. A missing or expired key returns
     ``None``; expired rows remain until :meth:`cleanup_expired` is called.
-    Cache operations are executed by native rapsqlite methods and serialized
-    with other cache objects using the same connection.
-    If the schema is first created inside a transaction, initialization is
-    rechecked on later operations until one succeeds outside a transaction,
-    since the creating transaction could be rolled back.
+    Cache operations are serialized with other work on the same connection.
+    If a transaction rolls back schema creation, the next cache operation
+    detects the missing table, recreates the schema, and retries once.
     """
 
     __slots__ = ("_connection", "_table_name", "_initialize_lock", "_initialized")
@@ -61,23 +62,49 @@ class SQLiteCache:
         operation, so this method is optional when lazy setup is acceptable.
         """
 
+        async with self._initialize_lock:
+            await self._initialize_schema_locked()
+
+    async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
         async with self._initialize_lock:
-            if self._initialized:
-                return
-            initialized_in_transaction = await self._connection._cache_initialize(  # pyright: ignore[reportPrivateUsage]
-                self._table_name
-            )
-            self._initialized = not initialized_in_transaction
+            if not self._initialized:
+                await self._initialize_schema_locked()
+
+    async def _initialize_schema_locked(self) -> None:
+        # The table may be rolled back with its surrounding transaction. Mark it
+        # initialized optimistically to avoid repeating CREATE IF NOT EXISTS on
+        # every operation; _run_cache_operation repairs the state on a missing
+        # table error after a rollback.
+        await self._connection._cache_initialize(  # pyright: ignore[reportPrivateUsage]
+            self._table_name
+        )
+        self._initialized = True
+
+    async def _run_cache_operation(
+        self, operation: Callable[[], Awaitable[_Result]]
+    ) -> _Result:
+        try:
+            return await operation()
+        except Exception as error:
+            if "no such table:" not in str(error).lower():
+                raise
+
+        async with self._initialize_lock:
+            self._initialized = False
+            await self._initialize_schema_locked()
+        return await operation()
 
     async def get(self, key: str) -> bytes | None:
         """Return a BLOB for a live key, or ``None`` for a miss/expired key."""
 
         key = self._validate_key(key)
-        await self.initialize()
-        return await self._connection._cache_get(  # pyright: ignore[reportPrivateUsage]
-            self._table_name, key
+        await self._ensure_initialized()
+        return await self._run_cache_operation(
+            lambda: self._connection._cache_get(  # pyright: ignore[reportPrivateUsage]
+                self._table_name, key
+            )
         )
 
     async def set(self, key: str, value: bytes, *, ttl: float | None = None) -> None:
@@ -91,18 +118,22 @@ class SQLiteCache:
         key = self._validate_key(key)
         value = self._validate_value(value)
         ttl_seconds = self._validate_ttl(ttl)
-        await self.initialize()
-        await self._connection._cache_set(  # pyright: ignore[reportPrivateUsage]
-            self._table_name, key, value, ttl_seconds
+        await self._ensure_initialized()
+        await self._run_cache_operation(
+            lambda: self._connection._cache_set(  # pyright: ignore[reportPrivateUsage]
+                self._table_name, key, value, ttl_seconds
+            )
         )
 
     async def delete(self, key: str) -> bool:
         """Delete ``key`` and return whether a row was present."""
 
         key = self._validate_key(key)
-        await self.initialize()
-        return await self._connection._cache_delete(  # pyright: ignore[reportPrivateUsage]
-            self._table_name, key
+        await self._ensure_initialized()
+        return await self._run_cache_operation(
+            lambda: self._connection._cache_delete(  # pyright: ignore[reportPrivateUsage]
+                self._table_name, key
+            )
         )
 
     async def cleanup_expired(self, *, limit: int = 1000) -> int:
@@ -114,9 +145,11 @@ class SQLiteCache:
         """
 
         limit = self._validate_cleanup_limit(limit)
-        await self.initialize()
-        return await self._connection._cache_cleanup_expired(  # pyright: ignore[reportPrivateUsage]
-            self._table_name, limit
+        await self._ensure_initialized()
+        return await self._run_cache_operation(
+            lambda: self._connection._cache_cleanup_expired(  # pyright: ignore[reportPrivateUsage]
+                self._table_name, limit
+            )
         )
 
     @staticmethod
