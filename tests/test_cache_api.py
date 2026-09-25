@@ -49,6 +49,39 @@ async def test_cache_initialization_is_retried_after_transaction_rollback() -> N
         assert await cache.get("rolled-back") is None
 
 
+@pytest.mark.parametrize(
+    "initialization_order",
+    [
+        ("cache", "cache_expires_idx"),
+        ("cache_expires_idx", "cache"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_cache_index_names_do_not_collide_with_cache_tables(
+    initialization_order: tuple[str, str],
+) -> None:
+    async with connect_memory(session_affinity=True) as conn:
+        caches = {
+            table_name: SQLiteCache(conn, table_name=table_name)
+            for table_name in initialization_order
+        }
+
+        for table_name in initialization_order:
+            await caches[table_name].initialize()
+
+        for table_name, cache in caches.items():
+            await cache.set("key", table_name.encode())
+            assert await cache.get("key") == table_name.encode()
+            assert (
+                await conn.fetch_scalar(
+                    "SELECT COUNT(*) FROM sqlite_schema "
+                    "WHERE type = 'index' AND tbl_name = ?",
+                    [table_name],
+                )
+                == 1
+            )
+
+
 @pytest.mark.asyncio
 async def test_cache_does_not_repeat_schema_setup_inside_a_transaction() -> None:
     connection = _TransactionalCacheConnection()

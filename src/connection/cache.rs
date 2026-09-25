@@ -113,7 +113,9 @@ enum CacheResult {
 
 pub(super) fn initialize_operation(table_name: String) -> PyResult<CacheOperation> {
     let table = quoted_table_name(&table_name)?;
-    let index = quoted_identifier(&format!("{table_name}_expires_idx"))?;
+    // Cache table names cannot contain `:`, keeping this internal index name
+    // out of the namespace available to other SQLiteCache tables.
+    let index = format!("\"rapsqlite_cache_expiration:{table_name}\"");
     Ok(CacheOperation::Initialize {
         create_table: format!(
             concat!(
