@@ -36,11 +36,11 @@ not represented as a client cleanup call in the matched latency rows.
 ## Phase 0.5 hot-path benchmark
 
 `phase5_hotpath.py` measures the actual rapsqlite APIs introduced for the
-low-latency cache path: `fetch_one`, `fetch_scalar`, `raw_fetch_scalar`, and
-reusable `PreparedQuery` objects in normal and raw/BLOB modes. It reports
-session-affinity on/off, a synchronous `sqlite3` baseline, and `redis.asyncio`
-when a local Redis server is reachable. Sequential latency and concurrent
-throughput/event-loop delay are separate results.
+low-latency cache path: `fetch_one`, `fetch_scalar`, `raw_fetch_scalar`, the
+`SQLiteCache` API, and reusable `PreparedQuery` objects in normal and raw/BLOB
+modes. It compares TTL-aware reads and writes, reports session-affinity on/off,
+and includes `redis.asyncio` when a local Redis server is reachable. Sequential
+latency and concurrent throughput/event-loop delay are separate results.
 
 ```bash
 python benchmarks/phase5_hotpath.py --ops 20000 \

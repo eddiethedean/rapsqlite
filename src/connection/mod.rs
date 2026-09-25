@@ -3,6 +3,7 @@
 #![allow(non_local_definitions)] // False positive from pyo3 macros
 
 mod backup;
+mod cache;
 mod callbacks;
 mod schema;
 pub(crate) use callbacks::{
@@ -2677,6 +2678,59 @@ impl Connection {
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })
+    }
+
+    /// Initialize the schema used by SQLiteCache without routing through the
+    /// Python DB-API cursor/factory path.
+    #[pyo3(name = "_cache_initialize", signature = (table_name))]
+    fn cache_initialize(self_: PyRef<Self>, table_name: String) -> PyResult<Py<PyAny>> {
+        let operation = cache::initialize_operation(table_name)?;
+        cache::start_cache_operation(self_, operation)
+    }
+
+    /// Read a live cache BLOB with Rust-side key binding and expiration time.
+    #[pyo3(name = "_cache_get", signature = (table_name, key))]
+    fn cache_get(self_: PyRef<Self>, table_name: String, key: String) -> PyResult<Py<PyAny>> {
+        let operation = cache::get_operation(table_name, key)?;
+        cache::start_cache_operation(self_, operation)
+    }
+
+    /// Store a cache BLOB using a Rust-side TTL clock and direct SQLx binding.
+    #[pyo3(
+        name = "_cache_set",
+        signature = (table_name, key, value, ttl_seconds=None)
+    )]
+    fn cache_set(
+        self_: PyRef<Self>,
+        table_name: String,
+        key: String,
+        value: &Bound<'_, PyBytes>,
+        ttl_seconds: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        let operation =
+            cache::set_operation(table_name, key, value.as_bytes().to_vec(), ttl_seconds)?;
+        cache::start_cache_operation(self_, operation)
+    }
+
+    /// Delete one cache key and return whether a row was removed.
+    #[pyo3(name = "_cache_delete", signature = (table_name, key))]
+    fn cache_delete(self_: PyRef<Self>, table_name: String, key: String) -> PyResult<Py<PyAny>> {
+        let operation = cache::delete_operation(table_name, key)?;
+        cache::start_cache_operation(self_, operation)
+    }
+
+    /// Delete a bounded number of expired cache rows.
+    #[pyo3(
+        name = "_cache_cleanup_expired",
+        signature = (table_name, limit)
+    )]
+    fn cache_cleanup_expired(
+        self_: PyRef<Self>,
+        table_name: String,
+        limit: i64,
+    ) -> PyResult<Py<PyAny>> {
+        let operation = cache::cleanup_expired_operation(table_name, limit)?;
+        cache::start_cache_operation(self_, operation)
     }
 
     /// Fetch one scalar column without constructing a general row or applying a

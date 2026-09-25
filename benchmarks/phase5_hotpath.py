@@ -41,8 +41,26 @@ except ImportError:  # pragma: no cover - depends on the environment
     redis = None
 
 
-READ_SQL = "SELECT value FROM cache WHERE key = ? AND expires_at > ?"
-SCHEMA_SQL = "CREATE TABLE cache (key TEXT PRIMARY KEY, value BLOB NOT NULL, expires_at REAL NOT NULL)"
+READ_SQL = (
+    "SELECT value FROM cache WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)"
+)
+WRITE_SQL = (
+    "INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) "
+    "ON CONFLICT(key) DO UPDATE SET "
+    "value = excluded.value, expires_at = excluded.expires_at"
+)
+SCHEMA_SQL = (
+    "CREATE TABLE cache ("
+    "key TEXT PRIMARY KEY NOT NULL, "
+    "value BLOB NOT NULL, "
+    "expires_at REAL"
+    ") WITHOUT ROWID"
+)
+EXPIRATION_INDEX_SQL = (
+    "CREATE INDEX cache_expires_idx ON cache (expires_at) WHERE expires_at IS NOT NULL"
+)
+CACHE_KEY = "hot-key"
+CACHE_VALUE = b"x" * 1024
 
 
 def percentile(samples: list[float], p: float) -> float:
@@ -151,6 +169,7 @@ async def setup_sqlite(session_affinity: bool) -> Any:
     )
     await conn.__aenter__()
     await conn.execute(SCHEMA_SQL)
+    await conn.execute(EXPIRATION_INDEX_SQL)
     await conn.execute(
         "INSERT INTO cache VALUES (?, ?, ?)",
         ["hot-key", b"x" * 1024, time.time() + 3600],
@@ -180,12 +199,11 @@ async def close_handle(handle: Any) -> None:
 
 def sqlite3_baseline(ops: int, runs: int) -> dict[str, Any]:
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        "CREATE TABLE cache (key TEXT PRIMARY KEY, value BLOB NOT NULL, expires_at REAL NOT NULL)"
-    )
+    conn.execute(SCHEMA_SQL)
+    conn.execute(EXPIRATION_INDEX_SQL)
     conn.execute(
         "INSERT INTO cache VALUES (?, ?, ?)",
-        ("hot-key", b"x" * 1024, time.time() + 3600),
+        (CACHE_KEY, CACHE_VALUE, time.time() + 3600),
     )
     run_results: list[dict[str, float]] = []
     for _ in range(runs):
@@ -193,7 +211,7 @@ def sqlite3_baseline(ops: int, runs: int) -> dict[str, Any]:
         started = time.perf_counter()
         for _ in range(ops):
             op_started = time.perf_counter_ns()
-            conn.execute(READ_SQL, ("hot-key", time.time())).fetchone()
+            conn.execute(READ_SQL, (CACHE_KEY, time.time())).fetchone()
             samples.append((time.perf_counter_ns() - op_started) / 1_000.0)
         run_results.append(summarize(samples, time.perf_counter() - started))
     conn.close()
@@ -213,20 +231,35 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for affinity in (False, True):
         conn = await setup_sqlite(affinity)
+        cache = rapsqlite.SQLiteCache(conn, table_name="cache")
+        await cache.set(CACHE_KEY, CACHE_VALUE, ttl=3600)
         prepared = conn.prepare(READ_SQL)
         raw_prepared = conn.prepare(READ_SQL, raw=True, blob=True)
         operations = {
-            "fetch_one": lambda: conn.fetch_one(READ_SQL, ["hot-key", time.time()]),
+            "fetch_one": lambda: conn.fetch_one(READ_SQL, [CACHE_KEY, time.time()]),
             "fetch_scalar": lambda: conn.fetch_scalar(
-                READ_SQL, ["hot-key", time.time()]
+                READ_SQL, [CACHE_KEY, time.time()]
             ),
+            "fetch_blob": lambda: conn.fetch_blob(READ_SQL, [CACHE_KEY, time.time()]),
             "raw_fetch_scalar": lambda: conn.raw_fetch_scalar(
-                READ_SQL, ["hot-key", time.time()], True
+                READ_SQL, [CACHE_KEY, time.time()], True
             ),
-            "prepared_scalar": lambda: prepared.fetch_scalar(["hot-key", time.time()]),
+            "prepared_scalar": lambda: prepared.fetch_scalar([CACHE_KEY, time.time()]),
             "prepared_raw_blob": lambda: raw_prepared.fetch_blob(
-                ["hot-key", time.time()]
+                [CACHE_KEY, time.time()]
             ),
+            "sqlite_cache_get": lambda: cache.get(CACHE_KEY),
+        }
+
+        async def generic_set() -> None:
+            cursor = await conn.execute(
+                WRITE_SQL, [CACHE_KEY, CACHE_VALUE, time.time() + 3600]
+            )
+            await cursor.close()
+
+        write_operations = {
+            "execute_upsert": generic_set,
+            "sqlite_cache_set": lambda: cache.set(CACHE_KEY, CACHE_VALUE, ttl=3600),
         }
         try:
             for name, operation in operations.items():
@@ -249,6 +282,29 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                         "variant": name,
                         "session_affinity": affinity,
                         "workload": "concurrent",
+                        **concurrent,
+                    }
+                )
+            for name, operation in write_operations.items():
+                row = await measure_sequential(operation, args.ops, args.runs)
+                results.append(
+                    {
+                        "backend": "rapsqlite",
+                        "variant": name,
+                        "session_affinity": affinity,
+                        "workload": "sequential_write",
+                        **row,
+                    }
+                )
+                concurrent = await measure_concurrent(
+                    operation, args.concurrent_ops, args.concurrency
+                )
+                results.append(
+                    {
+                        "backend": "rapsqlite",
+                        "variant": name,
+                        "session_affinity": affinity,
+                        "workload": "concurrent_write",
                         **concurrent,
                     }
                 )
@@ -280,6 +336,19 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                     **redis_result,
                 }
             )
+            redis_set_result = await measure_sequential(
+                lambda: redis_client.set("phase5-hot-key", CACHE_VALUE, ex=3600),
+                args.ops,
+                args.runs,
+            )
+            results.append(
+                {
+                    "backend": "redis.asyncio",
+                    "variant": "set_with_ttl",
+                    "workload": "sequential_write",
+                    **redis_set_result,
+                }
+            )
             redis_concurrent = await measure_concurrent(
                 lambda: redis_client.get("phase5-hot-key"),
                 args.concurrent_ops,
@@ -291,6 +360,19 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
                     "variant": "get",
                     "workload": "concurrent",
                     **redis_concurrent,
+                }
+            )
+            redis_concurrent_set = await measure_concurrent(
+                lambda: redis_client.set("phase5-hot-key", CACHE_VALUE, ex=3600),
+                args.concurrent_ops,
+                args.concurrency,
+            )
+            results.append(
+                {
+                    "backend": "redis.asyncio",
+                    "variant": "set_with_ttl",
+                    "workload": "concurrent_write",
+                    **redis_concurrent_set,
                 }
             )
         finally:
@@ -320,7 +402,7 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
         "backend                 variant              workload      mean/p50/p95/p99 µs      ops/s"
     )
     for row in results:
-        if row["workload"] == "sequential":
+        if row["workload"] in {"sequential", "sequential_write"}:
             print(
                 f"{row['backend']:<23} {row['variant']:<20} {row['workload']:<12} "
                 f"{row['median_run_mean_us']:>7.2f}/{row['median_run_p50_us']:>7.2f}/"

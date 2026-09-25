@@ -61,6 +61,7 @@ from rapsqlite._compat import apply_compat
 from rapsqlite._connection_state import apply_state
 from rapsqlite._metrics import PoolMetrics, PoolMetricsGauges, pool_metrics_gauges
 from rapsqlite._prepared import PreparedQuery
+from rapsqlite.cache import SQLiteCache
 from rapsqlite._query_helpers import (
     analyze_query_plan,
     execute_iter,
@@ -224,6 +225,7 @@ __all__: list[str] = [
     "PreparedQuery",
     "ProgrammingError",
     "Row",
+    "SQLiteCache",
     "ValueError",
     "Warning",
     "analyze_query_plan",
