@@ -2,13 +2,13 @@
 
 This roadmap describes the release-oriented development plan for `rapsqlite`, a true async SQLite library for Python built with Rust, Tokio, and SQLx.
 
-The roadmap uses minor `0.x` releases as delivery phases. The latest release tag is `v0.4.0`; the 0.5 implementation is complete and is in release validation.
+The roadmap uses minor `0.x` releases as delivery phases. The latest release tag is `v0.5.0`; Phase 0.5 is complete and Phase 0.6 is in progress.
 
 ## Current Status
 
-**Latest tag:** `v0.4.0` ✅
-**Current development phase:** `0.5` — Low-latency execution and session affinity ✅ implementation complete; release validation
-**Next performance phase:** `0.6` — Cache APIs, batching, and concurrent workloads 📋
+**Latest tag:** `v0.5.0` ✅
+**Current development phase:** `0.6` — Cache APIs, batching, and concurrent workloads 📋 in progress
+**Next phase:** `0.7` — Pooling, observability, and reliability 📋
 
 ## Completed Release Phases
 
@@ -94,11 +94,12 @@ Out of scope for 0.5:
 
 ### 0.5 implementation result
 
-The planned implementation work is complete and the release build is being
-validated. Performance is workload-dependent: the same-machine benchmark shows
+The implementation was released as `v0.5.0` on 2026-09-25 after release
+validation and platform-wheel publishing passed. Performance is workload-dependent:
+the same-machine benchmark shows
 modest read and write improvements in its tested pattern, but is not a promise
 of a universal win over Redis or a substitute for deployment-specific testing.
-The release candidate includes:
+The release includes:
 
 - ✅ A release-build hot-path benchmark covering generic rows, scalar/BLOB paths, prepared-query dispatch, session affinity, synchronous `sqlite3`, and optional local `redis.asyncio`; repeated same-machine results and raw run data are recorded in [`benchmarks/phase5_hotpath_results.md`](../benchmarks/phase5_hotpath_results.md) and [`benchmarks/phase5_hotpath_results.json`](../benchmarks/phase5_hotpath_results.json)
 - ✅ One-time PRAGMA application per physical connection; opt-in query-usage tracking; atomic no-op checks for callbacks, trace hooks, init hooks, converters, and transaction routing; one-time immutable per-connection pool handles; and fast common parameter conversion
@@ -115,6 +116,12 @@ The benchmark did not show a uniform advantage for every specialized API:
 slower for the measured single-key BLOB lookup. Session affinity also showed
 small, workload-dependent differences. These results are documented without a
 blanket speedup claim.
+
+### 0.5 release result
+
+- ✅ Merge the completed implementation in [PR #49](https://github.com/eddiethedean/rapsqlite/pull/49).
+- ✅ Publish the `v0.5.0` tag and supported platform wheels; [release CI](https://github.com/eddiethedean/rapsqlite/actions/runs/36168514584) passed after retrying a transient PyPI upload failure for the macOS ARM wheel.
+- ✅ Update release notes and benchmark documentation with measured results and workload-specific caveats.
 
 ### Delivery order
 
@@ -177,7 +184,7 @@ Start with one prepared statement and zero/one scalar result. Reuse existing han
 
 **Goal:** Provide explicit APIs for cache workloads and improve aggregate throughput without requiring one async call per item.
 
-- ✅ [#42](https://github.com/eddiethedean/rapsqlite/issues/42) Cache-specific low-latency `get`/`set` operations with TTL handling
+- ✅ [#42](https://github.com/eddiethedean/rapsqlite/issues/42) Cache-specific low-latency `get`/`set` operations with TTL handling (implemented before and included in `v0.5.0`)
 - [#43](https://github.com/eddiethedean/rapsqlite/issues/43) Bulk cache APIs and expiration cleanup batches
 - [#44](https://github.com/eddiethedean/rapsqlite/issues/44) Multiplexed read mode for concurrent cache workloads
 - Batched write and read benchmarks across representative payload sizes
@@ -236,8 +243,7 @@ All currently open GitHub issues are assigned to a future release phase:
 
 | Release | Issues |
 | --- | --- |
-| 0.5 | #35, #36, #37, #38, #39, #41, #45, #46 |
-| 0.6 | #42, #43, #44 |
+| 0.6 | #43, #44 |
 
 ## Versioning Strategy
 
@@ -246,9 +252,9 @@ All currently open GitHub issues are assigned to a future release phase:
 | 0.1.x | Core functionality | ✅ Complete |
 | 0.2.x | Feature-complete drop-in foundation | ✅ Complete |
 | 0.3.x | Advanced features and aiosqlite parity | ✅ Complete; latest pre-0.4 tag `v0.3.3` |
-| 0.4.x | Post-0.3.3 compatibility, security, and release stabilization | ✅ Complete; latest tag `v0.4.0` |
-| 0.5.x | Low-latency execution and session affinity | ✅ Implementation complete; release validation |
-| 0.6.x | Cache APIs, batching, and concurrent workloads | 📋 Planned |
+| 0.4.x | Post-0.3.3 compatibility, security, and release stabilization | ✅ Complete; latest pre-0.5 tag `v0.4.0` |
+| 0.5.x | Low-latency execution and session affinity | ✅ Complete; released as `v0.5.0` |
+| 0.6.x | Cache APIs, batching, and concurrent workloads | 📋 In progress; #42 shipped in `v0.5.0`, #43 and #44 remain |
 | 0.7.x | Pooling, observability, and reliability | 📋 Planned |
 | 0.8.x | Type, framework, and database tooling | 📋 Planned |
 | 0.9.x | Stabilization toward 1.0 | 📋 Planned |

@@ -190,8 +190,8 @@ See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs
 
 - ✅ **0.1–0.3** – Async core, aiosqlite compatibility, callbacks, pooling, True Async DBAPI, SQLAlchemy/Alembic integration, and advanced SQLite features
 - ✅ **0.4** – Post-`v0.3.3` compatibility, security, CI, SQLAlchemy 2.1 support, and release stabilization (`v0.4.0`)
-- ✅ **0.5** – Implementation complete: measured low-latency execution, hot-path reductions, scalar/BLOB and prepared-query paths, opt-in session affinity, and an opt-in raw path; release validation remains
-- 📋 **0.6** – Cache-specific APIs, bulk operations, and concurrent workloads
+- ✅ **0.5** – Released as `v0.5.0`: measured low-latency execution, hot-path reductions, scalar/BLOB and prepared-query paths, opt-in session affinity, and an opt-in raw path
+- 📋 **0.6** – In progress: cache get/set with TTL shipped in `v0.5.0`; bulk operations and multiplexed concurrent reads remain
 - 📋 **0.7–0.9** – Pooling, observability, reliability, ecosystem tooling, and stabilization toward 1.0
 
 ## Related Projects
