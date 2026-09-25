@@ -51,16 +51,17 @@ Example:
 
 import builtins as _builtins
 import inspect
+import importlib
 import os
 import uuid
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 from urllib.parse import quote
 
 from rapsqlite._compat import apply_compat
 from rapsqlite._connection_state import apply_state
 from rapsqlite._metrics import PoolMetrics, PoolMetricsGauges, pool_metrics_gauges
+from rapsqlite._prepared import PreparedQuery
 from rapsqlite._query_helpers import (
-    _StreamChunksIterator,
     analyze_query_plan,
     execute_iter,
     in_clause_query,
@@ -74,16 +75,24 @@ from rapsqlite._transaction_helpers import (
     transaction_with_timeout,
 )
 
+
+class StreamChunksIterator(Protocol):
+    """Async iterator returned by :func:`execute_iter`."""
+
+    def __aiter__(self) -> "StreamChunksIterator": ...
+    async def __anext__(self) -> list[list[Any]]: ...
+
+
 try:
     # Preferred: import extension from the local module name used when installed.
     import _rapsqlite as _ext
 except ImportError:  # pragma: no cover - fallback for editable installs/alt layouts
     try:
         from rapsqlite import _rapsqlite as _ext
-    except ImportError as exc:  # pragma: no cover
+    except ImportError:  # pragma: no cover
         raise ImportError(
             "Could not import _rapsqlite. Make sure rapsqlite is built with maturin."
-        ) from exc
+        ) from None
 
 # Re-export symbols from the extension module.
 Connection = _ext.Connection
@@ -101,59 +110,86 @@ DatabaseError = _ext.DatabaseError
 OperationalError = _ext.OperationalError
 ProgrammingError = _ext.ProgrammingError
 IntegrityError = _ext.IntegrityError
-try:
-    InterfaceError = _ext.InterfaceError
-except AttributeError:  # pragma: no cover - compatibility with older wheels
-
-    class InterfaceError(Error):  # type: ignore[no-redef,misc,valid-type]
-        pass
 
 
-try:
-    DataError = _ext.DataError
-except AttributeError:  # pragma: no cover - compatibility with older wheels
+def _compat_exception(name: str, base: type[BaseException]) -> type[BaseException]:
+    """Return an extension exception, or a compatible fallback for old wheels."""
 
-    class DataError(DatabaseError):  # type: ignore[no-redef,misc,valid-type]
-        pass
-
-
-try:
-    InternalError = _ext.InternalError
-except AttributeError:  # pragma: no cover - compatibility with older wheels
-
-    class InternalError(DatabaseError):  # type: ignore[no-redef,misc,valid-type]
-        pass
+    exception = getattr(_ext, name, None)
+    if exception is None:
+        return type(name, (base,), {})
+    return cast(type[BaseException], exception)
 
 
-try:
-    NotSupportedError = _ext.NotSupportedError
-except AttributeError:  # pragma: no cover - compatibility with older wheels
+InterfaceError: type[BaseException] = _compat_exception(
+    "InterfaceError", cast(type[BaseException], Error)
+)
+DataError: type[BaseException] = _compat_exception(
+    "DataError", cast(type[BaseException], DatabaseError)
+)
+InternalError: type[BaseException] = _compat_exception(
+    "InternalError", cast(type[BaseException], DatabaseError)
+)
+NotSupportedError: type[BaseException] = _compat_exception(
+    "NotSupportedError", cast(type[BaseException], DatabaseError)
+)
 
-    class NotSupportedError(DatabaseError):  # type: ignore[no-redef,misc,valid-type]
-        pass
 
-
-try:
-    ValueError = _ext.ValueError
-except AttributeError:  # pragma: no cover - compatibility with older wheels
-    # Fall back to the built-in ValueError so callers can still catch it.
-    ValueError = _builtins.ValueError
+ValueError: type[BaseException] = cast(
+    type[BaseException], getattr(_ext, "ValueError", _builtins.ValueError)
+)
 
 # Export RapRow as Row for aiosqlite compatibility, but fall back to Row if
 # running against an older build that does not expose RapRow explicitly.
-try:
-    Row = getattr(_ext, "RapRow", None) or _ext.Row
-except AttributeError:
-    # If neither RapRow nor Row exists, create a placeholder or raise a helpful error
-    raise ImportError(
-        "RapRow class not found in _rapsqlite module. "
-        "The extension module may need to be rebuilt. "
-        f"Available attributes: {[x for x in dir(_ext) if not x.startswith('_')]}"
-    ) from None
+if TYPE_CHECKING:
+    Row: TypeAlias = _ext.RapRow
+else:
+    try:
+        Row = getattr(_ext, "RapRow", None) or _ext.Row
+    except AttributeError:
+        # If neither RapRow nor Row exists, create a placeholder or raise a helpful error
+        raise ImportError(
+            "RapRow class not found in _rapsqlite module. "
+            "The extension module may need to be rebuilt. "
+            f"Available attributes: {[x for x in dir(_ext) if not x.startswith('_')]}"
+        ) from None
 
 # Apply aiosqlite compat patches, then connection state cache (order matters).
 apply_compat(Connection, Cursor, operational_error=OperationalError)
 apply_state(Connection)
+
+
+async def _connection_fetch_blob(
+    self: ConnectionT,
+    query: str,
+    parameters: Any | None = None,
+) -> bytes | None:
+    """Fetch one BLOB value without constructing a general row."""
+
+    # Check SQLite's runtime storage class before text_factory/converters can
+    # turn a TEXT value into Python bytes.
+    value = await cast(Any, self).fetch_scalar(query, parameters, _require_blob=True)
+    if value is None:
+        return None
+    if not isinstance(value, bytes):
+        raise TypeError("fetch_blob() requires a BLOB or NULL result")
+    return value
+
+
+def _connection_prepare(
+    self: ConnectionT,
+    query: str,
+    *,
+    raw: bool = False,
+    blob: bool = False,
+) -> PreparedQuery:
+    """Create a reusable connection-bound query object."""
+
+    return PreparedQuery(self, query, raw=raw, blob=blob)
+
+
+Connection.fetch_blob = _connection_fetch_blob
+Connection.prepare = _connection_prepare
 
 
 # Connection.execute_iter (streaming helper) - uses Connection.fetch_all
@@ -162,7 +198,7 @@ def _connection_execute_iter(
     sql: str,
     parameters: Any | None = None,
     chunk_size: int | None = None,
-) -> "_StreamChunksIterator":
+) -> StreamChunksIterator:
     """Return an async iterator that yields rows in chunks (streaming / memory-efficient)."""
     return execute_iter(self, sql, parameters, chunk_size)
 
@@ -185,6 +221,7 @@ __all__: list[str] = [
     "OperationalError",
     "PoolMetrics",
     "PoolMetricsGauges",
+    "PreparedQuery",
     "ProgrammingError",
     "Row",
     "ValueError",
@@ -206,12 +243,13 @@ __all__: list[str] = [
 
 def connect_memory(
     *,
-    name: str | None = None,
+    name: object | None = None,
     pragmas: Any = None,
     timeout: float = 5.0,
     iter_chunk_size: int = 64,
     idle_timeout: int | None = None,
     pool_size: int | None = None,
+    session_affinity: bool = False,
 ) -> ConnectionT:
     """Create an isolated or explicitly shared in-memory SQLite database.
 
@@ -220,9 +258,12 @@ def connect_memory(
     with that same name. SQLite closes the database after the last connection
     using that identity is closed or discarded.
     """
-    if name is not None and (not isinstance(name, str) or not name):
+    if name is None:
+        identity = uuid.uuid4().hex
+    elif not isinstance(name, str) or not name:
         raise ValueError("name must be a non-empty string or None")
-    identity = quote(name, safe="") if name is not None else uuid.uuid4().hex
+    else:
+        identity = quote(name, safe="")
     uri = f"file:rapsqlite-memory-{identity}?mode=memory&cache=shared"
     return connect(
         uri,
@@ -231,6 +272,7 @@ def connect_memory(
         iter_chunk_size=iter_chunk_size,
         idle_timeout=idle_timeout,
         pool_size=pool_size,
+        session_affinity=session_affinity,
     )
 
 
@@ -244,6 +286,7 @@ def connect(
     loop: Any = None,
     aiosqlite_compat: bool = False,
     pool_size: int | None = None,
+    session_affinity: bool = False,
     **kwargs: Any,
 ) -> ConnectionT:
     """Connect to a SQLite database.
@@ -280,6 +323,10 @@ def connect(
             An explicit value is honored (0 is normalized to 1). If another live
             Connection already created this shared pool, its existing maximum is
             used. Default None selects the internal shared-pool default (25).
+        session_affinity: Retain one physical SQLite session between operations
+            on this Connection. This can reduce repeated pool acquisition for
+            low-latency workloads but consumes one pool slot while the Connection
+            is idle. Default False.
         **kwargs: Additional arguments (currently ignored, reserved for future use)
 
     Returns:
@@ -379,15 +426,16 @@ def connect(
         conn.idle_timeout = idle_timeout
     if pool_size is not None:
         conn.pool_size = pool_size
+    conn.session_affinity = session_affinity
     if aiosqlite_compat:
         conn.row_factory = "tuple"
-    return cast(ConnectionT, conn)
+    return conn
 
 
 # Register sqlite+rapsqlite dialect so create_async_engine("sqlite+rapsqlite:///...") works
 # without a separate "import rapsqlite.sqlalchemy". (Entry point in pyproject.toml does the
 # same at install time; this covers editable installs and runtimes where entry points aren't used.)
 try:
-    import rapsqlite.sqlalchemy  # noqa: F401
+    importlib.import_module("rapsqlite.sqlalchemy")
 except ImportError:
     pass

@@ -3,6 +3,7 @@
 //! callback connection and SQLite C API for these operations.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::sync::Mutex;
 
@@ -40,6 +41,7 @@ pub(crate) struct CallbackContext {
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_operation_lock: Arc<Mutex<()>>,
     pub callback_connection_required: Arc<StdMutex<bool>>,
+    pub callback_features: Arc<AtomicU8>,
     pub extension_loading_allowed: Arc<StdMutex<bool>>,
     pub user_functions: UserFunctions,
     pub user_aggregates: UserAggregates,
@@ -105,7 +107,7 @@ pub(crate) fn interrupt_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>) -> 
     handle.is_some_and(|handle| handle.interrupt())
 }
 
-fn register_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>, raw_db: usize) {
+pub(crate) fn register_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>, raw_db: usize) {
     let new_handle = Arc::new(ActiveHandle::new(raw_db));
     let old_handle = active_handles()
         .lock()
@@ -130,6 +132,7 @@ pub(crate) fn clear_active_handle(slot: &Arc<Mutex<PoolConnectionSlot>>) {
 /// pool. SQLite callbacks are handle-local; closing the handle prevents them
 /// from leaking into a different logical Connection that reuses the pool.
 pub(crate) async fn discard_callback_connection(ctx: &CallbackContext) {
+    crate::pool::refresh_callback_features(ctx);
     if ctx.skip_release {
         return;
     }
@@ -142,6 +145,7 @@ pub(crate) async fn discard_callback_connection(ctx: &CallbackContext) {
 }
 
 async fn finish_callback_update(ctx: &CallbackContext) {
+    crate::pool::refresh_callback_features(ctx);
     if !ctx.skip_release {
         discard_callback_connection(ctx).await;
     }
@@ -907,6 +911,7 @@ pub(crate) async fn create_function_impl(
             );
             if all_cleared {
                 drop(handle);
+                crate::pool::refresh_callback_features(&ctx);
                 return Ok(());
             }
         } else {
@@ -954,6 +959,7 @@ pub(crate) async fn create_function_impl(
                 )));
             }
         }
+        crate::pool::refresh_callback_features(&ctx);
         return Ok(());
     }
 

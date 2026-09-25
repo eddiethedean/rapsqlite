@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncGenerator, AsyncIterator
 
 from fastapi import FastAPI, Depends
 from rapsqlite import connect
@@ -21,7 +21,7 @@ DB_PATH = str(Path(__file__).resolve().parent / "fastapi_example.db")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with connect(DB_PATH) as conn:  # type: ignore[attr-defined]
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)"
@@ -39,6 +39,6 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
-async def root(db: Any = Depends(get_db)) -> dict:
+async def root(db: Any = Depends(get_db)) -> dict[str, list[list[Any]]]:
     rows = await db.fetch_all("SELECT id, name FROM items")
     return {"items": [list(r) for r in rows]}

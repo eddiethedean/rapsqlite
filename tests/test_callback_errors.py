@@ -1,5 +1,7 @@
 """Tests for callback error handling in SQLite callbacks."""
 
+from typing import Any
+
 import pytest
 import rapsqlite
 
@@ -7,12 +9,12 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_create_function_exception_handled(test_db):
+async def test_create_function_exception_handled(test_db: str):
     """Test that exceptions in user-defined functions are handled gracefully."""
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
 
-        def failing_func(x):
+        def failing_func(x: Any):
             raise ValueError("Test error")
 
         # Create function that raises exception
@@ -26,14 +28,14 @@ async def test_create_function_exception_handled(test_db):
 
 
 @pytest.mark.asyncio
-async def test_trace_callback_exception_handled(test_db):
+async def test_trace_callback_exception_handled(test_db: str):
     """Test that exceptions in trace callbacks don't crash database operations."""
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 
-        trace_calls = []
+        trace_calls: list[str] = []
 
-        def trace_callback(sql):
+        def trace_callback(sql: str):
             trace_calls.append(sql)
             if "INSERT" in sql:
                 raise ValueError("Trace callback error")
@@ -55,7 +57,7 @@ async def test_trace_callback_exception_handled(test_db):
 
 
 @pytest.mark.asyncio
-async def test_authorizer_callback_exception_fails_secure(test_db):
+async def test_authorizer_callback_exception_fails_secure(test_db: str):
     """Test that exceptions in authorizer callbacks default to DENY (fail-secure).
 
     Note: This test verifies that the code defaults to SQLITE_DENY on exceptions.
@@ -66,7 +68,13 @@ async def test_authorizer_callback_exception_fails_secure(test_db):
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
 
-        def authorizer_callback(action, arg1, arg2, arg3, arg4):
+        def authorizer_callback(
+            action: int,
+            arg1: str | None,
+            arg2: str | None,
+            arg3: str | None,
+            arg4: str | None,
+        ):
             # Raise exception on any operation to test fail-secure behavior
             raise ValueError("Authorizer error")
 
@@ -81,7 +89,7 @@ async def test_authorizer_callback_exception_fails_secure(test_db):
 
 
 @pytest.mark.asyncio
-async def test_progress_handler_exception_continues(test_db):
+async def test_progress_handler_exception_continues(test_db: str):
     """Test that exceptions in progress handlers don't abort operations."""
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
@@ -90,7 +98,7 @@ async def test_progress_handler_exception_continues(test_db):
         values = [("row_" + str(i),) for i in range(250)]
         await db.execute_many("INSERT INTO t (v) VALUES (?)", values)
 
-        progress_calls = []
+        progress_calls: list[int] = []
 
         def progress_callback():
             progress_calls.append(1)
@@ -112,7 +120,7 @@ async def test_progress_handler_exception_continues(test_db):
 
 
 @pytest.mark.asyncio
-async def test_authorizer_callback_invalid_return_defaults_to_deny(test_db):
+async def test_authorizer_callback_invalid_return_defaults_to_deny(test_db: str):
     """Test that invalid return values from authorizer default to DENY.
 
     Note: This test verifies that the code defaults to SQLITE_DENY when
@@ -122,7 +130,13 @@ async def test_authorizer_callback_invalid_return_defaults_to_deny(test_db):
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 
-        def authorizer_callback(action, arg1, arg2, arg3, arg4):
+        def authorizer_callback(
+            action: int,
+            arg1: str | None,
+            arg2: str | None,
+            arg3: str | None,
+            arg4: str | None,
+        ):
             # Return invalid value (not an integer) - this will fail extract::<i32>()
             return "not an integer"
 
@@ -135,7 +149,7 @@ async def test_authorizer_callback_invalid_return_defaults_to_deny(test_db):
 
 
 @pytest.mark.asyncio
-async def test_backup_progress_callback_exception_handled(test_db):
+async def test_backup_progress_callback_exception_handled(test_db: str):
     """Test that exceptions in backup progress callbacks don't crash backup."""
     import tempfile
 
@@ -150,9 +164,9 @@ async def test_backup_progress_callback_exception_handled(test_db):
         target_db = f.name
 
     try:
-        progress_calls = []
+        progress_calls: list[tuple[int, int, int]] = []
 
-        def progress_callback(remaining, page_count, pages_copied):
+        def progress_callback(remaining: int, page_count: int, pages_copied: int):
             progress_calls.append((remaining, page_count, pages_copied))
             if len(progress_calls) == 1:
                 raise ValueError("Backup progress error")

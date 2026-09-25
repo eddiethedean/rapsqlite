@@ -4,6 +4,7 @@ Tests real-world scenarios, common usage patterns, and framework integration exa
 """
 
 import time
+from typing import Any
 
 import pytest
 
@@ -12,7 +13,7 @@ from rapsqlite import connect
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_web_framework_pattern(test_db):
+async def test_web_framework_pattern(test_db: str):
     """Test common web framework usage pattern (request-scoped connection)."""
 
     # Simulate FastAPI/aiohttp pattern
@@ -31,7 +32,7 @@ async def test_web_framework_pattern(test_db):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_orm_like_pattern(test_db):
+async def test_orm_like_pattern(test_db: str):
     """Test ORM-like usage pattern."""
     async with connect(test_db) as db:
         await db.execute("""
@@ -58,7 +59,7 @@ async def test_orm_like_pattern(test_db):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_batch_processing_pattern(test_db):
+async def test_batch_processing_pattern(test_db: str):
     """Test batch processing pattern."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -83,7 +84,7 @@ async def test_batch_processing_pattern(test_db):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_transaction_rollback_pattern(test_db):
+async def test_transaction_rollback_pattern(test_db: str):
     """Test transaction rollback pattern for error handling."""
     async with connect(test_db) as db:
         await db.execute(
@@ -128,7 +129,7 @@ async def test_transaction_rollback_pattern(test_db):
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_connection_pooling_pattern(test_db):
+async def test_connection_pooling_pattern(test_db: str):
     """Test connection pooling pattern: pool is used for multiple operations.
 
     Uses a single shared connection pool. Sequential inserts (no concurrent
@@ -156,7 +157,7 @@ async def test_connection_pooling_pattern(test_db):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_schema_migration_pattern(test_db):
+async def test_schema_migration_pattern(test_db: str):
     """Test schema migration pattern."""
     async with connect(test_db) as db:
         # Initial schema
@@ -183,7 +184,7 @@ async def test_schema_migration_pattern(test_db):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_row_factory_integration(test_db):
+async def test_row_factory_integration(test_db: str):
     """Test row factory in real-world usage."""
     async with connect(test_db) as db:
         db.row_factory = "dict"
@@ -203,7 +204,7 @@ async def test_row_factory_integration(test_db):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_cursor_iteration_pattern(test_db):
+async def test_cursor_iteration_pattern(test_db: str):
     """Test cursor iteration pattern."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -216,7 +217,7 @@ async def test_cursor_iteration_pattern(test_db):
         cursor = db.cursor()
         await cursor.execute("SELECT * FROM items ORDER BY id")
 
-        items = []
+        items: list[Any] = []
         # Fetch all rows and iterate
         rows = await cursor.fetchall()
         for row in rows:

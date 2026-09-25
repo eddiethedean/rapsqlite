@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from rapsqlite._connection_state import _cleanup_conn_state
+from rapsqlite._connection_state import _cleanup_conn_state  # pyright: ignore[reportPrivateUsage]
 
 
 def _connection_del(self: Any) -> None:

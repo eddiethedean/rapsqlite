@@ -58,7 +58,7 @@ async def test_error_hierarchy():
 
 
 @pytest.mark.asyncio
-async def test_connection_commit(test_db, unique_table_prefix):
+async def test_connection_commit(test_db: str, unique_table_prefix: str):
     """commit() works."""
     async with connect(test_db) as cx:
         cur = await cx.execute(
@@ -72,7 +72,9 @@ async def test_connection_commit(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_connection_commit_after_no_changes(test_db, unique_table_prefix):
+async def test_connection_commit_after_no_changes(
+    test_db: str, unique_table_prefix: str
+):
     """commit() works when no changes were made."""
     async with connect(test_db) as cx:
         await cx.execute(f"CREATE TABLE {unique_table_prefix} (id INTEGER PRIMARY KEY)")
@@ -81,7 +83,7 @@ async def test_connection_commit_after_no_changes(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_connection_rollback(test_db, unique_table_prefix):
+async def test_connection_rollback(test_db: str, unique_table_prefix: str):
     """rollback() works."""
     async with connect(test_db) as cx:
         await cx.execute(f"CREATE TABLE {unique_table_prefix} (id INTEGER PRIMARY KEY)")
@@ -89,7 +91,9 @@ async def test_connection_rollback(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_connection_rollback_after_no_changes(test_db, unique_table_prefix):
+async def test_connection_rollback_after_no_changes(
+    test_db: str, unique_table_prefix: str
+):
     """rollback() works when no changes were made."""
     async with connect(test_db) as cx:
         await cx.execute(f"CREATE TABLE {unique_table_prefix} (id INTEGER PRIMARY KEY)")
@@ -98,7 +102,7 @@ async def test_connection_rollback_after_no_changes(test_db, unique_table_prefix
 
 
 @pytest.mark.asyncio
-async def test_connection_cursor(test_db):
+async def test_connection_cursor(test_db: str):
     """cursor() returns a cursor."""
     async with connect(test_db) as cx:
         cur = cx.cursor()
@@ -115,14 +119,14 @@ async def test_connection_failed_open():
 
 
 @pytest.mark.asyncio
-async def test_connection_close(test_db):
+async def test_connection_close(test_db: str):
     """close() closes the connection."""
     conn = await connect(test_db)
     await conn.close()
 
 
 @pytest.mark.asyncio
-async def test_connection_in_transaction(test_db, unique_table_prefix):
+async def test_connection_in_transaction(test_db: str, unique_table_prefix: str):
     """in_transaction reflects transaction state (cached; False after commit)."""
     async with connect(test_db) as cx:
         cur = cx.cursor()
@@ -139,7 +143,7 @@ async def test_connection_in_transaction(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_connection_execute(test_db):
+async def test_connection_execute(test_db: str):
     """Connection.execute() returns cursor and result."""
     async with connect(test_db) as cx:
         cur = await cx.execute("SELECT 5")
@@ -152,7 +156,7 @@ async def test_connection_execute(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_no_args(test_db, unique_table_prefix):
+async def test_cursor_execute_no_args(test_db: str, unique_table_prefix: str):
     """execute() with no parameters."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -166,7 +170,7 @@ async def test_cursor_execute_no_args(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_illegal_sql(test_db):
+async def test_cursor_execute_illegal_sql(test_db: str):
     """execute() with invalid SQL raises OperationalError."""
     async with connect(test_db) as cx:
         with pytest.raises((OperationalError, DatabaseError, ProgrammingError)):
@@ -174,7 +178,7 @@ async def test_cursor_execute_illegal_sql(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_multiple_statements(test_db):
+async def test_cursor_execute_multiple_statements(test_db: str):
     """execute() with multiple statements raises or executes first only."""
     async with connect(test_db) as cx:
         try:
@@ -187,7 +191,7 @@ async def test_cursor_execute_multiple_statements(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_arg_int(test_db, unique_table_prefix):
+async def test_cursor_execute_arg_int(test_db: str, unique_table_prefix: str):
     """execute() with int parameter."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -197,7 +201,7 @@ async def test_cursor_execute_arg_int(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_arg_float(test_db, unique_table_prefix):
+async def test_cursor_execute_arg_float(test_db: str, unique_table_prefix: str):
     """execute() with float parameter."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -209,7 +213,7 @@ async def test_cursor_execute_arg_float(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_arg_string(test_db, unique_table_prefix):
+async def test_cursor_execute_arg_string(test_db: str, unique_table_prefix: str):
     """execute() with string parameter."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -221,7 +225,7 @@ async def test_cursor_execute_arg_string(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_param_list(test_db, unique_table_prefix):
+async def test_cursor_execute_param_list(test_db: str, unique_table_prefix: str):
     """execute() with list parameters."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -237,7 +241,9 @@ async def test_cursor_execute_param_list(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_wrong_no_of_args_too_many(test_db, unique_table_prefix):
+async def test_cursor_execute_wrong_no_of_args_too_many(
+    test_db: str, unique_table_prefix: str
+):
     """execute() with too many parameters may raise or use first param."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -256,7 +262,9 @@ async def test_cursor_execute_wrong_no_of_args_too_many(test_db, unique_table_pr
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_wrong_no_of_args_too_few(test_db, unique_table_prefix):
+async def test_cursor_execute_wrong_no_of_args_too_few(
+    test_db: str, unique_table_prefix: str
+):
     """execute() with too few parameters may raise or bind NULL (implementation-dependent)."""
     async with connect(test_db) as cx:
         await cx.execute(f"CREATE TABLE {unique_table_prefix} (id INTEGER PRIMARY KEY)")
@@ -271,7 +279,9 @@ async def test_cursor_execute_wrong_no_of_args_too_few(test_db, unique_table_pre
 
 
 @pytest.mark.asyncio
-async def test_cursor_execute_non_iterable_params(test_db, unique_table_prefix):
+async def test_cursor_execute_non_iterable_params(
+    test_db: str, unique_table_prefix: str
+):
     """execute() with non-iterable parameters raises or is rejected."""
     async with connect(test_db) as cx:
         await cx.execute(f"CREATE TABLE {unique_table_prefix} (id INTEGER PRIMARY KEY)")
@@ -289,7 +299,7 @@ async def test_cursor_execute_non_iterable_params(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_rowcount_execute(test_db, unique_table_prefix):
+async def test_cursor_rowcount_execute(test_db: str, unique_table_prefix: str):
     """rowcount after UPDATE reflects number of rows updated."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -303,7 +313,7 @@ async def test_cursor_rowcount_execute(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_rowcount_select(test_db):
+async def test_cursor_rowcount_select(test_db: str):
     """rowcount for SELECT is -1 (unknown until all rows fetched)."""
     async with connect(test_db) as cx:
         cur = await cx.execute("SELECT 5 UNION SELECT 6")
@@ -312,7 +322,7 @@ async def test_cursor_rowcount_select(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_rowcount_executemany(test_db, unique_table_prefix):
+async def test_cursor_rowcount_executemany(test_db: str, unique_table_prefix: str):
     """executemany() inserts multiple rows; rowcount may be set or -1."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -331,7 +341,7 @@ async def test_cursor_rowcount_executemany(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_fetchone(test_db, unique_table_prefix):
+async def test_cursor_fetchone(test_db: str, unique_table_prefix: str):
     """fetchone() returns one row then None."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -349,7 +359,7 @@ async def test_cursor_fetchone(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_fetchone_no_statement(test_db):
+async def test_cursor_fetchone_no_statement(test_db: str):
     """fetchone() with no active statement returns None or raises ProgrammingError."""
     async with connect(test_db) as cx:
         cur = cx.cursor()
@@ -362,7 +372,7 @@ async def test_cursor_fetchone_no_statement(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_fetchmany(test_db, unique_table_prefix):
+async def test_cursor_fetchmany(test_db: str, unique_table_prefix: str):
     """fetchmany() with size returns that many rows."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -379,7 +389,7 @@ async def test_cursor_fetchmany(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_fetchall(test_db, unique_table_prefix):
+async def test_cursor_fetchall(test_db: str, unique_table_prefix: str):
     """fetchall() returns all rows."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -398,7 +408,7 @@ async def test_cursor_fetchall(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_lastrowid_insert(test_db, unique_table_prefix):
+async def test_cursor_lastrowid_insert(test_db: str, unique_table_prefix: str):
     """lastrowid after INSERT reflects row id."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -412,7 +422,7 @@ async def test_cursor_lastrowid_insert(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_description_after_fetch(test_db, unique_table_prefix):
+async def test_cursor_description_after_fetch(test_db: str, unique_table_prefix: str):
     """description is set after fetch (lazy)."""
     async with connect(test_db) as cx:
         await cx.execute(f"CREATE TABLE {unique_table_prefix} (a INT, b TEXT)")
@@ -430,7 +440,7 @@ async def test_cursor_description_after_fetch(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_executemany_sequence(test_db, unique_table_prefix):
+async def test_executemany_sequence(test_db: str, unique_table_prefix: str):
     """executemany() with sequence of parameters."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -445,7 +455,7 @@ async def test_executemany_sequence(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_executemany_select_raises(test_db):
+async def test_executemany_select_raises(test_db: str):
     """executemany() with SELECT may raise or execute (sqlite3 raises)."""
     async with connect(test_db) as cx:
         cur = cx.cursor()
@@ -460,7 +470,7 @@ async def test_executemany_select_raises(test_db):
 
 
 @pytest.mark.asyncio
-async def test_use_after_close(test_db, unique_table_prefix):
+async def test_use_after_close(test_db: str, unique_table_prefix: str):
     """Using cursor after connection close() raises."""
     conn = await connect(test_db)
     await conn.execute(f"CREATE TABLE {unique_table_prefix} (id INTEGER PRIMARY KEY)")
@@ -471,7 +481,7 @@ async def test_use_after_close(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_closed_cursor_execute_raises(test_db, unique_table_prefix):
+async def test_closed_cursor_execute_raises(test_db: str, unique_table_prefix: str):
     """Cursor.execute() after cursor.close() may raise (implementation-dependent)."""
     async with connect(test_db) as cx:
         await cx.execute(f"CREATE TABLE {unique_table_prefix} (id INTEGER PRIMARY KEY)")
@@ -488,7 +498,7 @@ async def test_closed_cursor_execute_raises(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_executescript_string(test_db, unique_table_prefix):
+async def test_executescript_string(test_db: str, unique_table_prefix: str):
     """executescript() runs multiple statements."""
     async with connect(test_db) as cx:
         cur = cx.cursor()
@@ -508,7 +518,7 @@ async def test_executescript_string(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_row_keys(test_db):
+async def test_row_keys(test_db: str):
     """Row factory Row: keys() returns column names."""
     async with connect(test_db) as cx:
         cx.row_factory = Row
@@ -520,7 +530,7 @@ async def test_row_keys(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_getitem(test_db):
+async def test_row_getitem(test_db: str):
     """Row: index and name access."""
     async with connect(test_db) as cx:
         cx.row_factory = Row
@@ -536,7 +546,7 @@ async def test_row_getitem(test_db):
 
 
 @pytest.mark.asyncio
-async def test_on_conflict_ignore(test_db, unique_table_prefix):
+async def test_on_conflict_ignore(test_db: str, unique_table_prefix: str):
     """INSERT OR IGNORE ignores duplicate."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -562,7 +572,7 @@ async def test_on_conflict_ignore(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_on_conflict_replace(test_db, unique_table_prefix):
+async def test_on_conflict_replace(test_db: str, unique_table_prefix: str):
     """INSERT OR REPLACE replaces on conflict."""
     async with connect(test_db) as cx:
         await cx.execute(

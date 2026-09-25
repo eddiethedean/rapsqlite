@@ -1,5 +1,7 @@
 """Tests for connection cleanup and resource management."""
 
+from typing import Any
+
 import pytest
 import rapsqlite
 
@@ -7,18 +9,24 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_connection_close_cleans_up_callbacks(test_db):
+async def test_connection_close_cleans_up_callbacks(test_db: str):
     """Test that close() properly cleans up callbacks."""
     db = rapsqlite.connect(test_db)
 
     # Set up callbacks
-    def test_func(x):
+    def test_func(x: Any):
         return x
 
-    def trace_cb(sql):
+    def trace_cb(sql: str):
         pass
 
-    def auth_cb(action, arg1, arg2, arg3, arg4):
+    def auth_cb(
+        action: int,
+        arg1: str | None,
+        arg2: str | None,
+        arg3: str | None,
+        arg4: str | None,
+    ):
         return 0
 
     def progress_cb():
@@ -40,7 +48,7 @@ async def test_connection_close_cleans_up_callbacks(test_db):
 
 
 @pytest.mark.asyncio
-async def test_connection_close_rolls_back_transaction(test_db):
+async def test_connection_close_rolls_back_transaction(test_db: str):
     """Test that close() rolls back active transactions."""
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -59,7 +67,7 @@ async def test_connection_close_rolls_back_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_connection_context_manager_cleanup(test_db):
+async def test_connection_context_manager_cleanup(test_db: str):
     """Test that async context manager properly cleans up."""
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -74,7 +82,7 @@ async def test_connection_context_manager_cleanup(test_db):
 
 
 @pytest.mark.asyncio
-async def test_connection_context_manager_ensures_cleanup(test_db):
+async def test_connection_context_manager_ensures_cleanup(test_db: str):
     """Test that context manager ensures proper cleanup even on exceptions."""
     try:
         async with rapsqlite.connect(test_db) as db:
@@ -93,7 +101,7 @@ async def test_connection_context_manager_ensures_cleanup(test_db):
 
 
 @pytest.mark.asyncio
-async def test_connection_close_releases_pool(test_db):
+async def test_connection_close_releases_pool(test_db: str):
     """Test that close() properly closes the connection pool."""
     db = rapsqlite.connect(test_db)
     await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -108,7 +116,7 @@ async def test_connection_close_releases_pool(test_db):
 
 
 @pytest.mark.asyncio
-async def test_multiple_connections_independent_cleanup(test_db):
+async def test_multiple_connections_independent_cleanup(test_db: str):
     """Test that multiple connections clean up independently."""
     db1 = rapsqlite.connect(test_db)
     db2 = rapsqlite.connect(test_db)

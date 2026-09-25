@@ -79,7 +79,7 @@ def patch_imports(content: str) -> str:
     # Pattern 2: from aiosqlite import ... (need to handle this carefully)
     # We'll replace with import rapsqlite as aiosqlite, then the import should work
     lines = content.split("\n")
-    patched_lines = []
+    patched_lines: list[str] = []
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -152,12 +152,12 @@ def patch_test_files(aiosqlite_dir: Path, patched_dir: Path):
     (patched_dir / "__init__.py").touch()
 
 
-def parse_pytest_output(output: str, rel_path: str) -> list[dict]:
+def parse_pytest_output(output: str, rel_path: str) -> list[dict[str, str]]:
     """Parse pytest -v output for per-test results.
 
     Returns list of dicts: {name, status, error_snippet}
     """
-    results: list[dict] = []
+    results: list[dict[str, str]] = []
     lines = output.split("\n")
     i = 0
     while i < len(lines):
@@ -192,7 +192,7 @@ def parse_pytest_output(output: str, rel_path: str) -> list[dict]:
 
 def run_tests(
     patched_dir: Path, project_root: Path
-) -> tuple[list[str], list[str], list[str], dict[str, list[dict]]]:
+) -> tuple[list[str], list[str], list[str], dict[str, list[dict[str, str]]]]:
     """Run tests and collect results."""
     print_status("\n🧪 Running tests...", BLUE)
     print_status("=" * 60, BLUE)
@@ -250,10 +250,10 @@ def run_tests(
             if f.name not in ("__init__.py", "helpers.py", "__main__.py")
         ]
 
-    passed = []
-    failed = []
-    skipped = []
-    per_test_results: dict[str, list[dict]] = {}
+    passed: list[str] = []
+    failed: list[str] = []
+    skipped: list[str] = []
+    per_test_results: dict[str, list[dict[str, str]]] = {}
 
     # Run from parent so patched_dir is a package (enables "from .helpers" in smoke.py)
     run_cwd = patched_dir.parent
@@ -331,7 +331,7 @@ def generate_report(
     passed: list[str],
     failed: list[str],
     skipped: list[str],
-    per_test_results: dict[str, list[dict]],
+    per_test_results: dict[str, list[dict[str, str]]],
     project_root: Path,
     rapsqlite_version: str,
 ):

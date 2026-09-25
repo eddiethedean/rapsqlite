@@ -8,7 +8,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_fts5_create_and_query(test_db):
+async def test_fts5_create_and_query(test_db: str):
     """FTS5 virtual table creation and MATCH queries work."""
     async with connect(test_db) as db:
         await db.execute("CREATE VIRTUAL TABLE docs USING fts5(title, content)")
@@ -26,7 +26,7 @@ async def test_fts5_create_and_query(test_db):
 
 
 @pytest.mark.asyncio
-async def test_fts5_bm25(test_db):
+async def test_fts5_bm25(test_db: str):
     """FTS5 bm25() ranking works."""
     async with connect(test_db) as db:
         await db.execute("CREATE VIRTUAL TABLE fts_bm25 USING fts5(a, b)")

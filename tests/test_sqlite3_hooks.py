@@ -11,12 +11,18 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_set_authorizer_allow_and_invoked(test_db, unique_table_prefix):
+async def test_set_authorizer_allow_and_invoked(test_db: str, unique_table_prefix: str):
     """set_authorizer callback is invoked; allow all then clear."""
     async with connect(test_db) as db:
-        calls = []
+        calls: list[int] = []
 
-        def authorizer(action, arg1, arg2, arg3, arg4):
+        def authorizer(
+            action: int,
+            arg1: str | None,
+            arg2: str | None,
+            arg3: str | None,
+            arg4: str | None,
+        ):
             calls.append(action)
             return 0  # SQLITE_OK
 
@@ -28,7 +34,7 @@ async def test_set_authorizer_allow_and_invoked(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_set_progress_handler_invoked(test_db, unique_table_prefix):
+async def test_set_progress_handler_invoked(test_db: str, unique_table_prefix: str):
     """set_progress_handler callback is invoked during long operations."""
     async with connect(test_db) as db:
         await db.execute(
@@ -40,7 +46,7 @@ async def test_set_progress_handler_invoked(test_db, unique_table_prefix):
             [[i] for i in range(200)],
         )
         await cur.close()
-        progress_calls = []
+        progress_calls: list[int] = []
 
         def progress():
             progress_calls.append(1)

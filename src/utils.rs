@@ -3,6 +3,7 @@
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 /// Detect if a query is a SELECT query (for determining execution strategy).
@@ -113,6 +114,18 @@ pub(crate) fn track_query_usage(query_cache: &Arc<StdMutex<HashMap<String, u64>>
     // If it happens, unwrap() will panic which is acceptable for this non-critical operation.
     let mut cache = query_cache.lock().unwrap();
     *cache.entry(normalized).or_insert(0) += 1;
+}
+
+/// Track query usage only when diagnostics are explicitly enabled. Query analytics
+/// are intentionally absent from the normal execution hot path.
+pub(crate) fn track_query_usage_if_enabled(
+    enabled: &AtomicBool,
+    query_cache: &Arc<StdMutex<HashMap<String, u64>>>,
+    query: &str,
+) {
+    if enabled.load(Ordering::Relaxed) {
+        track_query_usage(query_cache, query);
+    }
 }
 
 /// Validate a file path for security and correctness.

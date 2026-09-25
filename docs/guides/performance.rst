@@ -147,6 +147,78 @@ Use Appropriate Fetch Methods
 * ``fetch_optional()``: When you might have zero or one row
 * ``Cursor.fetchmany()``: When processing large result sets in chunks
 
+Low-latency scalar and BLOB lookups
+-----------------------------------
+
+Cache-style code that needs one value should use ``fetch_scalar()`` instead of
+``fetch_one()``. The scalar path requires exactly one result column and avoids
+building a general row or applying a row factory. ``fetch_blob()`` adds a
+runtime contract that the result is a BLOB or ``NULL``.
+
+.. code-block:: python
+
+   value = await conn.fetch_scalar(
+       "SELECT value FROM cache WHERE key = ? AND expires_at > ?",
+       [key, time.time()],
+   )
+   payload = await conn.fetch_blob(
+       "SELECT value FROM cache WHERE key = ? AND expires_at > ?",
+       [key, time.time()],
+   )
+
+For a deliberately narrow, opt-in fast path, ``raw_fetch_scalar()`` executes
+one prepared SQLite C statement and returns a scalar without SQLx row decoding.
+It supports SQLite scalar values and BLOBs, but is unavailable when callbacks
+are configured and does not apply row factories, text factories, or converters.
+It is intended for trusted, parameterized cache lookups, not as a replacement
+for the general query API. A raw operation registers its active SQLite handle
+so ``await conn.interrupt()`` can stop a long-running raw statement; ordinary
+task cancellation does not magically interrupt synchronous SQLite execution.
+
+.. code-block:: python
+
+   value = await conn.raw_fetch_scalar(
+       "SELECT value FROM cache WHERE key = ?", [key], blob=True
+   )
+
+``prepare()`` creates a reusable connection-bound operation object that keeps
+the SQL and mode selection out of a hot loop. Normal prepared operations still
+use SQLx's per-connection statement cache; raw operations retain the narrow
+raw contract and re-prepare through the current physical handle.
+
+.. code-block:: python
+
+   lookup = conn.prepare(
+       "SELECT value FROM cache WHERE key = ?", raw=True, blob=True
+   )
+   value = await lookup.fetch_blob([key])
+
+Session affinity
+-----------------
+
+``connect(..., session_affinity=True)`` retains one physical SQLite connection
+between non-transaction operations on that logical connection. This can reduce
+pool acquisition and handle-lock churn for sequential cache loops, but the
+retained connection consumes pool capacity and reduces sharing under
+concurrency. It is opt-in and should be benchmarked with the intended pool
+size. Transactions always take priority and release the retained session while
+they are active.
+
+Diagnostics and benchmark discipline
+------------------------------------
+
+Query-usage analytics are disabled by default. Set
+``conn.query_usage_tracking = True`` only while diagnosing workload shape; the
+normal path then avoids SQL normalization and the analytics mutex. This
+analytics counter is separate from SQLx's internal prepared-statement cache.
+
+Use ``benchmarks/phase5_hotpath.py`` to compare the actual client APIs. Report
+sequential latency (including p50/p95/p99), concurrent throughput, event-loop
+delay, pool/session settings, payload size, expiration behavior, and errors
+separately. Do not infer per-request latency by dividing a published server
+throughput number by operations per second, and do not compare unmatched raw
+SQLite timings with async client calls.
+
 Performance Monitoring
 ----------------------
 

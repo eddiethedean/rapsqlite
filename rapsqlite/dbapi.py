@@ -7,7 +7,8 @@ from __future__ import annotations  # PEP 563: forward references without quotes
 
 import asyncio
 import re
-from typing import Any, Callable, Coroutine, Iterable, Sequence, TypeVar, cast
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Callable, Coroutine, TypeVar, cast
 
 from . import (
     ConnectionT,
@@ -17,9 +18,11 @@ from . import (
     InterfaceError,
 )
 from . import connect as _connect
-from ._compat.commit_rollback import _is_no_tx_error_message
+from ._compat.commit_rollback import _is_no_tx_error_message  # pyright: ignore[reportPrivateUsage]
 
 T = TypeVar("T")
+_ParameterSet = Sequence[Any] | Mapping[str, Any]
+_InterfaceError = cast(Any, InterfaceError)
 
 
 def _parse_select_column_names(sql: str) -> list[str] | None:
@@ -53,25 +56,37 @@ DatabaseError = _ext.DatabaseError
 
 def _dbapi_exc(name: str, ext_cls: Any, base: type) -> type:
     """Ensure exception class is a subclass of base (DBAPI hierarchy)."""
+    # Compatibility fallbacks may supply ``base`` as ``ext_cls`` itself. Avoid
+    # creating an invalid duplicate-base class in that case. If the extension
+    # class already inherits from the DB-API base, wrapping it alone preserves
+    # that hierarchy too.
+    if ext_cls is base or issubclass(ext_cls, base):
+        return type(name, (ext_cls,), {})
     return type(name, (ext_cls, base), {})
 
 
-# DBAPI exception list: (name, base). Each is exposed as a module-level name.
-_DBAPI_EXCEPTIONS = [
-    ("DataError", DatabaseError),
-    ("OperationalError", DatabaseError),
-    ("IntegrityError", DatabaseError),
-    ("InternalError", DatabaseError),
-    ("NotSupportedError", DatabaseError),
-    ("ProgrammingError", DatabaseError),
-]
-for _name, _base in _DBAPI_EXCEPTIONS:
-    _ext_cls = getattr(_ext, _name, type(_name, (DatabaseError,), {}))
-    globals()[_name] = _dbapi_exc(_name, _ext_cls, _base)
-
-# For mypy: names are set by loop above
-ProgrammingError = globals()["ProgrammingError"]
-OperationalError = globals()["OperationalError"]
+# DBAPI exception classes are assigned explicitly so static type checkers can
+# see the module-level names that are also listed in __all__.
+DataError: type[BaseException] = _dbapi_exc(
+    "DataError", getattr(_ext, "DataError", DatabaseError), DatabaseError
+)
+OperationalError: type[BaseException] = _dbapi_exc(
+    "OperationalError", getattr(_ext, "OperationalError", DatabaseError), DatabaseError
+)
+IntegrityError: type[BaseException] = _dbapi_exc(
+    "IntegrityError", getattr(_ext, "IntegrityError", DatabaseError), DatabaseError
+)
+InternalError: type[BaseException] = _dbapi_exc(
+    "InternalError", getattr(_ext, "InternalError", DatabaseError), DatabaseError
+)
+NotSupportedError: type[BaseException] = _dbapi_exc(
+    "NotSupportedError",
+    getattr(_ext, "NotSupportedError", DatabaseError),
+    DatabaseError,
+)
+ProgrammingError: type[BaseException] = _dbapi_exc(
+    "ProgrammingError", getattr(_ext, "ProgrammingError", DatabaseError), DatabaseError
+)
 
 apilevel = "2.0"
 threadsafety = 0
@@ -96,10 +111,10 @@ class _CursorContextManager:
 
     def __await__(self) -> Any:
         """Allow await conn.cursor() to return the cursor directly."""
-        return self._conn._cursor_impl().__await__()
+        return self._conn._cursor_impl().__await__()  # pyright: ignore[reportPrivateUsage]
 
     async def __aenter__(self) -> "AsyncCursor":
-        return await self._conn._cursor_impl()
+        return await self._conn._cursor_impl()  # pyright: ignore[reportPrivateUsage]
 
     async def __aexit__(self, *args: Any) -> None:
         pass
@@ -137,19 +152,19 @@ class AsyncCursor:
         async def _run() -> T:
             # Fail fast for true concurrent use, without using tiny timeouts that can
             # spuriously trip under scheduler load.
-            if self._conn._op_lock.locked():
+            if self._conn._op_lock.locked():  # pyright: ignore[reportPrivateUsage]
                 raise ProgrammingError(
                     "Concurrent operation on same connection not allowed; "
                     "one operation per connection at a time."
                 )
-            await self._conn._op_lock.acquire()
+            await self._conn._op_lock.acquire()  # pyright: ignore[reportPrivateUsage]
             try:
                 return await coro_factory()
             except asyncio.CancelledError:
-                await self._conn._conn.interrupt()
+                await self._conn._conn.interrupt()  # pyright: ignore[reportPrivateUsage]
                 raise
             finally:
-                self._conn._op_lock.release()
+                self._conn._op_lock.release()  # pyright: ignore[reportPrivateUsage]
 
         return _run()
 
@@ -163,15 +178,15 @@ class AsyncCursor:
 
     @property
     def rowcount(self) -> int:
-        return cast(int, self._raw.rowcount)
+        return int(self._raw.rowcount)
 
     @property
     def lastrowid(self) -> int:
-        return cast(int, self._raw.lastrowid)
+        return int(self._raw.lastrowid)
 
     @property
     def arraysize(self) -> int:
-        return cast(int, self._raw.arraysize)
+        return int(self._raw.arraysize)
 
     @arraysize.setter
     def arraysize(self, value: int) -> None:
@@ -217,7 +232,7 @@ class AsyncCursor:
         return await self._with_lock(_do)
 
     async def executemany(
-        self, sql: str, seq_of_params: Iterable[Sequence[Any]]
+        self, sql: str, seq_of_params: Iterable[_ParameterSet]
     ) -> None:
         async def _do() -> None:
             self._result_buffer = None
@@ -365,7 +380,9 @@ class AsyncConnection:
 
         return await self._with_op_lock(_do)
 
-    async def executemany(self, sql: str, seq_of_params: Any) -> None:
+    async def executemany(
+        self, sql: str, seq_of_params: Iterable[_ParameterSet]
+    ) -> None:
         async def _do() -> None:
             await self._conn.executemany(sql, seq_of_params)
 
@@ -441,11 +458,11 @@ async def connect(*args: Any, **kwargs: Any) -> AsyncConnection:
     if database is None:
         database = kwargs.pop("database", None)
     if database is None:
-        raise InterfaceError(
+        raise _InterfaceError(
             "connect() requires database as first positional or as keyword 'database'"
         )
     if args:
-        raise InterfaceError(
+        raise _InterfaceError(
             "connect() takes at most one positional argument (database)"
         )
 

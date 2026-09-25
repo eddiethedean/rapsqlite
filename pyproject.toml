@@ -137,3 +137,28 @@ exclude = ["*.pyi"]
 
 [tool.ruff.format]
 exclude = ["*.pyi"]
+
+[tool.pyright]
+include = [
+    "rapsqlite",
+    "tests",
+    "examples",
+    "benchmarks",
+    "scripts",
+    "docs/conf.py",
+]
+exclude = [
+    "**/__pycache__",
+    ".venv",
+    ".cargo_home",
+    "target",
+    "dist",
+    "docs/_build",
+]
+typeCheckingMode = "strict"
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+extraPaths = ["."]
+reportMissingImports = "error"
+reportMissingTypeStubs = "warning"

@@ -22,7 +22,7 @@ from rapsqlite import (
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_pool_exhaustion(test_db):
+async def test_pool_exhaustion(test_db: str):
     """Test pool exhaustion scenario - all connections in use.
 
     Note: Each Connection object has its own pool, so we test exhaustion
@@ -52,7 +52,7 @@ async def test_pool_exhaustion(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_connection_timeout_short(test_db):
+async def test_connection_timeout_short(test_db: str):
     """Test connection timeout configuration.
 
     Note: Each Connection has its own pool, so we test timeout configuration
@@ -72,7 +72,7 @@ async def test_connection_timeout_short(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_pool_size_zero(test_db):
+async def test_pool_size_zero(test_db: str):
     """Test pool size edge case - size=0 should default to 1."""
     async with connect(test_db) as db:
         db.pool_size = 0
@@ -85,7 +85,7 @@ async def test_pool_size_zero(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_pool_size_one(test_db):
+async def test_pool_size_one(test_db: str):
     """Test pool size edge case - size=1."""
     async with connect(test_db) as db:
         db.pool_size = 1
@@ -99,7 +99,7 @@ async def test_pool_size_one(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_pool_size_large(test_db):
+async def test_pool_size_large(test_db: str):
     """Test pool size edge case - very large size."""
     async with connect(test_db) as db:
         db.pool_size = 1000  # Very large pool
@@ -111,7 +111,7 @@ async def test_pool_size_large(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_nested_transaction_attempt(test_db):
+async def test_nested_transaction_attempt(test_db: str):
     """Test nested transaction attempts - should fail gracefully."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -125,7 +125,7 @@ async def test_nested_transaction_attempt(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_transaction_closed_connection(test_db):
+async def test_transaction_closed_connection(test_db: str):
     """Test transaction with closed connection.
 
     Note: Connection might recreate pool on use, so behavior may vary.
@@ -145,7 +145,7 @@ async def test_transaction_closed_connection(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_multiple_close_calls(test_db):
+async def test_multiple_close_calls(test_db: str):
     """Test multiple close() calls - should be safe."""
     db = Connection(test_db)
     await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -165,7 +165,7 @@ async def test_multiple_close_calls(test_db):
 )
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_operations_on_closed_connection(test_db):
+async def test_operations_on_closed_connection(test_db: str):
     """Test operations on closed connection raise InterfaceError.
 
     After close(), any operation that would use the pool must raise
@@ -186,7 +186,7 @@ async def test_operations_on_closed_connection(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_empty_parameter_list(test_db):
+async def test_empty_parameter_list(test_db: str):
     """Test empty parameter list."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -198,7 +198,7 @@ async def test_empty_parameter_list(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_large_parameter_list(test_db):
+async def test_large_parameter_list(test_db: str):
     """Test parameter list at the limit (16 parameters)."""
     async with connect(test_db) as db:
         # Create table with 16 columns
@@ -224,7 +224,7 @@ async def test_large_parameter_list(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_too_many_parameters(test_db):
+async def test_too_many_parameters(test_db: str):
     """Test parameter list mismatch - more parameters than columns."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -242,7 +242,7 @@ async def test_too_many_parameters(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_sql_injection_attempts(test_db):
+async def test_sql_injection_attempts(test_db: str):
     """Test SQL injection attempt patterns - should be safe."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
@@ -259,7 +259,7 @@ async def test_sql_injection_attempts(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_malformed_sql(test_db):
+async def test_malformed_sql(test_db: str):
     """Test malformed SQL queries."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -279,7 +279,7 @@ async def test_malformed_sql(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_unicode_in_queries(test_db):
+async def test_unicode_in_queries(test_db: str):
     """Test Unicode edge cases in queries and parameters."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
@@ -294,7 +294,7 @@ async def test_unicode_in_queries(test_db):
             "\u0000",  # Null byte (should be handled)
         ]
 
-        for i, text in enumerate(unicode_strings):
+        for _, text in enumerate(unicode_strings):
             if "\u0000" in text:
                 # Null bytes might cause issues, skip for now
                 continue
@@ -306,7 +306,7 @@ async def test_unicode_in_queries(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_very_long_query(test_db):
+async def test_very_long_query(test_db: str):
     """Test very long query strings."""
     async with connect(test_db) as db:
         # Create a very long query (150 columns; enough to exercise long-query path)
@@ -320,7 +320,7 @@ async def test_very_long_query(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_special_characters_in_names(test_db):
+async def test_special_characters_in_names(test_db: str):
     """Test special characters in table/column names."""
     async with connect(test_db) as db:
         # SQLite allows quoted identifiers with special characters
@@ -337,14 +337,14 @@ async def test_special_characters_in_names(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_invalid_row_factory(test_db):
+async def test_invalid_row_factory(test_db: str):
     """Test invalid row factory types."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
         await db.execute("INSERT INTO t (name) VALUES (?)", ["test"])
 
         # Invalid row factory should raise error or use default
-        db.row_factory = 12345  # Invalid type
+        setattr(db, "row_factory", 12345)  # Deliberately invalid runtime input
 
         # Should either work with default or raise error
         try:
@@ -358,7 +358,7 @@ async def test_invalid_row_factory(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_very_large_integer(test_db):
+async def test_very_large_integer(test_db: str):
     """Test very large integer values."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -373,7 +373,7 @@ async def test_very_large_integer(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_nan_float(test_db):
+async def test_nan_float(test_db: str):
     """Test NaN float values - SQLite converts NaN to NULL."""
 
     async with connect(test_db) as db:
@@ -389,7 +389,7 @@ async def test_nan_float(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_infinity_float(test_db):
+async def test_infinity_float(test_db: str):
     """Test infinity float values."""
     import math
 
@@ -407,7 +407,7 @@ async def test_infinity_float(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_empty_blob(test_db):
+async def test_empty_blob(test_db: str):
     """Test empty BLOB data."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, data BLOB)")
@@ -421,7 +421,7 @@ async def test_empty_blob(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_large_blob(test_db):
+async def test_large_blob(test_db: str):
     """Test large BLOB data."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, data BLOB)")
@@ -437,7 +437,7 @@ async def test_large_blob(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_null_handling(test_db):
+async def test_null_handling(test_db: str):
     """Test NULL handling in all contexts."""
     async with connect(test_db) as db:
         await db.execute(

@@ -124,7 +124,7 @@ jobs:
         run: cargo deny check advisories bans sources
 
   python-lint:
-    name: Python (ruff, mypy)
+    name: Python (ruff, mypy, pyright)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -132,14 +132,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - name: Install ruff and mypy
-        run: pip install -r requirements-ci.txt
-      - name: Ruff format
-        run: ruff format --check .
-      - name: Ruff check
-        run: ruff check .
-      - name: Mypy
-        run: mypy rapsqlite
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install type-check dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -r requirements-ci.txt -r requirements-test.txt aiohttp alembic fastapi greenlet httpx redis sqlalchemy maturin
+      - name: Build local package for public API verification
+        run: . .venv/bin/activate && python -m maturin develop --release
+      - name: Run Python checks
+        run: . .venv/bin/activate && bash scripts/check_python_types.sh
 
   python-tests:
     name: Python tests - ${{ matrix.os }} py${{ matrix.python-version }}

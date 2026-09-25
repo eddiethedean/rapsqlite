@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins as _builtins
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, cast
 
 try:  # pragma: no cover - mirrors __init__ fallback logic
@@ -15,8 +15,8 @@ except ImportError:  # pragma: no cover
         _ext = None
 
 
-if getattr(_ext, "ValueError", None) is not None:
-    ValueError = _ext.ValueError
+if _ext is not None:
+    ValueError = getattr(_ext, "ValueError", _builtins.ValueError)
 else:
     ValueError = _builtins.ValueError
 
@@ -26,7 +26,7 @@ def _normalize_parameters(parameters: Any | None) -> list[Any]:
     if parameters is None:
         return []
     if isinstance(parameters, (list, tuple)):
-        return list(parameters)
+        return list(cast(Iterable[Any], parameters))
     return [parameters]
 
 
@@ -147,15 +147,19 @@ async def analyze_query_plan(
     parameters: Any | None = None,
 ) -> dict[str, Any]:
     """Run EXPLAIN QUERY PLAN and return structured analysis."""
-    rows = await conn.explain_query_plan(sql, parameters)
+    rows = cast(list[Any], await conn.explain_query_plan(sql, parameters))
     details: list[str] = []
-    for row in rows:
-        if isinstance(row, (list, tuple)) and len(row) >= 4:
-            details.append(str(row[3]))
+    for raw_row in rows:
+        row: object = raw_row
+        if isinstance(row, (list, tuple)):
+            row_values = cast(list[Any] | tuple[Any, ...], row)
+            if len(row_values) >= 4:
+                details.append(str(row_values[3]))
         elif isinstance(row, dict) and "detail" in row:
-            details.append(str(row["detail"]))
+            row_mapping = cast(dict[str, Any], row)
+            details.append(str(row_mapping["detail"]))
         else:
-            details.append(str(row))
+            details.append(str(cast(object, row)))
     detail_str = " ".join(details).upper()
     full_scan_targets = _full_scan_targets(details)
     return {
@@ -235,7 +239,7 @@ def rows_to_dicts(
         if hasattr(row, "keys") and callable(row.keys):
             result.append(dict(row))
         else:
-            row_iter = row if isinstance(row, (list, tuple)) else list(row)
+            row_iter: list[Any] = list(cast(Iterable[Any], row))
             result.append(dict(zip(col_list, row_iter)))
     return result
 
@@ -256,7 +260,7 @@ class _StreamChunksIterator:
         try:
             default_chunk = getattr(conn, "iter_chunk_size", 64)
             default_chunk = int(default_chunk) if default_chunk is not None else 64
-        except (TypeError, ValueError):
+        except (TypeError, _builtins.ValueError):
             default_chunk = 64
         self._chunk_size = int(chunk_size) if chunk_size is not None else default_chunk
         if self._chunk_size <= 0:
@@ -270,8 +274,8 @@ class _StreamChunksIterator:
         # Wrap query so we can paginate: SELECT * FROM (user_query) LIMIT ? OFFSET ?
         wrapped = f"SELECT * FROM ({self._sql}) LIMIT ? OFFSET ?"
         params = self._params + [self._chunk_size, self._offset]
-        rows = await self._conn.fetch_all(wrapped, params)
+        rows = cast(list[list[Any]], await self._conn.fetch_all(wrapped, params))
         if not rows:
             raise StopAsyncIteration
         self._offset += len(rows)
-        return cast(list[list[Any]], rows)
+        return rows

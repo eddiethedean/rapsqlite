@@ -8,7 +8,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_json_extract(test_db):
+async def test_json_extract(test_db: str):
     """json_extract returns values from JSON text."""
     async with connect(test_db) as db:
         rows = await db.fetch_all(
@@ -18,7 +18,7 @@ async def test_json_extract(test_db):
 
 
 @pytest.mark.asyncio
-async def test_json_object(test_db):
+async def test_json_object(test_db: str):
     """json_object builds JSON from key-value pairs."""
     async with connect(test_db) as db:
         rows = await db.fetch_all("SELECT json_object('name', 'alice', 'age', 30)")
@@ -27,7 +27,7 @@ async def test_json_object(test_db):
 
 
 @pytest.mark.asyncio
-async def test_json_each(test_db):
+async def test_json_each(test_db: str):
     """json_each expands JSON array/object to rows."""
     async with connect(test_db) as db:
         rows = await db.fetch_all("SELECT key, value FROM json_each('[1,2,3]')")
@@ -36,7 +36,7 @@ async def test_json_each(test_db):
 
 
 @pytest.mark.asyncio
-async def test_json_arrow_operators(test_db):
+async def test_json_arrow_operators(test_db: str):
     """JSON -> and ->> operators work (SQLite 3.38+)."""
     async with connect(test_db) as db:
         rows = await db.fetch_all(

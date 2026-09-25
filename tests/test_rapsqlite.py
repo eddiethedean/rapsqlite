@@ -1,6 +1,7 @@
 """Test rapsqlite async functionality."""
 
 import os
+from collections import UserDict
 
 import pytest
 
@@ -10,7 +11,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_create_table(test_db):
+async def test_create_table(test_db: str):
     """Test creating a table."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -19,7 +20,7 @@ async def test_create_table(test_db):
 
 
 @pytest.mark.asyncio
-async def test_insert_data(test_db):
+async def test_insert_data(test_db: str):
     """Test inserting data into a table."""
     async with connect(test_db) as conn:
         await conn.execute(
@@ -34,7 +35,21 @@ async def test_insert_data(test_db):
 
 
 @pytest.mark.asyncio
-async def test_fetch_all(test_db):
+async def test_executemany_accepts_named_parameter_mappings():
+    async with connect(":memory:") as conn:
+        await conn.execute("CREATE TABLE values_table (value INTEGER)")
+        await conn.executemany(
+            "INSERT INTO values_table VALUES (:value)",
+            [UserDict({"value": 7}), UserDict({"value": 9})],
+        )
+
+        assert await conn.fetch_all(
+            "SELECT value FROM values_table ORDER BY value"
+        ) == [[7], [9]]
+
+
+@pytest.mark.asyncio
+async def test_fetch_all(test_db: str):
     """Test fetching all rows from a table."""
     async with connect(test_db) as conn:
         await conn.execute(
@@ -53,7 +68,7 @@ async def test_fetch_all(test_db):
 
 
 @pytest.mark.asyncio
-async def test_fetch_all_with_filter(test_db):
+async def test_fetch_all_with_filter(test_db: str):
     """Test fetching rows with a WHERE clause."""
     async with connect(test_db) as conn:
         await conn.execute(
@@ -72,7 +87,7 @@ async def test_fetch_all_with_filter(test_db):
 
 
 @pytest.mark.asyncio
-async def test_multiple_operations(test_db):
+async def test_multiple_operations(test_db: str):
     """Test multiple database operations in sequence."""
     async with connect(test_db) as conn:
         # Create table
@@ -96,7 +111,7 @@ async def test_multiple_operations(test_db):
 
 
 @pytest.mark.asyncio
-async def test_empty_result(test_db):
+async def test_empty_result(test_db: str):
     """Test fetching from an empty table."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE empty (id INTEGER PRIMARY KEY, name TEXT)")
@@ -107,7 +122,7 @@ async def test_empty_result(test_db):
 
 # Type system tests
 @pytest.mark.asyncio
-async def test_type_integer(test_db):
+async def test_type_integer(test_db: str):
     """Test INTEGER type handling."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -120,7 +135,7 @@ async def test_type_integer(test_db):
 
 
 @pytest.mark.asyncio
-async def test_type_real(test_db):
+async def test_type_real(test_db: str):
     """Test REAL type handling."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value REAL)")
@@ -133,7 +148,7 @@ async def test_type_real(test_db):
 
 
 @pytest.mark.asyncio
-async def test_type_text(test_db):
+async def test_type_text(test_db: str):
     """Test TEXT type handling."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -146,7 +161,7 @@ async def test_type_text(test_db):
 
 
 @pytest.mark.asyncio
-async def test_type_null(test_db):
+async def test_type_null(test_db: str):
     """Test NULL type handling."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -159,7 +174,7 @@ async def test_type_null(test_db):
 
 # Transaction tests
 @pytest.mark.asyncio
-async def test_transaction_commit(test_db):
+async def test_transaction_commit(test_db: str):
     """Test transaction commit."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -174,7 +189,7 @@ async def test_transaction_commit(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transaction_rollback(test_db):
+async def test_transaction_rollback(test_db: str):
     """Test transaction rollback."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -188,7 +203,7 @@ async def test_transaction_rollback(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_many_in_transaction_explicit(test_db):
+async def test_execute_many_in_transaction_explicit(test_db: str):
     """Regression: execute_many works with explicit begin/commit."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -206,7 +221,7 @@ async def test_execute_many_in_transaction_explicit(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_many_in_transaction_context_manager(test_db):
+async def test_execute_many_in_transaction_context_manager(test_db: str):
     """Regression: execute_many works inside async with db.transaction()."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -224,7 +239,7 @@ async def test_execute_many_in_transaction_context_manager(test_db):
 
 # API method tests
 @pytest.mark.asyncio
-async def test_fetch_one(test_db):
+async def test_fetch_one(test_db: str):
     """Test fetch_one method."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -236,7 +251,7 @@ async def test_fetch_one(test_db):
 
 
 @pytest.mark.asyncio
-async def test_fetch_optional(test_db):
+async def test_fetch_optional(test_db: str):
     """Test fetch_optional method."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -253,7 +268,7 @@ async def test_fetch_optional(test_db):
 
 
 @pytest.mark.asyncio
-async def test_last_insert_rowid(test_db):
+async def test_last_insert_rowid(test_db: str):
     """Test last_insert_rowid method."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -264,7 +279,7 @@ async def test_last_insert_rowid(test_db):
 
 
 @pytest.mark.asyncio
-async def test_changes(test_db):
+async def test_changes(test_db: str):
     """Test changes method."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -278,7 +293,7 @@ async def test_changes(test_db):
 
 # Cursor tests
 @pytest.mark.asyncio
-async def test_cursor_execute(test_db):
+async def test_cursor_execute(test_db: str):
     """Test cursor execute method."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -291,7 +306,7 @@ async def test_cursor_execute(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_fetchone(test_db):
+async def test_cursor_fetchone(test_db: str):
     """Test cursor fetchone method."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -305,7 +320,7 @@ async def test_cursor_fetchone(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_fetchall(test_db):
+async def test_cursor_fetchall(test_db: str):
     """Test cursor fetchall method."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -319,7 +334,7 @@ async def test_cursor_fetchall(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_fetchmany(test_db):
+async def test_cursor_fetchmany(test_db: str):
     """Test cursor fetchmany method."""
     # Phase 2: fetchmany now supports size-based slicing
     async with connect(test_db) as conn:
@@ -346,7 +361,7 @@ async def test_cursor_fetchmany(test_db):
 
 # Context manager tests
 @pytest.mark.asyncio
-async def test_connection_context_manager(test_db):
+async def test_connection_context_manager(test_db: str):
     """Test connection async context manager."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -359,7 +374,7 @@ async def test_connection_context_manager(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_context_manager(test_db):
+async def test_cursor_context_manager(test_db: str):
     """Test cursor async context manager."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -373,7 +388,7 @@ async def test_cursor_context_manager(test_db):
 
 # aiosqlite compatibility tests
 @pytest.mark.asyncio
-async def test_connect_function(test_db):
+async def test_connect_function(test_db: str):
     """Test connect() factory function (aiosqlite compatibility)."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -387,7 +402,7 @@ async def test_connect_function(test_db):
 
 # Error handling tests
 @pytest.mark.asyncio
-async def test_integrity_error(test_db):
+async def test_integrity_error(test_db: str):
     """Test integrity constraint violation."""
     async with connect(test_db) as conn:
         await conn.execute(
@@ -401,7 +416,7 @@ async def test_integrity_error(test_db):
 
 
 @pytest.mark.asyncio
-async def test_programming_error(test_db):
+async def test_programming_error(test_db: str):
     """Test programming error (invalid SQL)."""
     async with connect(test_db) as conn:
         with pytest.raises(Exception):  # Should raise ProgrammingError or DatabaseError

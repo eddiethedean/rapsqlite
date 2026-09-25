@@ -38,7 +38,7 @@ def parse_test_file(path: Path) -> tuple[list[str], list[list[str]]]:
         if stmt:
             statements = [stmt]
     expected_lines = lines[sep_idx + 1 :]
-    expected_rows = []
+    expected_rows: list[list[str]] = []
     for line in expected_lines:
         line = line.strip()
         if not line or line.startswith("#"):

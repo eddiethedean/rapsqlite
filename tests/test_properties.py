@@ -3,6 +3,8 @@
 Tests invariants and properties that should always hold.
 """
 
+from typing import Any
+
 import pytest
 from hypothesis import given, strategies as st, settings, assume, HealthCheck
 
@@ -27,7 +29,7 @@ from rapsqlite import connect
         st.binary(),
     )
 )
-async def test_parameter_round_trip(test_db, value):
+async def test_parameter_round_trip(test_db: str, value: Any):
     """Test that parameter values survive round-trip (insert → select)."""
     async with connect(test_db) as db:
         await db.execute(
@@ -82,7 +84,9 @@ async def test_parameter_round_trip(test_db, value):
     ),
     example_id=st.integers(min_value=0, max_value=2**31 - 1),
 )
-async def test_multiple_parameters_round_trip(test_db, values, example_id):
+async def test_multiple_parameters_round_trip(
+    test_db: str, values: Any, example_id: Any
+):
     """Test that multiple parameters survive round-trip."""
     # Use a unique table name per example to avoid shared-pool schema caching
     # across hypothesis examples (different column counts would otherwise
@@ -139,7 +143,7 @@ async def test_multiple_parameters_round_trip(test_db, values, example_id):
     ),
     count=st.integers(min_value=1, max_value=100),
 )
-async def test_transaction_atomicity(test_db, table_name, count):
+async def test_transaction_atomicity(test_db: str, table_name: str, count: int):
     """Test that transactions are atomic - all or nothing."""
     # Avoid SQL keywords and ensure valid table name
     sql_keywords = {
@@ -218,7 +222,7 @@ async def test_transaction_atomicity(test_db, table_name, count):
     pool_size=st.integers(min_value=1, max_value=10),
     num_operations=st.integers(min_value=1, max_value=20),
 )
-async def test_pool_size_invariant(test_db, pool_size, num_operations):
+async def test_pool_size_invariant(test_db: str, pool_size: int, num_operations: int):
     """Test that pool size invariant is maintained."""
     async with connect(test_db) as db:
         db.pool_size = pool_size
@@ -242,7 +246,7 @@ async def test_pool_size_invariant(test_db, pool_size, num_operations):
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 @given(text_value=st.text(max_size=1000))
-async def test_text_round_trip(test_db, text_value):
+async def test_text_round_trip(test_db: str, text_value: str):
     """Test that text values survive round-trip."""
     async with connect(test_db) as db:
         await db.execute(
@@ -263,7 +267,7 @@ async def test_text_round_trip(test_db, text_value):
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 @given(int_value=st.integers(min_value=-(2**63), max_value=2**63 - 1))
-async def test_integer_round_trip(test_db, int_value):
+async def test_integer_round_trip(test_db: str, int_value: int):
     """Test that integer values survive round-trip."""
     async with connect(test_db) as db:
         await db.execute(
@@ -284,7 +288,7 @@ async def test_integer_round_trip(test_db, int_value):
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 @given(blob_value=st.binary(max_size=10000))
-async def test_blob_round_trip(test_db, blob_value):
+async def test_blob_round_trip(test_db: str, blob_value: bytes):
     """Test that BLOB values survive round-trip."""
     async with connect(test_db) as db:
         await db.execute(
@@ -317,7 +321,7 @@ async def test_blob_round_trip(test_db, blob_value):
         max_size=20,
     )
 )
-async def test_sequence_insert_delete_invariant(test_db, values):
+async def test_sequence_insert_delete_invariant(test_db: str, values: Any):
     """Insert a sequence, delete a subset, and verify remaining values match."""
     # Keep the deletion predicate simple and deterministic given the generated values:
     # delete values at even indices.
@@ -343,7 +347,7 @@ async def test_sequence_insert_delete_invariant(test_db, values):
 
         # Handle BLOB column: strings come back as bytes when stored in BLOB column
         # Normalize both sides for comparison - convert strings to bytes for BLOB column
-        def normalize_value(v):
+        def normalize_value(v: Any):
             if v is None:
                 return None
             if isinstance(v, bytes):

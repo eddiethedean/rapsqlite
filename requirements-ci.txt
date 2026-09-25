@@ -1,3 +1,4 @@
-# CI lint deps (ruff, mypy). Used by GitHub Actions and Makefile lint-python.
+# CI lint and type-check dependencies. Used by GitHub Actions and Makefile lint-python.
 ruff==0.15.6
 mypy>=1.4
+pyright==1.1.411

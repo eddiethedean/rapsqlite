@@ -1,5 +1,7 @@
 """Tests for bug fixes: __del__ cleanup, transaction_retry edge cases, connection state, etc."""
 
+from typing import Any
+
 import asyncio
 import gc
 
@@ -11,7 +13,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_transaction_retry_max_retries_zero_raises(test_db):
+async def test_transaction_retry_max_retries_zero_raises(test_db: str):
     """transaction_retry with max_retries=0 raises RuntimeError (no loop iterations)."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -24,7 +26,7 @@ async def test_transaction_retry_max_retries_zero_raises(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transaction_retry_max_retries_one_succeeds(test_db):
+async def test_transaction_retry_max_retries_one_succeeds(test_db: str):
     """transaction_retry with max_retries=1 runs exactly one attempt on success."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -38,7 +40,7 @@ async def test_transaction_retry_max_retries_one_succeeds(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transaction_retry_retries_locked_begin_without_rollback(test_db):
+async def test_transaction_retry_retries_locked_begin_without_rollback(test_db: str):
     async with (
         connect(test_db, timeout=0) as holder,
         connect(test_db, timeout=0) as contender,
@@ -50,7 +52,7 @@ async def test_transaction_retry_retries_locked_begin_without_rollback(test_db):
         await holder.execute("INSERT INTO retry_begin_lock DEFAULT VALUES")
 
         class CountingConnection:
-            def __init__(self, connection):
+            def __init__(self, connection: Any):
                 self.connection = connection
                 self.begin_calls = 0
                 self.rollback_calls = 0
@@ -85,7 +87,7 @@ async def test_transaction_retry_retries_locked_begin_without_rollback(test_db):
 
 
 @pytest.mark.asyncio
-async def test_connection_state_cleanup_on_close(test_db):
+async def test_connection_state_cleanup_on_close(test_db: str):
     """total_changes and in_transaction state are cleaned up when connection is closed."""
     db = connect(test_db)
     await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -100,7 +102,7 @@ async def test_connection_state_cleanup_on_close(test_db):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_total_changes_in_transaction_access(test_db):
+async def test_concurrent_total_changes_in_transaction_access(test_db: str):
     """Concurrent access to total_changes and in_transaction is thread-safe (no race)."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x INT)")
@@ -116,7 +118,7 @@ async def test_concurrent_total_changes_in_transaction_access(test_db):
 
 
 @pytest.mark.asyncio
-async def test_connection_gc_cleanup_does_not_leak(test_db):
+async def test_connection_gc_cleanup_does_not_leak(test_db: str):
     """Abandoning connections without close triggers __del__ which cleans up state.
 
     This is best-effort; we verify that creating and discarding connections

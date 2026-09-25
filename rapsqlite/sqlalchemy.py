@@ -29,12 +29,12 @@ try:
         AsyncAdapt_dbapi_connection,
         AsyncAdapt_dbapi_cursor,
     )
-except ImportError as e:
+except ImportError:
     raise ImportError(
         "The sqlite+rapsqlite dialect requires SQLAlchemy to be installed. "
         "Install it with: pip install sqlalchemy "
         "(or pip install rapsqlite[sqlalchemy] to install both in one step)."
-    ) from e
+    ) from None
 
 from . import dbapi as _dbapi
 
@@ -66,8 +66,9 @@ class _RapsqliteCursor(AsyncAdapt_dbapi_cursor):
         result = super().execute(operation, parameters)
         # Cache description right after execute so 0-row SELECT (e.g. session.get missing key)
         # is visible to SQLAlchemy when _setup_result_proxy reads context.cursor.description.
-        if self._cursor is not None:
-            desc = self._cursor.description
+        cursor: Any = self._cursor
+        if cursor is not None:
+            desc: Any = cursor.description
             if desc is not None:
                 self._last_description = desc
         return result
@@ -77,7 +78,8 @@ class _RapsqliteCursor(AsyncAdapt_dbapi_cursor):
         soft_memo = getattr(self, "_soft_closed_memoized", None)
         if soft_memo is not None and "description" in soft_memo:
             return soft_memo["description"]
-        desc = self._cursor.description if self._cursor is not None else None
+        cursor: Any = self._cursor
+        desc: Any = cursor.description if cursor is not None else None
         if desc is not None:
             self._last_description = desc
         if self._last_description is not None:
@@ -98,15 +100,15 @@ class _RapsqliteDialectModule:
     threadsafety = _dbapi.threadsafety
     sqlite_version = sqlite3.sqlite_version
     sqlite_version_info = sqlite3.sqlite_version_info
-    Error = _dbapi.Error  # type: ignore[has-type]
-    InterfaceError = _dbapi.InterfaceError  # type: ignore[has-type]
-    DatabaseError = _dbapi.DatabaseError  # type: ignore[has-type]
-    DataError = _dbapi.DataError  # type: ignore[attr-defined]
-    OperationalError = _dbapi.OperationalError  # type: ignore[has-type]
-    IntegrityError = _dbapi.IntegrityError  # type: ignore[attr-defined]
-    InternalError = _dbapi.InternalError  # type: ignore[attr-defined]
-    ProgrammingError = _dbapi.ProgrammingError  # type: ignore[has-type]
-    NotSupportedError = _dbapi.NotSupportedError  # type: ignore[attr-defined]
+    Error = _dbapi.Error
+    InterfaceError = _dbapi.InterfaceError
+    DatabaseError = _dbapi.DatabaseError
+    DataError = _dbapi.DataError
+    OperationalError = _dbapi.OperationalError
+    IntegrityError = _dbapi.IntegrityError
+    InternalError = _dbapi.InternalError
+    ProgrammingError = _dbapi.ProgrammingError
+    NotSupportedError = _dbapi.NotSupportedError
 
     def connect(self, *arg: Any, **kw: Any) -> _RapsqliteConnection:
         creator_fn = kw.pop("async_creator_fn", None)
@@ -124,7 +126,7 @@ class SQLiteDialect_rapsqlite(SQLiteDialect_pysqlite):
     supports_statement_cache = True
     is_async = True
     has_terminate = False
-    supports_server_side_cursors = False
+    supports_server_side_cursors: bool = False
 
     @classmethod
     def import_dbapi(cls) -> DBAPIModule:

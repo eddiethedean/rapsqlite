@@ -1,6 +1,7 @@
 """Robust tests for Phase 2.4 pool configuration (pool_size, connection_timeout)."""
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 
@@ -14,7 +15,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_pool_size_rejects_negative(test_db):
+async def test_pool_size_rejects_negative(test_db: str):
     """Setting pool_size to a negative value raises ValueError."""
     async with connect(test_db) as db:
         with pytest.raises(ValueError, match="pool_size must be >= 0"):
@@ -23,7 +24,7 @@ async def test_pool_size_rejects_negative(test_db):
 
 
 @pytest.mark.asyncio
-async def test_connection_timeout_rejects_negative(test_db):
+async def test_connection_timeout_rejects_negative(test_db: str):
     """Setting connection_timeout to a negative value raises ValueError."""
     async with connect(test_db) as db:
         with pytest.raises(ValueError, match="connection_timeout must be >= 0"):
@@ -35,26 +36,26 @@ async def test_connection_timeout_rejects_negative(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_size_rejects_non_int(test_db):
+async def test_pool_size_rejects_non_int(test_db: str):
     """Setting pool_size to a non-int (e.g. str) raises TypeError."""
     async with connect(test_db) as db:
         with pytest.raises((TypeError, ValueError)):
-            db.pool_size = "10"
+            cast(Any, db).pool_size = "10"
 
 
 @pytest.mark.asyncio
-async def test_connection_timeout_rejects_non_int(test_db):
+async def test_connection_timeout_rejects_non_int(test_db: str):
     """Setting connection_timeout to a non-int (e.g. str) raises TypeError."""
     async with connect(test_db) as db:
         with pytest.raises((TypeError, ValueError)):
-            db.connection_timeout = "30"
+            cast(Any, db).connection_timeout = "30"
 
 
 # ---- Config applied before first use ----
 
 
 @pytest.mark.asyncio
-async def test_pool_config_before_execute(test_db):
+async def test_pool_config_before_execute(test_db: str):
     """Set pool_size and connection_timeout before any DB op; execute works."""
     async with connect(test_db) as db:
         db.pool_size = 2
@@ -68,7 +69,7 @@ async def test_pool_config_before_execute(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_before_fetch(test_db):
+async def test_pool_config_before_fetch(test_db: str):
     """Set config before any op; fetch_* creates pool with config."""
     async with connect(test_db) as db:
         db.pool_size = 3
@@ -83,7 +84,7 @@ async def test_pool_config_before_fetch(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_with_transaction(test_db):
+async def test_pool_config_with_transaction(test_db: str):
     """Pool config set; transaction() uses it when creating pool."""
     async with connect(test_db) as db:
         db.pool_size = 4
@@ -101,7 +102,7 @@ async def test_pool_config_with_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_with_cursor(test_db):
+async def test_pool_config_with_cursor(test_db: str):
     """Pool config set; cursor execute/fetch use it."""
     async with connect(test_db) as db:
         db.pool_size = 5
@@ -119,7 +120,7 @@ async def test_pool_config_with_cursor(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_with_set_pragma(test_db):
+async def test_pool_config_with_set_pragma(test_db: str):
     """set_pragma triggers pool creation; pool config is used."""
     async with connect(test_db) as db:
         db.pool_size = 1
@@ -135,7 +136,7 @@ async def test_pool_config_with_set_pragma(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_with_execute_many(test_db):
+async def test_pool_config_with_execute_many(test_db: str):
     """execute_many (no transaction) uses pool config."""
     async with connect(test_db) as db:
         db.pool_size = 2
@@ -147,7 +148,7 @@ async def test_pool_config_with_execute_many(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_with_execute_many_in_transaction(test_db):
+async def test_pool_config_with_execute_many_in_transaction(test_db: str):
     """execute_many inside transaction uses pool config."""
     async with connect(test_db) as db:
         db.pool_size = 2
@@ -163,7 +164,7 @@ async def test_pool_config_with_execute_many_in_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_with_begin(test_db):
+async def test_pool_config_with_begin(test_db: str):
     """begin() creates pool; pool config is used."""
     async with connect(test_db) as db:
         db.pool_size = 1
@@ -180,7 +181,7 @@ async def test_pool_config_with_begin(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_both_zero_stored(test_db):
+async def test_pool_config_both_zero_stored(test_db: str):
     """pool_size=0 and connection_timeout=0 are stored and returned by getters."""
     async with connect(test_db) as db:
         db.pool_size = 0
@@ -192,7 +193,7 @@ async def test_pool_config_both_zero_stored(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_pool_size_zero_ops_succeed(test_db):
+async def test_pool_config_pool_size_zero_ops_succeed(test_db: str):
     """pool_size=0 (stored) with non-zero timeout; DB ops succeed."""
     async with connect(test_db) as db:
         db.pool_size = 0
@@ -209,7 +210,7 @@ async def test_pool_config_pool_size_zero_ops_succeed(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_switch_mid_session(test_db):
+async def test_pool_config_switch_mid_session(test_db: str):
     """Changing config after pool exists updates getter; stored value persists."""
     async with connect(test_db) as db:
         db.pool_size = 2
@@ -230,7 +231,7 @@ async def test_pool_config_switch_mid_session(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_fetch_one_optional(test_db):
+async def test_pool_config_fetch_one_optional(test_db: str):
     """fetch_one and fetch_optional with config set before any use."""
     async with connect(test_db) as db:
         db.pool_size = 1
@@ -248,7 +249,7 @@ async def test_pool_config_fetch_one_optional(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_multiple_connections_independent(test_db):
+async def test_pool_config_multiple_connections_independent(test_db: str):
     """Two connections can have different pool config; both work."""
     async with connect(test_db) as db1:
         await db1.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -275,7 +276,7 @@ async def test_pool_config_multiple_connections_independent(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_large_values(test_db):
+async def test_pool_config_large_values(test_db: str):
     """Large pool_size and connection_timeout are accepted and persist."""
     async with connect(test_db) as db:
         db.pool_size = 1000
@@ -289,7 +290,7 @@ async def test_pool_config_large_values(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_high_concurrency_with_transactions(test_db):
+async def test_pool_config_high_concurrency_with_transactions(test_db: str):
     """High-concurrency workload with transactions respects pool configuration."""
     async with connect(test_db) as db:
         db.pool_size = 5
@@ -321,7 +322,7 @@ async def test_pool_config_high_concurrency_with_transactions(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_timeout_exhausted_pool(test_db):
+async def test_pool_timeout_exhausted_pool(test_db: str):
     """Test that connection timeout is respected when pool is exhausted."""
     async with connect(test_db) as db:
         db.pool_size = 1
@@ -337,7 +338,7 @@ async def test_pool_timeout_exhausted_pool(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_size_one_serializes_operations(test_db):
+async def test_pool_size_one_serializes_operations(test_db: str):
     """Test that pool_size=1 serializes all operations."""
     async with connect(test_db) as db:
         db.pool_size = 1
@@ -359,7 +360,7 @@ async def test_pool_size_one_serializes_operations(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_timeout_zero_immediate_failure(test_db):
+async def test_pool_config_timeout_zero_immediate_failure(test_db: str):
     """Test that connection_timeout=0 is accepted and stored.
 
     Note: With timeout=0, the pool will timeout immediately when exhausted.
@@ -384,7 +385,7 @@ async def test_pool_config_timeout_zero_immediate_failure(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_large_pool_size(test_db):
+async def test_pool_config_large_pool_size(test_db: str):
     """Test that large pool sizes work correctly."""
     async with connect(test_db) as db:
         db.pool_size = 100
@@ -442,7 +443,7 @@ async def test_pool_config_large_pool_size(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_timeout_very_large(test_db):
+async def test_pool_config_timeout_very_large(test_db: str):
     """Test that very large timeout values are accepted."""
     async with connect(test_db) as db:
         db.connection_timeout = 3600  # 1 hour
@@ -452,7 +453,7 @@ async def test_pool_config_timeout_very_large(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_rapid_connection_churn(test_db):
+async def test_pool_config_rapid_connection_churn(test_db: str):
     """Test rapid connection acquisition and release."""
     async with connect(test_db) as db:
         db.pool_size = 5
@@ -473,7 +474,7 @@ async def test_pool_config_rapid_connection_churn(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_config_mixed_operations_under_load(test_db):
+async def test_pool_config_mixed_operations_under_load(test_db: str):
     """Test mixed read/write operations under pool load."""
     # Set up table and initial data, then release connection so workers don't contend with it
     async with connect(test_db) as db:

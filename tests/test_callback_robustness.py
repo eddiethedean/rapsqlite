@@ -4,6 +4,9 @@ These tests cover edge cases, error scenarios, and complex usage patterns
 that might differ between rapsqlite and aiosqlite implementations.
 """
 
+from typing import Any
+from pathlib import Path
+
 import sqlite3
 
 import pytest
@@ -17,18 +20,18 @@ from rapsqlite import DatabaseError, OperationalError, connect
 
 
 @pytest.mark.asyncio
-async def test_create_function_many_arguments(test_db):
+async def test_create_function_many_arguments(test_db: str):
     """Test functions with 5+ arguments (tests tuple unpacking)."""
     async with connect(test_db) as db:
 
-        def add_five(a, b, c, d, e):
+        def add_five(a: Any, b: Any, c: Any, d: Any, e: Any):
             return a + b + c + d + e
 
         await db.create_function("add_five", 5, add_five)
         result = await db.fetch_one("SELECT add_five(1, 2, 3, 4, 5)")
         assert result[0] == 15
 
-        def add_six(a, b, c, d, e, f):
+        def add_six(a: Any, b: Any, c: Any, d: Any, e: Any, f: Any):
             return a + b + c + d + e + f
 
         await db.create_function("add_six", 6, add_six)
@@ -37,12 +40,12 @@ async def test_create_function_many_arguments(test_db):
 
 
 @pytest.mark.asyncio
-async def test_create_function_with_state(test_db):
+async def test_create_function_with_state(test_db: str):
     """Test functions that maintain state (closure variables)."""
     async with connect(test_db) as db:
         counter = [0]  # Use list to allow modification in closure
 
-        def counting_func(x):
+        def counting_func(x: Any):
             counter[0] += 1
             return x * counter[0]
 
@@ -59,11 +62,11 @@ async def test_create_function_with_state(test_db):
 
 
 @pytest.mark.asyncio
-async def test_create_function_in_transaction(test_db):
+async def test_create_function_in_transaction(test_db: str):
     """Test custom functions work correctly within transactions."""
     async with connect(test_db) as db:
 
-        def double(x):
+        def double(x: Any):
             return x * 2
 
         await db.create_function("double", 1, double)
@@ -81,11 +84,11 @@ async def test_create_function_in_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_create_function_with_blob(test_db):
+async def test_create_function_with_blob(test_db: str):
     """Test functions that handle BLOB data."""
     async with connect(test_db) as db:
 
-        def blob_length(data):
+        def blob_length(data: Any):
             if data is None:
                 return None
             if isinstance(data, bytes):
@@ -103,7 +106,7 @@ async def test_create_function_with_blob(test_db):
 
 
 @pytest.mark.asyncio
-async def test_create_function_returns_blob_bytes(test_db):
+async def test_create_function_returns_blob_bytes(test_db: str):
     """Returning bytes from a user function yields a SQLite BLOB (round-trips as bytes)."""
     async with connect(test_db) as db:
         payload = b"\xff\xfe\x00binary\x00data"
@@ -117,11 +120,11 @@ async def test_create_function_returns_blob_bytes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_create_function_null_handling_edge_cases(test_db):
+async def test_create_function_null_handling_edge_cases(test_db: str):
     """Test functions with various NULL handling scenarios."""
     async with connect(test_db) as db:
 
-        def null_safe_add(a, b):
+        def null_safe_add(a: Any, b: Any):
             if a is None:
                 a = 0
             if b is None:
@@ -146,11 +149,11 @@ async def test_create_function_null_handling_edge_cases(test_db):
 
 
 @pytest.mark.asyncio
-async def test_create_function_exception_types(test_db):
+async def test_create_function_exception_types(test_db: str):
     """Test different exception types from functions."""
     async with connect(test_db) as db:
 
-        def raise_value_error(x):
+        def raise_value_error(x: Any):
             raise ValueError("Custom error message")
 
         await db.create_function("error_func", 1, raise_value_error)
@@ -162,11 +165,11 @@ async def test_create_function_exception_types(test_db):
 
 
 @pytest.mark.asyncio
-async def test_create_function_concurrent_calls(test_db):
+async def test_create_function_concurrent_calls(test_db: str):
     """Test multiple concurrent calls to the same function."""
     async with connect(test_db) as db:
 
-        def square(x):
+        def square(x: Any):
             return x * x
 
         await db.create_function("square", 1, square)
@@ -184,18 +187,18 @@ async def test_create_function_concurrent_calls(test_db):
 
 
 @pytest.mark.asyncio
-async def test_create_function_overwrite_behavior(test_db):
+async def test_create_function_overwrite_behavior(test_db: str):
     """Test overwriting a function with different implementation."""
     async with connect(test_db) as db:
 
-        def first_version(x):
+        def first_version(x: Any):
             return x * 2
 
         await db.create_function("versioned", 1, first_version)
         result = await db.fetch_one("SELECT versioned(5)")
         assert result[0] == 10
 
-        def second_version(x):
+        def second_version(x: Any):
             return x * 3
 
         await db.create_function("versioned", 1, second_version)
@@ -204,11 +207,11 @@ async def test_create_function_overwrite_behavior(test_db):
 
 
 @pytest.mark.asyncio
-async def test_create_function_with_aggregate_context(test_db):
+async def test_create_function_with_aggregate_context(test_db: str):
     """Test functions used in aggregate contexts."""
     async with connect(test_db) as db:
 
-        def square(x):
+        def square(x: Any):
             return x * x
 
         await db.create_function("square", 1, square)
@@ -226,12 +229,12 @@ async def test_create_function_with_aggregate_context(test_db):
 
 
 @pytest.mark.asyncio
-async def test_trace_callback_long_sql(test_db):
+async def test_trace_callback_long_sql(test_db: str):
     """Test trace callback with very long SQL statements."""
     async with connect(test_db) as db:
-        traced = []
+        traced: list[str] = []
 
-        def trace(sql):
+        def trace(sql: str):
             traced.append(sql)
 
         await db.set_trace_callback(trace)
@@ -245,12 +248,12 @@ async def test_trace_callback_long_sql(test_db):
 
 
 @pytest.mark.asyncio
-async def test_trace_callback_special_characters(test_db):
+async def test_trace_callback_special_characters(test_db: str):
     """Test trace callback with SQL containing special characters."""
     async with connect(test_db) as db:
-        traced = []
+        traced: list[str] = []
 
-        def trace(sql):
+        def trace(sql: str):
             traced.append(sql)
 
         await db.set_trace_callback(trace)
@@ -268,12 +271,12 @@ async def test_trace_callback_special_characters(test_db):
 
 
 @pytest.mark.asyncio
-async def test_trace_callback_rapid_queries(test_db):
+async def test_trace_callback_rapid_queries(test_db: str):
     """Test trace callback with many rapid queries."""
     async with connect(test_db) as db:
-        traced = []
+        traced: list[str] = []
 
-        def trace(sql):
+        def trace(sql: str):
             traced.append(sql)
 
         await db.set_trace_callback(trace)
@@ -288,12 +291,12 @@ async def test_trace_callback_rapid_queries(test_db):
 
 
 @pytest.mark.asyncio
-async def test_trace_callback_exception_handling(test_db):
+async def test_trace_callback_exception_handling(test_db: str):
     """Test trace callback that raises exceptions."""
     async with connect(test_db) as db:
         call_count = [0]
 
-        def trace(sql):
+        def trace(sql: str):
             call_count[0] += 1
             if call_count[0] == 2:
                 raise ValueError("Trace error")
@@ -311,12 +314,12 @@ async def test_trace_callback_exception_handling(test_db):
 
 
 @pytest.mark.asyncio
-async def test_trace_callback_different_query_types(test_db):
+async def test_trace_callback_different_query_types(test_db: str):
     """Test trace callback captures different query types."""
     async with connect(test_db) as db:
-        traced = []
+        traced: list[str] = []
 
-        def trace(sql):
+        def trace(sql: str):
             traced.append(sql.upper())
 
         await db.set_trace_callback(trace)
@@ -338,12 +341,12 @@ async def test_trace_callback_different_query_types(test_db):
 
 
 @pytest.mark.asyncio
-async def test_trace_callback_with_transactions(test_db):
+async def test_trace_callback_with_transactions(test_db: str):
     """Test trace callback captures transaction statements."""
     async with connect(test_db) as db:
-        traced = []
+        traced: list[str] = []
 
-        def trace(sql):
+        def trace(sql: str):
             traced.append(sql.upper())
 
         await db.set_trace_callback(trace)
@@ -369,12 +372,18 @@ async def test_trace_callback_with_transactions(test_db):
 
 
 @pytest.mark.asyncio
-async def test_authorizer_all_action_codes(test_db):
+async def test_authorizer_all_action_codes(test_db: str):
     """Test authorizer receives all expected action codes."""
     async with connect(test_db) as db:
-        actions_seen = set()
+        actions_seen: set[int] = set()
 
-        def authorizer(action, arg1, arg2, arg3, arg4):
+        def authorizer(
+            action: int,
+            arg1: str | None,
+            arg2: str | None,
+            arg3: str | None,
+            arg4: str | None,
+        ):
             actions_seen.add(action)
             return 0  # Allow all
 
@@ -391,7 +400,7 @@ async def test_authorizer_all_action_codes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_authorizer_selective_deny(test_db):
+async def test_authorizer_selective_deny(test_db: str):
     """Test authorizer denying specific operations."""
     async with connect(test_db) as db:
         db.connection_timeout = 60
@@ -401,7 +410,13 @@ async def test_authorizer_selective_deny(test_db):
 
         deny_count = [0]
 
-        def authorizer(action, arg1, arg2, arg3, arg4):
+        def authorizer(
+            action: int,
+            arg1: str | None,
+            arg2: str | None,
+            arg3: str | None,
+            arg4: str | None,
+        ):
             # Deny UPDATE operations (action code 23 = SQLITE_UPDATE)
             if action == 23:  # SQLITE_UPDATE
                 deny_count[0] += 1
@@ -426,7 +441,7 @@ async def test_authorizer_selective_deny(test_db):
 
 
 @pytest.mark.asyncio
-async def test_authorizer_exception_handling(test_db):
+async def test_authorizer_exception_handling(test_db: str):
     """Test authorizer that raises exceptions.
 
     Note: Exceptions in authorizer callbacks default to DENY (fail-secure)
@@ -436,7 +451,13 @@ async def test_authorizer_exception_handling(test_db):
     async with connect(test_db) as db:
         call_count = [0]
 
-        def authorizer(action, arg1, arg2, arg3, arg4):
+        def authorizer(
+            action: int,
+            arg1: str | None,
+            arg2: str | None,
+            arg3: str | None,
+            arg4: str | None,
+        ):
             call_count[0] += 1
             # Raise exception on second call (during CREATE TABLE)
             # This verifies that exceptions are caught and default to DENY
@@ -457,12 +478,18 @@ async def test_authorizer_exception_handling(test_db):
 
 
 @pytest.mark.asyncio
-async def test_authorizer_with_transactions(test_db):
+async def test_authorizer_with_transactions(test_db: str):
     """Test authorizer works correctly with transactions."""
     async with connect(test_db) as db:
-        authorized_ops = []
+        authorized_ops: list[int] = []
 
-        def authorizer(action, arg1, arg2, arg3, arg4):
+        def authorizer(
+            action: int,
+            arg1: str | None,
+            arg2: str | None,
+            arg3: str | None,
+            arg4: str | None,
+        ):
             authorized_ops.append(action)
             return 0  # Allow all
 
@@ -483,7 +510,7 @@ async def test_authorizer_with_transactions(test_db):
 
 
 @pytest.mark.asyncio
-async def test_progress_handler_different_n_values(test_db):
+async def test_progress_handler_different_n_values(test_db: str):
     """Test progress handler with different N values."""
     async with connect(test_db) as db:
         # Test with a small N value that should definitely trigger
@@ -511,7 +538,7 @@ async def test_progress_handler_different_n_values(test_db):
 
 
 @pytest.mark.asyncio
-async def test_progress_handler_abort_operation(test_db):
+async def test_progress_handler_abort_operation(test_db: str):
     """Test progress handler aborting a long operation."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)")
@@ -539,7 +566,7 @@ async def test_progress_handler_abort_operation(test_db):
 
 
 @pytest.mark.asyncio
-async def test_progress_handler_exception_handling(test_db):
+async def test_progress_handler_exception_handling(test_db: str):
     """Test progress handler that raises exceptions."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE test (id INTEGER)")
@@ -571,7 +598,7 @@ async def test_progress_handler_exception_handling(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_empty_database(test_db):
+async def test_iterdump_empty_database(test_db: str):
     """Test iterdump on an empty database."""
     async with connect(test_db) as db:
         dump = await db.iterdump()
@@ -583,7 +610,7 @@ async def test_iterdump_empty_database(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_with_indexes(test_db):
+async def test_iterdump_with_indexes(test_db: str):
     """Test iterdump includes indexes."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -601,7 +628,7 @@ async def test_iterdump_with_indexes(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_with_triggers(test_db):
+async def test_iterdump_with_triggers(test_db: str):
     """Test iterdump includes triggers."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, count INTEGER)")
@@ -624,7 +651,7 @@ async def test_iterdump_with_triggers(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_with_views(test_db):
+async def test_iterdump_with_views(test_db: str):
     """Test iterdump includes views."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -643,7 +670,7 @@ async def test_iterdump_with_views(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_with_blobs(test_db):
+async def test_iterdump_with_blobs(test_db: str):
     """Test iterdump handles BLOB data correctly."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, data BLOB)")
@@ -661,7 +688,7 @@ async def test_iterdump_with_blobs(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_with_special_characters(test_db):
+async def test_iterdump_with_special_characters(test_db: str):
     """Test iterdump handles special characters in data."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -680,7 +707,7 @@ async def test_iterdump_with_special_characters(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_quotes_identifiers(tmp_path):
+async def test_iterdump_quotes_identifiers(tmp_path: Path):
     """iterdump should quote identifiers so dumps are replayable for weird names."""
     src_db = tmp_path / "src.db"
     dst_db = tmp_path / "dst.db"
@@ -717,7 +744,7 @@ async def test_iterdump_quotes_identifiers(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_restores_indexes_and_dotted_table_names(tmp_path):
+async def test_iterdump_restores_indexes_and_dotted_table_names(tmp_path: Path):
     src_db = tmp_path / "src-dotted.db"
     dst_db = tmp_path / "dst-dotted.db"
     src_db.touch()
@@ -744,7 +771,7 @@ async def test_iterdump_restores_indexes_and_dotted_table_names(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_multiple_tables(test_db):
+async def test_iterdump_multiple_tables(test_db: str):
     """Test iterdump with multiple tables."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE table1 (id INTEGER PRIMARY KEY, name TEXT)")
@@ -763,7 +790,7 @@ async def test_iterdump_multiple_tables(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_preserves_data_types(test_db):
+async def test_iterdump_preserves_data_types(test_db: str):
     """Test iterdump preserves different data types correctly."""
     async with connect(test_db) as db:
         await db.execute("""
@@ -791,7 +818,7 @@ async def test_iterdump_preserves_data_types(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_iterdump_with_transactions(test_db):
+async def test_iterdump_with_transactions(test_db: str):
     """Test iterdump works correctly when database has transaction state."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
@@ -813,17 +840,23 @@ async def test_iterdump_with_transactions(test_db):
 
 
 @pytest.mark.asyncio
-async def test_all_callbacks_complex_interaction(test_db):
+async def test_all_callbacks_complex_interaction(test_db: str):
     """Test all callbacks working together in complex scenarios."""
     async with connect(test_db) as db:
-        traced = []
-        authorized = []
+        traced: list[str] = []
+        authorized: list[int] = []
         progress_calls = [0]
 
-        def trace(sql):
+        def trace(sql: str):
             traced.append(sql)
 
-        def authorizer(action, arg1, arg2, arg3, arg4):
+        def authorizer(
+            action: int,
+            arg1: str | None,
+            arg2: str | None,
+            arg3: str | None,
+            arg4: str | None,
+        ):
             authorized.append(action)
             return 0
 
@@ -831,7 +864,7 @@ async def test_all_callbacks_complex_interaction(test_db):
             progress_calls[0] += 1
             return True
 
-        def custom_func(x):
+        def custom_func(x: Any):
             return x * 2
 
         # Enable all callbacks
@@ -865,12 +898,12 @@ async def test_all_callbacks_complex_interaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_callbacks_with_pool_size_one(test_db):
+async def test_callbacks_with_pool_size_one(test_db: str):
     """Test callbacks work correctly with pool_size=1."""
     async with connect(test_db) as db:
         db.pool_size = 1
 
-        def double(x):
+        def double(x: Any):
             return x * 2
 
         await db.create_function("double", 1, double)
@@ -883,14 +916,14 @@ async def test_callbacks_with_pool_size_one(test_db):
 
 
 @pytest.mark.asyncio
-async def test_callbacks_clear_and_reuse(test_db):
+async def test_callbacks_clear_and_reuse(test_db: str):
     """Test clearing and re-adding callbacks multiple times."""
     async with connect(test_db) as db:
 
-        def func1(x):
+        def func1(x: Any):
             return x * 2
 
-        def func2(x):
+        def func2(x: Any):
             return x * 3
 
         # Add, use, remove, add different, use
@@ -906,12 +939,12 @@ async def test_callbacks_clear_and_reuse(test_db):
 
 
 @pytest.mark.asyncio
-async def test_callbacks_with_cursor(test_db):
+async def test_callbacks_with_cursor(test_db: str):
     """Test callbacks work with cursor operations."""
     async with connect(test_db) as db:
-        traced = []
+        traced: list[str] = []
 
-        def trace(sql):
+        def trace(sql: str):
             traced.append(sql)
 
         await db.set_trace_callback(trace)
@@ -939,7 +972,7 @@ async def test_callbacks_with_cursor(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_backup_basic(test_db_file):
+async def test_backup_basic(test_db_file: str):
     """Test basic backup functionality."""
     import rapsqlite
 
@@ -970,7 +1003,7 @@ async def test_backup_basic(test_db_file):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_backup_target_in_transaction_raises(test_db_file):
+async def test_backup_target_in_transaction_raises(test_db_file: str):
     """Backup should fail cleanly if target connection has an active transaction."""
     import rapsqlite
 
@@ -1002,7 +1035,7 @@ async def test_backup_target_in_transaction_raises(test_db_file):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_backup_empty_database(test_db_file):
+async def test_backup_empty_database(test_db_file: str):
     """Test backing up an empty database."""
     import rapsqlite
 
@@ -1027,7 +1060,7 @@ async def test_backup_empty_database(test_db_file):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_backup_progress_callback(test_db_file):
+async def test_backup_progress_callback(test_db_file: str):
     """Test backup with progress callback."""
     import rapsqlite
 
@@ -1046,9 +1079,9 @@ async def test_backup_progress_callback(test_db_file):
         pass
 
     target_conn = rapsqlite.Connection(target_path)
-    progress_calls = []
+    progress_calls: list[tuple[int, int, int]] = []
 
-    def progress_callback(remaining, page_count, pages_copied):
+    def progress_callback(remaining: int, page_count: int, pages_copied: int):
         progress_calls.append((remaining, page_count, pages_copied))
 
     try:
@@ -1065,7 +1098,7 @@ async def test_backup_progress_callback(test_db_file):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_backup_with_pages_parameter(test_db_file):
+async def test_backup_with_pages_parameter(test_db_file: str):
     """Test backup with pages parameter to copy incrementally."""
     import rapsqlite
 
@@ -1096,7 +1129,7 @@ async def test_backup_with_pages_parameter(test_db_file):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_backup_with_custom_name(test_db_file):
+async def test_backup_with_custom_name(test_db_file: str):
     """Test backup with custom database name."""
     import rapsqlite
 
@@ -1124,7 +1157,7 @@ async def test_backup_with_custom_name(test_db_file):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_backup_multiple_tables(test_db_file):
+async def test_backup_multiple_tables(test_db_file: str):
     """Test backing up database with multiple tables."""
     import rapsqlite
 
@@ -1160,7 +1193,7 @@ async def test_backup_multiple_tables(test_db_file):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_backup_with_indexes(test_db_file):
+async def test_backup_with_indexes(test_db_file: str):
     """Test backing up database with indexes."""
     import rapsqlite
 
@@ -1191,7 +1224,7 @@ async def test_backup_with_indexes(test_db_file):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_backup_progress_callback_exception(test_db_file):
+async def test_backup_progress_callback_exception(test_db_file: str):
     """Test that exceptions in progress callback don't abort backup."""
     import rapsqlite
 
@@ -1208,7 +1241,7 @@ async def test_backup_progress_callback_exception(test_db_file):
 
     target_conn = rapsqlite.Connection(target_path)
 
-    def progress_callback(remaining, page_count, pages_copied):
+    def progress_callback(remaining: int, page_count: int, pages_copied: int):
         if pages_copied > 0:
             raise ValueError("Test exception")
 

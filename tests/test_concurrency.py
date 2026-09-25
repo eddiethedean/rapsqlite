@@ -14,7 +14,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.xdist_group("concurrency")]
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
-async def test_concurrent_reads(test_db):
+async def test_concurrent_reads(test_db: str):
     """Test multiple concurrent read operations."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -38,7 +38,7 @@ async def test_concurrent_reads(test_db):
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
-async def test_concurrent_writes_sequential(test_db):
+async def test_concurrent_writes_sequential(test_db: str):
     """Test concurrent writes - SQLite locks, so we test sequential execution."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -51,7 +51,7 @@ async def test_concurrent_writes_sequential(test_db):
             return value
 
     # Execute writes sequentially (not concurrently due to SQLite limitations)
-    results = []
+    results: list[int] = []
     for i in range(10):
         result = await write_worker(i)
         results.append(result)
@@ -65,7 +65,7 @@ async def test_concurrent_writes_sequential(test_db):
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
-async def test_concurrent_transactions(test_db):
+async def test_concurrent_transactions(test_db: str):
     """Test multiple concurrent transactions."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -82,7 +82,7 @@ async def test_concurrent_transactions(test_db):
                 return worker_id
 
     # Run transactions sequentially (SQLite limitation)
-    results = []
+    results: list[int] = []
     for i in range(5):
         result = await transaction_worker(i)
         results.append(result)
@@ -95,7 +95,7 @@ async def test_concurrent_transactions(test_db):
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
-async def test_concurrent_pool_operations(test_db):
+async def test_concurrent_pool_operations(test_db: str):
     """Test concurrent operations on connection pool."""
     async with connect(test_db) as db:
         db.pool_size = 5
@@ -117,7 +117,7 @@ async def test_concurrent_pool_operations(test_db):
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
-async def test_race_condition_connection_acquisition(test_db):
+async def test_race_condition_connection_acquisition(test_db: str):
     """Test race conditions in connection acquisition."""
     async with connect(test_db) as db:
         db.pool_size = 2
@@ -144,7 +144,7 @@ async def test_race_condition_connection_acquisition(test_db):
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
-async def test_database_locked_error(test_db_file):
+async def test_database_locked_error(test_db_file: str):
     """Test database locked error handling."""
     async with connect(test_db_file) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -181,7 +181,7 @@ async def test_database_locked_error(test_db_file):
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
-async def test_concurrent_fetch_operations(test_db):
+async def test_concurrent_fetch_operations(test_db: str):
     """Test concurrent fetch operations."""
     # Use pool_size so shared pool has enough connections for 50 concurrent workers
     async with connect(test_db, pool_size=60) as db:
@@ -201,7 +201,7 @@ async def test_concurrent_fetch_operations(test_db):
 
 @pytest.mark.concurrency
 @pytest.mark.asyncio
-async def test_concurrent_execute_many(test_db):
+async def test_concurrent_execute_many(test_db: str):
     """Test concurrent execute_many operations."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -213,7 +213,7 @@ async def test_concurrent_execute_many(test_db):
             return worker_id
 
     # Run execute_many operations sequentially (SQLite limitation)
-    results = []
+    results: list[int] = []
     for i in range(5):
         result = await execute_many_worker(i)
         results.append(result)

@@ -82,8 +82,18 @@ cargo fmt
 
 ### Linting
 ```bash
-# Python
+# Python formatting, linting, mypy, and strict Pyright
+make lint-python
+
+# Or run only the type checks in an environment with CI dependencies installed
+make typecheck
+
+# Individual Python checks
+ruff format --check .
 ruff check .
+mypy rapsqlite
+pyright
+pyright --verifytypes rapsqlite --ignoreexternal
 
 # Rust
 cargo clippy --lib -- -D clippy::all -A deprecated

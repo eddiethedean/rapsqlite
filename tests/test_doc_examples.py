@@ -8,6 +8,7 @@ Or run the script: python scripts/run_doc_examples.py
 
 import os
 import tempfile
+from typing import Any
 
 import pytest
 
@@ -77,7 +78,7 @@ async def test_quickstart_cursor_iteration():
             await conn.execute("INSERT INTO users (name) VALUES ('Bob')")
             cursor = conn.cursor()
             await cursor.execute("SELECT * FROM users")
-            collected = []
+            collected: list[Any] = []
             async for row in cursor:
                 collected.append(row)
             assert collected == [[1, "Alice"], [2, "Bob"]]

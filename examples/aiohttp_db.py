@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from aiohttp import web
+from aiohttp import web  # pyright: ignore[reportMissingImports]
 from rapsqlite import connect
 
 DB_PATH = str(Path(__file__).resolve().parent / "aiohttp_example.db")

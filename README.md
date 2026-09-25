@@ -122,6 +122,13 @@ This package passes the [Fake Async Detector](https://github.com/eddiethedean/ra
 - **Better throughput**: Superior performance under concurrent load due to GIL independence
 - **Connection pooling**: Efficient connection reuse with configurable pool size
 
+For process-local cache lookups, 0.5 adds `fetch_scalar()`/`fetch_blob()`, an
+opt-in `raw_fetch_scalar()` path, reusable `conn.prepare(...)` operations, and
+opt-in `session_affinity=True`. These APIs are measured separately from the
+general row API; use the [Phase 0.5 benchmark](https://github.com/eddiethedean/rapsqlite/blob/main/benchmarks/phase5_hotpath.py)
+and do not treat unmatched raw SQLite or published Redis figures as a direct
+speed claim.
+
 ## Migration from aiosqlite
 
 `rapsqlite` is designed to be a **drop-in replacement** for `aiosqlite`. The simplest migration is a one-line change:
@@ -182,8 +189,8 @@ For most applications, this is all you need! All core aiosqlite APIs are support
 See [docs/ROADMAP.md](https://github.com/eddiethedean/rapsqlite/blob/master/docs/ROADMAP.md) for full details.
 
 - ✅ **0.1–0.3** – Async core, aiosqlite compatibility, callbacks, pooling, True Async DBAPI, SQLAlchemy/Alembic integration, and advanced SQLite features
-- 🔄 **0.4** – Post-`v0.3.3` compatibility, security, CI, SQLAlchemy 2.1 support, and release stabilization
-- 📋 **0.5** – Low-latency execution and session affinity
+- ✅ **0.4** – Post-`v0.3.3` compatibility, security, CI, SQLAlchemy 2.1 support, and release stabilization (`v0.4.0`)
+- ✅ **0.5** – Implementation complete: measured low-latency execution, hot-path reductions, scalar/BLOB and prepared-query paths, opt-in session affinity, and an opt-in raw path; release validation remains
 - 📋 **0.6** – Cache-specific APIs, bulk operations, and concurrent workloads
 - 📋 **0.7–0.9** – Pooling, observability, reliability, ecosystem tooling, and stabilization toward 1.0
 

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 # Use installed rapsqlite if available (e.g. CI); otherwise project root for local dev
 try:
@@ -90,7 +91,7 @@ async def quickstart_cursor_iteration():
             await conn.execute("INSERT INTO users (name) VALUES ('Bob')")
             cursor = conn.cursor()
             await cursor.execute("SELECT * FROM users")
-            collected = []
+            collected: list[Any] = []
             async for row in cursor:
                 collected.append(row)
             assert collected == [[1, "Alice"], [2, "Bob"]], f"Got {collected}"

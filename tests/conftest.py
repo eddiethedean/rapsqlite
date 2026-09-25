@@ -1,5 +1,7 @@
 """Shared pytest fixtures and utilities for rapsqlite tests."""
 
+from pathlib import Path
+
 import hashlib
 import os
 import subprocess
@@ -207,7 +209,7 @@ def test_db(request: Any) -> Generator[str, None, None]:
 
 
 @pytest.fixture
-def unique_table_prefix(request) -> str:
+def unique_table_prefix(request: Any) -> str:
     """Unique table name per test to avoid cross-test collisions when running in parallel.
 
     Use for all CREATE TABLE / INSERT / SELECT so tables never clash across workers.
@@ -228,7 +230,7 @@ def test_db_memory() -> str:
 
 
 @pytest.fixture
-def dbapi_test_db(tmp_path):
+def dbapi_test_db(tmp_path: Path):
     """Isolated temp DB path for dbapi tests (unique per test, uses pytest tmp_path)."""
     db_path = tmp_path / "dbapi_isolated.db"
     yield str(db_path)
@@ -236,7 +238,7 @@ def dbapi_test_db(tmp_path):
 
 
 @pytest.fixture
-def isolated_init_hook_db(tmp_path):
+def isolated_init_hook_db(tmp_path: Path):
     """Isolated DB path for init_hook tests (unique per test, uses tmp_path).
 
     Yields (path, connection_timeout). Use path for Connection; set
@@ -277,7 +279,7 @@ async def connected_db(test_db: str) -> AsyncGenerator[Any, None]:
 
 
 # Pytest markers for test categorization
-def pytest_configure(config):
+def pytest_configure(config: Any):
     """Register custom pytest markers, ensure extension is built, and set Windows event loop."""
     # Build extension for current Python (main process only; xdist workers skip)
     if not getattr(config, "workerinput", None):
@@ -312,7 +314,7 @@ def pytest_configure(config):
     )
 
 
-def pytest_collection_modifyitems(config, items):
+def pytest_collection_modifyitems(config: Any, items: Any):
     """Apply longer timeout (120s) to tests marked slow when pytest-timeout is active."""
     import importlib.util
 

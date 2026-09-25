@@ -6,7 +6,7 @@ from rapsqlite import connect
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
-async def test_executescript_ignores_semicolons_in_strings(test_db) -> None:
+async def test_executescript_ignores_semicolons_in_strings(test_db: str) -> None:
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)")
 

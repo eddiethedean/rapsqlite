@@ -15,7 +15,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_basic_connection(test_db):
+async def test_basic_connection(test_db: str):
     """Test basic connection using aiosqlite import pattern."""
     async with aiosqlite.connect(test_db) as conn:
         assert isinstance(conn, aiosqlite.Connection)
@@ -27,7 +27,7 @@ async def test_basic_connection(test_db):
 
 
 @pytest.mark.asyncio
-async def test_connection_context_manager(test_db):
+async def test_connection_context_manager(test_db: str):
     """Test connection context manager compatibility."""
     async with aiosqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
@@ -37,7 +37,7 @@ async def test_connection_context_manager(test_db):
 
 
 @pytest.mark.asyncio
-async def test_parameterized_queries(test_db):
+async def test_parameterized_queries(test_db: str):
     """Test parameterized queries with aiosqlite API."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute(
@@ -63,7 +63,7 @@ async def test_parameterized_queries(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transactions(test_db):
+async def test_transactions(test_db: str):
     """Test transaction methods compatibility."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute(
@@ -89,7 +89,7 @@ async def test_transactions(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transaction_context_manager(test_db):
+async def test_transaction_context_manager(test_db: str):
     """Test transaction context manager compatibility."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -103,7 +103,7 @@ async def test_transaction_context_manager(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_api(test_db):
+async def test_cursor_api(test_db: str):
     """Test cursor API compatibility."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -131,7 +131,7 @@ async def test_cursor_api(test_db):
 
 
 @pytest.mark.asyncio
-async def test_fetch_methods(test_db):
+async def test_fetch_methods(test_db: str):
     """Test fetch_all, fetch_one, fetch_optional compatibility."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -160,7 +160,7 @@ async def test_fetch_methods(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_many(test_db):
+async def test_execute_many(test_db: str):
     """Test execute_many compatibility."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -176,7 +176,7 @@ async def test_execute_many(test_db):
 
 
 @pytest.mark.asyncio
-async def test_exception_types(test_db):
+async def test_exception_types(test_db: str):
     """Test that exception types match aiosqlite."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute(
@@ -194,7 +194,7 @@ async def test_exception_types(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory(test_db):
+async def test_row_factory(test_db: str):
     """Test row_factory compatibility."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -220,7 +220,7 @@ async def test_row_factory(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pragma_settings(test_db):
+async def test_pragma_settings(test_db: str):
     """Test PRAGMA settings compatibility."""
     async with aiosqlite.connect(test_db, pragmas={"journal_mode": "WAL"}) as conn:
         rows = await conn.fetch_all("PRAGMA journal_mode")
@@ -233,7 +233,7 @@ async def test_pragma_settings(test_db):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_operations(test_db):
+async def test_concurrent_operations(test_db: str):
     """Test concurrent operations compatibility."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -252,7 +252,7 @@ async def test_concurrent_operations(test_db):
 
 
 @pytest.mark.asyncio
-async def test_last_insert_rowid(test_db):
+async def test_last_insert_rowid(test_db: str):
     """Test last_insert_rowid compatibility."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -263,7 +263,7 @@ async def test_last_insert_rowid(test_db):
 
 
 @pytest.mark.asyncio
-async def test_changes(test_db):
+async def test_changes(test_db: str):
     """Test changes() method compatibility."""
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -288,7 +288,7 @@ async def test_in_memory_database():
 
 
 @pytest.mark.asyncio
-async def test_connection_string_uri(test_db):
+async def test_connection_string_uri(test_db: str):
     """Test connection string URI format compatibility."""
     # Test URI format
     uri = f"file:{test_db}"

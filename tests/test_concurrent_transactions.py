@@ -5,6 +5,8 @@ are properly serialized. In parallel test execution, only one transaction may
 succeed at a time, which is expected behavior.
 """
 
+from typing import Any
+
 import asyncio
 import pytest
 import rapsqlite
@@ -15,7 +17,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.concurrency]
 
 
 @pytest.mark.asyncio
-async def test_concurrent_begin_attempts(test_db, unique_table_prefix):
+async def test_concurrent_begin_attempts(test_db: str, unique_table_prefix: str):
     """Test that concurrent begin() calls are properly serialized."""
     tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
@@ -76,7 +78,9 @@ async def test_concurrent_begin_attempts(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_transaction_context_managers(test_db, unique_table_prefix):
+async def test_concurrent_transaction_context_managers(
+    test_db: str, unique_table_prefix: str
+):
     """Test that concurrent transaction context managers are properly serialized."""
     tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
@@ -128,7 +132,7 @@ async def test_concurrent_transaction_context_managers(test_db, unique_table_pre
 
 
 @pytest.mark.asyncio
-async def test_begin_while_transaction_active(test_db, unique_table_prefix):
+async def test_begin_while_transaction_active(test_db: str, unique_table_prefix: str):
     """Test that begin() fails if transaction is already active."""
     tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
@@ -145,7 +149,9 @@ async def test_begin_while_transaction_active(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_transaction_context_while_begin_active(test_db, unique_table_prefix):
+async def test_transaction_context_while_begin_active(
+    test_db: str, unique_table_prefix: str
+):
     """Test that transaction context manager fails if begin() is active."""
     tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
@@ -162,7 +168,7 @@ async def test_transaction_context_while_begin_active(test_db, unique_table_pref
 
 
 @pytest.mark.asyncio
-async def test_transaction_state_consistency(test_db, unique_table_prefix):
+async def test_transaction_state_consistency(test_db: str, unique_table_prefix: str):
     """Test that transaction state remains consistent under concurrent access."""
     tbl = unique_table_prefix
     async with rapsqlite.connect(test_db) as db:
@@ -176,7 +182,7 @@ async def test_transaction_state_consistency(test_db, unique_table_prefix):
         assert in_tx is True
 
         # Try concurrent operations - they should use the transaction connection
-        async def insert_value(val):
+        async def insert_value(val: Any):
             await db.execute(f"INSERT INTO {tbl} (id) VALUES (?)", [val])
 
         # These should all use the same transaction connection
@@ -195,7 +201,7 @@ async def test_transaction_state_consistency(test_db, unique_table_prefix):
 
 @pytest.mark.asyncio
 async def test_transaction_rollback_on_error_preserves_state(
-    test_db, unique_table_prefix
+    test_db: str, unique_table_prefix: str
 ):
     """Test that transaction state is properly reset after rollback."""
     tbl = unique_table_prefix

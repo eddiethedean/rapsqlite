@@ -14,13 +14,10 @@ use crate::connection::{
 use crate::conversion::{build_description_tuple, row_to_py_with_factory};
 use crate::parameters::{process_named_parameters, process_positional_parameters};
 use crate::pool::{
-    has_callbacks, lock_session_connection, PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
+    callbacks_enabled, lock_session_connection, PoolConnectionSlot, PoolSlot, SessionConnectionSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
-use crate::types::{
-    Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
-    UserCollations, UserFunctions,
-};
+use crate::types::{Adapters, Converters, SqliteParam, TransactionState};
 use crate::utils::returns_result_rows;
 use crate::{Connection, OperationalError, ProgrammingError};
 
@@ -46,14 +43,7 @@ struct CursorFetchContext {
     transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     session_connection: SessionConnectionSlot,
     callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    callback_connection_required: Arc<StdMutex<bool>>,
     callback_context: CallbackContext,
-    user_functions: UserFunctions,
-    user_aggregates: UserAggregates,
-    user_collations: UserCollations,
-    trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    progress_handler: ProgressHandler,
     description: Arc<StdMutex<Option<Py<PyAny>>>>,
     pending_description: Arc<StdMutex<Option<Py<PyAny>>>>,
     row_factory_override: Arc<StdMutex<Option<Py<PyAny>>>>,
@@ -116,15 +106,7 @@ async fn ensure_cursor_results_cached(ctx: &CursorFetchContext) -> Result<(), Py
         let g = ctx.transaction_state.lock().await;
         g.is_active()
     };
-    let has_callbacks_flag = has_callbacks(
-        &ctx.callback_connection_required,
-        &ctx.user_functions,
-        &ctx.user_aggregates,
-        &ctx.user_collations,
-        &ctx.trace_callback,
-        &ctx.authorizer_callback,
-        &ctx.progress_handler,
-    );
+    let has_callbacks_flag = callbacks_enabled(&ctx.callback_context.callback_features);
     let _callback_operation_guard = if has_callbacks_flag {
         Some(ctx.callback_context.callback_operation_lock.lock().await)
     } else {
@@ -258,17 +240,10 @@ pub(crate) struct Cursor {
     pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) session_connection: SessionConnectionSlot,
     pub(crate) callback_connection: Arc<Mutex<PoolConnectionSlot>>,
-    pub(crate) callback_connection_required: Arc<StdMutex<bool>>,
     pub(crate) callback_context: CallbackContext,
-    pub(crate) user_functions: UserFunctions,
-    pub(crate) user_aggregates: UserAggregates,
-    pub(crate) user_collations: UserCollations,
     pub(crate) adapters: Adapters,
     pub(crate) converters: Converters,
     pub(crate) include_query_in_errors: Arc<StdMutex<bool>>,
-    pub(crate) trace_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub(crate) authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub(crate) progress_handler: ProgressHandler,
     // Phase 3.9: aiosqlite-compatible cursor state
     pub(crate) arraysize: Arc<StdMutex<usize>>,
     pub(crate) description: Arc<StdMutex<Option<Py<PyAny>>>>,
@@ -303,14 +278,7 @@ impl Cursor {
             transaction_connection: Arc::clone(&self.transaction_connection),
             session_connection: self.session_connection.clone(),
             callback_connection: Arc::clone(&self.callback_connection),
-            callback_connection_required: Arc::clone(&self.callback_connection_required),
             callback_context: self.callback_context.clone(),
-            user_functions: Arc::clone(&self.user_functions),
-            user_aggregates: Arc::clone(&self.user_aggregates),
-            user_collations: Arc::clone(&self.user_collations),
-            trace_callback: Arc::clone(&self.trace_callback),
-            authorizer_callback: Arc::clone(&self.authorizer_callback),
-            progress_handler: Arc::clone(&self.progress_handler),
             description: Arc::clone(&self.description),
             pending_description: Arc::clone(&self.pending_description),
             row_factory_override: Arc::clone(&self.row_factory_override),
@@ -352,11 +320,7 @@ impl Cursor {
     }
 
     /// Execute a SQL query multiple times.
-    fn executemany(
-        &mut self,
-        query: String,
-        parameters: Vec<Vec<Py<PyAny>>>,
-    ) -> PyResult<Py<PyAny>> {
+    fn executemany(&mut self, query: String, parameters: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if *self.cursor_closed.lock().unwrap() {
             return Err(ProgrammingError::new_err(
                 "Cannot operate on a closed cursor.",
@@ -365,7 +329,7 @@ impl Cursor {
         self.query = query.clone();
         Python::attach(|py| {
             let conn = self.connection.bind(py);
-            conn.call_method1("execute_many", (query, parameters))
+            conn.call_method1("execute_many", (query, parameters.clone()))
                 .map(|bound| bound.unbind())
         })
     }
@@ -727,14 +691,7 @@ impl Cursor {
         let transaction_connection = Arc::clone(&self.transaction_connection);
         let session_connection = self.session_connection.clone();
         let callback_connection = Arc::clone(&self.callback_connection);
-        let callback_connection_required = Arc::clone(&self.callback_connection_required);
         let callback_context = self.callback_context.clone();
-        let user_functions = Arc::clone(&self.user_functions);
-        let user_aggregates = Arc::clone(&self.user_aggregates);
-        let user_collations = Arc::clone(&self.user_collations);
-        let trace_callback = Arc::clone(&self.trace_callback);
-        let authorizer_callback = Arc::clone(&self.authorizer_callback);
-        let progress_handler = Arc::clone(&self.progress_handler);
         let closed = Arc::clone(&self.closed);
         let include_query_in_errors = *self.include_query_in_errors.lock().unwrap();
 
@@ -809,15 +766,7 @@ impl Cursor {
                     g.is_active()
                 };
 
-                let has_callbacks_flag = has_callbacks(
-                    &callback_connection_required,
-                    &user_functions,
-                    &user_aggregates,
-                    &user_collations,
-                    &trace_callback,
-                    &authorizer_callback,
-                    &progress_handler,
-                );
+                let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                 let _callback_operation_guard = if has_callbacks_flag {
                     Some(callback_context.callback_operation_lock.lock().await)
                 } else {

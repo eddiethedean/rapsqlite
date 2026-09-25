@@ -1,5 +1,7 @@
 """Tests for Phase 3.9 API additions: execute_fetchall, execute_insert, Cursor props, close."""
 
+from typing import Any
+
 import asyncio
 import threading
 import time
@@ -27,8 +29,12 @@ skip_if_no_phase3(allow_module_level=True)
 pytestmark = [pytest.mark.unit]
 
 
+def _identity(value: Any) -> Any:
+    return value
+
+
 @pytest.mark.asyncio
-async def test_connect_iter_chunk_size(test_db):
+async def test_connect_iter_chunk_size(test_db: str):
     """connect(..., iter_chunk_size=N) stores value; default 64."""
     async with connect(test_db, iter_chunk_size=128) as db:
         assert db.iter_chunk_size == 128
@@ -37,7 +43,7 @@ async def test_connect_iter_chunk_size(test_db):
 
 
 @pytest.mark.asyncio
-async def test_connect_loop_noop(test_db):
+async def test_connect_loop_noop(test_db: str):
     """connect(..., loop=...) accepted and ignored (aiosqlite compat)."""
     async with connect(test_db, loop=None) as db:
         await db.execute("SELECT 1")
@@ -46,7 +52,7 @@ async def test_connect_loop_noop(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_fetchall(test_db):
+async def test_execute_fetchall(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
         await db.execute("INSERT INTO t (x) VALUES ('a'), ('b')")
@@ -55,7 +61,7 @@ async def test_execute_fetchall(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_fetchall_dict_factory(test_db):
+async def test_execute_fetchall_dict_factory(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
         await db.execute("INSERT INTO t (x) VALUES ('a')")
@@ -65,7 +71,7 @@ async def test_execute_fetchall_dict_factory(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_insert(test_db):
+async def test_execute_insert(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
         r1 = await db.execute_insert("INSERT INTO t (x) VALUES (?)", ["a"])
@@ -75,7 +81,7 @@ async def test_execute_insert(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_insert_rejects_select(test_db):
+async def test_execute_insert_rejects_select(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
         with pytest.raises(Exception) as exc:
@@ -84,7 +90,7 @@ async def test_execute_insert_rejects_select(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_arraysize(test_db):
+async def test_cursor_arraysize(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
         for i in range(5):
@@ -98,7 +104,7 @@ async def test_cursor_arraysize(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_iter_chunk_size_alias(test_db):
+async def test_cursor_iter_chunk_size_alias(test_db: str):
     """iter_chunk_size is aiosqlite alias for arraysize."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -111,14 +117,14 @@ async def test_cursor_iter_chunk_size_alias(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_connection(test_db):
+async def test_cursor_connection(test_db: str):
     async with connect(test_db) as db:
         cur = await db.execute("SELECT 1")
         assert cur.connection is db
 
 
 @pytest.mark.asyncio
-async def test_cursor_description(test_db):
+async def test_cursor_description(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (a INT, b TEXT)")
         await db.execute("INSERT INTO t (a, b) VALUES (1, 'x')")
@@ -132,7 +138,7 @@ async def test_cursor_description(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_lastrowid_rowcount(test_db):
+async def test_cursor_lastrowid_rowcount(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
         cur = await db.execute("INSERT INTO t (x) VALUES (?)", ["a"])
@@ -145,7 +151,7 @@ async def test_cursor_lastrowid_rowcount(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_row_factory_override(test_db):
+async def test_cursor_row_factory_override(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
         await db.execute("INSERT INTO t (x) VALUES ('a')")
@@ -156,14 +162,14 @@ async def test_cursor_row_factory_override(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_health(test_db):
+async def test_pool_health(test_db: str):
     async with connect(test_db) as db:
         ok = await db.pool_health()
         assert ok is True
 
 
 @pytest.mark.asyncio
-async def test_pool_metrics(test_db):
+async def test_pool_metrics(test_db: str):
     async with connect(test_db) as db:
         m = await db.pool_metrics()
         assert "size" in m
@@ -176,7 +182,7 @@ async def test_pool_metrics(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_metrics_gauges(test_db):
+async def test_pool_metrics_gauges(test_db: str):
     """pool_metrics_gauges(conn) returns dict of gauge names for Prometheus/custom metrics."""
     async with connect(test_db) as db:
         gauges = await pool_metrics_gauges(db)
@@ -191,26 +197,26 @@ async def test_pool_metrics_gauges(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_iter(test_db):
+async def test_execute_iter(test_db: str):
     """execute_iter yields rows in chunks; conn.execute_iter(...) works; respects chunk_size."""
     async with connect(test_db, iter_chunk_size=2) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
         await db.execute("INSERT INTO t (x) VALUES ('a'),('b'),('c'),('d'),('e')")
-        collected = []
+        collected: list[Any] = []
         async for chunk in execute_iter(
             db, "SELECT * FROM t ORDER BY id", chunk_size=2
         ):
             collected.extend(chunk)
         assert collected == [[1, "a"], [2, "b"], [3, "c"], [4, "d"], [5, "e"]]
         # Connection method form and default chunk_size from iter_chunk_size
-        collected2 = []
+        collected2: list[Any] = []
         async for chunk in db.execute_iter("SELECT * FROM t ORDER BY id"):
             collected2.extend(chunk)
         assert collected2 == [[1, "a"], [2, "b"], [3, "c"], [4, "d"], [5, "e"]]
 
 
 @pytest.mark.asyncio
-async def test_query_helpers_treat_scalar_strings_as_one_parameter(test_db):
+async def test_query_helpers_treat_scalar_strings_as_one_parameter(test_db: str):
     async with connect(test_db) as db:
         await db.execute("DROP TABLE IF EXISTS helper_scalar_params")
         await db.execute("CREATE TABLE helper_scalar_params (value TEXT)")
@@ -238,7 +244,7 @@ async def test_query_helpers_treat_scalar_strings_as_one_parameter(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [0, -1])
-async def test_pagination_helpers_reject_non_positive_sizes(test_db, size):
+async def test_pagination_helpers_reject_non_positive_sizes(test_db: str, size: int):
     async with connect(test_db) as db:
         with pytest.raises(ValueError, match="page_size must be greater than zero"):
             await paginate(db, "SELECT 1", page_size=size)
@@ -247,7 +253,7 @@ async def test_pagination_helpers_reject_non_positive_sizes(test_db, size):
 
 
 @pytest.mark.asyncio
-async def test_timed_fetch_all(test_db):
+async def test_timed_fetch_all(test_db: str):
     """timed_fetch_all returns (rows, duration) or rows and calls on_timing when given."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -255,7 +261,7 @@ async def test_timed_fetch_all(test_db):
         rows, duration = await timed_fetch_all(db, "SELECT * FROM t ORDER BY id")
     assert rows == [[1, "a"], [2, "b"]]
     assert isinstance(duration, (int, float)) and duration >= 0
-    called = []
+    called: list[tuple[float, str]] = []
 
     async with connect(test_db) as db:
         rows2 = await timed_fetch_all(
@@ -266,7 +272,7 @@ async def test_timed_fetch_all(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transaction_retry(test_db):
+async def test_transaction_retry(test_db: str):
     """transaction_retry runs a transaction with retry on transient errors."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -280,7 +286,7 @@ async def test_transaction_retry(test_db):
 
 
 @pytest.mark.asyncio
-async def test_idle_timeout(test_db):
+async def test_idle_timeout(test_db: str):
     """idle_timeout can be set; pool is created with idle_timeout when set before first use."""
     async with connect(test_db, idle_timeout=60) as db:
         assert db.idle_timeout == 60
@@ -295,7 +301,7 @@ async def test_idle_timeout(test_db):
 
 
 @pytest.mark.asyncio
-async def test_explain_query_plan(test_db):
+async def test_explain_query_plan(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
         await db.execute("INSERT INTO t (id, x) VALUES (1, 'a')")
@@ -305,7 +311,7 @@ async def test_explain_query_plan(test_db):
 
 
 @pytest.mark.asyncio
-async def test_analyze_query_plan(test_db):
+async def test_analyze_query_plan(test_db: str):
     """analyze_query_plan returns structured dict with uses_index, table_scan, details."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -320,7 +326,7 @@ async def test_analyze_query_plan(test_db):
 
 
 @pytest.mark.asyncio
-async def test_query_plan_detects_current_sqlite_scan_format(test_db):
+async def test_query_plan_detects_current_sqlite_scan_format(test_db: str):
     async with connect(test_db) as db:
         await db.execute("DROP TABLE IF EXISTS query_plan_scan")
         await db.execute("CREATE TABLE query_plan_scan (id INTEGER, active INTEGER)")
@@ -340,7 +346,7 @@ async def test_query_plan_detects_current_sqlite_scan_format(test_db):
 
 
 @pytest.mark.asyncio
-async def test_suggest_indexes(test_db):
+async def test_suggest_indexes(test_db: str):
     """suggest_indexes returns list of suggestions when table_scan without index."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -357,7 +363,7 @@ async def test_suggest_indexes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_in_clause_query(test_db):
+async def test_in_clause_query(test_db: str):
     """in_clause_query expands IN (?) to IN (?,?,...) with flattened params."""
     sql, params = in_clause_query("SELECT * FROM t WHERE id IN (?)", [1, 2, 3])
     assert "IN (?,?,?)" in sql or "IN (?, ?, ?)" in sql
@@ -395,7 +401,7 @@ def test_rows_to_dicts():
 
 
 @pytest.mark.asyncio
-async def test_paginate(test_db):
+async def test_paginate(test_db: str):
     """paginate returns one page of rows with LIMIT/OFFSET."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -417,31 +423,31 @@ async def test_paginate(test_db):
 
 
 @pytest.mark.asyncio
-async def test_interrupt(test_db):
+async def test_interrupt(test_db: str):
     """interrupt() no-ops without callbacks; with callbacks, interrupts callback connection."""
     async with connect(test_db) as db:
         await db.interrupt()
     async with connect(test_db) as db:
-        await db.create_function("f", 1, lambda x: x)
+        await db.create_function("f", 1, _identity)
         await db.interrupt()
         await db.create_function("f", 1, None)
 
 
 @pytest.mark.asyncio
-async def test_interrupt_after_callback_transaction_context(test_db):
+async def test_interrupt_after_callback_transaction_context(test_db: str):
     """A completed callback transaction does not leave a stale interrupt handle."""
     async with connect(test_db) as db:
-        await db.create_function("identity", 1, lambda value: value)
+        await db.create_function("identity", 1, _identity)
         async with db.transaction():
             pass
         await db.interrupt()
 
 
 @pytest.mark.asyncio
-async def test_interrupt_after_callback_raw_transaction_sql(test_db):
+async def test_interrupt_after_callback_raw_transaction_sql(test_db: str):
     """Raw callback-backed BEGIN/COMMIT does not leave a stale interrupt handle."""
     async with connect(test_db) as db:
-        await db.create_function("identity", 1, lambda value: value)
+        await db.create_function("identity", 1, _identity)
         await db.execute("BEGIN")
         await db.execute("COMMIT")
         await db.interrupt()
@@ -449,11 +455,11 @@ async def test_interrupt_after_callback_raw_transaction_sql(test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("in_transaction", [False, True])
-async def test_interrupt_active_callback_query(test_db, in_transaction):
+async def test_interrupt_active_callback_query(test_db: str, in_transaction: bool):
     """interrupt() reaches callback-backed queries without waiting on their slot lock."""
     started = threading.Event()
 
-    def slow(value):
+    def slow(value: Any):
         started.set()
         time.sleep(0.001)
         return value
@@ -482,7 +488,7 @@ async def test_interrupt_active_callback_query(test_db, in_transaction):
 
 
 @pytest.mark.asyncio
-async def test_connection_await(test_db):
+async def test_connection_await(test_db: str):
     conn = connect(test_db)
     db = await conn
     try:
@@ -495,7 +501,7 @@ async def test_connection_await(test_db):
 
 
 @pytest.mark.asyncio
-async def test_isolation_level(test_db):
+async def test_isolation_level(test_db: str):
     async with connect(test_db) as db:
         assert db.isolation_level is None
         db.isolation_level = "DEFERRED"
@@ -511,7 +517,7 @@ async def test_isolation_level(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_close(test_db):
+async def test_cursor_close(test_db: str):
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
         await db.execute("INSERT INTO t (id) VALUES (1)")
@@ -525,7 +531,7 @@ async def test_cursor_close(test_db):
 
 
 @pytest.mark.asyncio
-async def test_closed_returning_cursor_does_not_execute_again(test_db):
+async def test_closed_returning_cursor_does_not_execute_again(test_db: str):
     async with connect(test_db) as db:
         await db.execute("DROP TABLE IF EXISTS cursor_close_returning")
         await db.execute(
@@ -545,7 +551,7 @@ async def test_closed_returning_cursor_does_not_execute_again(test_db):
 
 
 @pytest.mark.asyncio
-async def test_savepoint_inside_transaction(test_db):
+async def test_savepoint_inside_transaction(test_db: str):
     """savepoint() context manager inside transaction(); rollback to savepoint on exception."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -560,7 +566,7 @@ async def test_savepoint_inside_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_set_slow_query_threshold(test_db):
+async def test_set_slow_query_threshold(test_db: str):
     """set_slow_query_threshold invokes callback when queries exceed threshold."""
     slow_calls: list[tuple[float, str]] = []
 
@@ -585,7 +591,7 @@ async def test_set_slow_query_threshold(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transaction_with_timeout(test_db):
+async def test_transaction_with_timeout(test_db: str):
     """transaction_with_timeout runs work in a transaction with timeout."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -599,7 +605,7 @@ async def test_transaction_with_timeout(test_db):
 
 
 @pytest.mark.asyncio
-async def test_savepoint_rollback(test_db):
+async def test_savepoint_rollback(test_db: str):
     """Rollback to savepoint on exception."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)")
@@ -617,7 +623,7 @@ async def test_savepoint_rollback(test_db):
 
 
 @pytest.mark.asyncio
-async def test_savepoint_no_name(test_db):
+async def test_savepoint_no_name(test_db: str):
     """savepoint() with no name uses generated name."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -628,7 +634,7 @@ async def test_savepoint_no_name(test_db):
 
 
 @pytest.mark.asyncio
-async def test_savepoint_requires_transaction(test_db):
+async def test_savepoint_requires_transaction(test_db: str):
     """savepoint() without active transaction raises."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -638,7 +644,7 @@ async def test_savepoint_requires_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_tuple_parameter_supported(test_db):
+async def test_tuple_parameter_supported(test_db: str):
     """Tuple as parameter is converted to text for aiosqlite compatibility."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (x TEXT)")

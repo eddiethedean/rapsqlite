@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import Any
+from typing import Any, TypeVar
+
+T = TypeVar("T")
 
 
 async def transaction_retry(
     conn: Any,
-    work: Any,
+    work: Callable[[], Awaitable[T]] | Awaitable[T],
     max_retries: int = 5,
     initial_delay: float = 0.01,
     max_delay: float = 1.0,
-) -> Any:
+) -> T:
     """Run a transaction with retry on transient errors (e.g. SQLITE_BUSY, SQLITE_LOCKED).
 
     ``work`` is a callable that returns an awaitable (e.g. an async function); it is
@@ -31,7 +34,7 @@ async def transaction_retry(
         try:
             await conn.begin()
             began = True
-            coro = work() if callable(work) else work
+            coro: Awaitable[T] = work() if callable(work) else work
             result = await coro
             await conn.commit()
             began = False
@@ -55,9 +58,9 @@ async def transaction_retry(
 
 async def transaction_with_timeout(
     conn: Any,
-    work: Any,
+    work: Callable[[], Awaitable[T]] | Awaitable[T],
     timeout_secs: float = 30.0,
-) -> Any:
+) -> T:
     """Run a transaction with a timeout.
 
     Wraps the transaction body in asyncio.wait_for. Raises asyncio.TimeoutError
@@ -66,7 +69,7 @@ async def transaction_with_timeout(
 
     async def _run() -> Any:
         async with conn.transaction():
-            coro = work() if callable(work) else work
+            coro: Awaitable[T] = work() if callable(work) else work
             return await coro
 
     return await asyncio.wait_for(_run(), timeout=timeout_secs)

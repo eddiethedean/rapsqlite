@@ -16,7 +16,7 @@ from rapsqlite import (
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_database_file_creation(test_db):
+async def test_database_file_creation(test_db: str):
     """Test that database file operations work correctly."""
     # Use the test_db fixture which handles file creation
     async with connect(test_db) as db:
@@ -46,7 +46,7 @@ async def test_invalid_database_path():
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_syntax_error(test_db):
+async def test_syntax_error(test_db: str):
     """Test SQL syntax errors."""
     async with connect(test_db) as db:
         # Clearly invalid SQL should raise error
@@ -60,7 +60,7 @@ async def test_syntax_error(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_table_not_found(test_db):
+async def test_table_not_found(test_db: str):
     """Test behavior when table doesn't exist.
 
     Note: SELECT on non-existent table may return empty result or raise error
@@ -80,7 +80,7 @@ async def test_table_not_found(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_column_not_found(test_db):
+async def test_column_not_found(test_db: str):
     """Test error when column doesn't exist."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
@@ -97,7 +97,7 @@ async def test_column_not_found(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_unique_constraint_violation(test_db):
+async def test_unique_constraint_violation(test_db: str):
     """Test IntegrityError on unique constraint violation."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
@@ -110,7 +110,7 @@ async def test_unique_constraint_violation(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_not_null_constraint_violation(test_db):
+async def test_not_null_constraint_violation(test_db: str):
     """Test IntegrityError on NOT NULL constraint violation."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
@@ -122,7 +122,7 @@ async def test_not_null_constraint_violation(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_foreign_key_constraint_violation(test_db):
+async def test_foreign_key_constraint_violation(test_db: str):
     """Test IntegrityError on foreign key constraint violation."""
     async with connect(test_db) as db:
         await db.execute("PRAGMA foreign_keys = ON")
@@ -138,7 +138,7 @@ async def test_foreign_key_constraint_violation(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_missing_parameter_error(test_db):
+async def test_missing_parameter_error(test_db: str):
     """Test error when required parameter is missing."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
@@ -150,7 +150,7 @@ async def test_missing_parameter_error(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_invalid_parameter_type(test_db):
+async def test_invalid_parameter_type(test_db: str):
     """Test error with invalid parameter type."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
@@ -162,7 +162,7 @@ async def test_invalid_parameter_type(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_rollback_without_transaction(test_db):
+async def test_rollback_without_transaction(test_db: str):
     """Rollback without active transaction is a no-op (DBAPI compat)."""
     async with connect(test_db) as db:
         await db.rollback()  # does not raise
@@ -170,7 +170,7 @@ async def test_rollback_without_transaction(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_commit_without_transaction(test_db):
+async def test_commit_without_transaction(test_db: str):
     """Commit without active transaction is a no-op (DBAPI compat)."""
     async with connect(test_db) as db:
         await db.commit()  # does not raise
@@ -178,7 +178,7 @@ async def test_commit_without_transaction(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_fetch_one_not_found(test_db):
+async def test_fetch_one_not_found(test_db: str):
     """Test that fetch_one raises when no row found."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -189,7 +189,7 @@ async def test_fetch_one_not_found(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_fetch_optional_not_found(test_db):
+async def test_fetch_optional_not_found(test_db: str):
     """Test that fetch_optional returns None when no row found."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -200,7 +200,7 @@ async def test_fetch_optional_not_found(test_db):
 
 @pytest.mark.edge_case
 @pytest.mark.asyncio
-async def test_cursor_on_closed_connection(test_db):
+async def test_cursor_on_closed_connection(test_db: str):
     """Test cursor behavior on closed connection."""
     db = Connection(test_db)
     await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
