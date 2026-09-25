@@ -3,6 +3,7 @@
 #![allow(non_local_definitions)] // False positive from pyo3 macros
 
 mod backup;
+mod cache;
 mod callbacks;
 mod schema;
 pub(crate) use callbacks::{
@@ -88,6 +89,8 @@ pub(crate) struct Connection {
     // Callback infrastructure (Phase 2.7)
     callback_connection: Arc<Mutex<PoolConnectionSlot>>, // Dedicated connection for callbacks
     callback_operation_lock: Arc<Mutex<()>>,
+    /// Serializes cache-specialized operations shared by cache wrappers on this Connection.
+    cache_operation_lock: Arc<Mutex<()>>,
     callback_connection_required: Arc<StdMutex<bool>>, // Callback handle needed for extensions or callbacks
     callback_features: Arc<AtomicU8>,
     extension_loading_allowed: Arc<StdMutex<bool>>,
@@ -404,6 +407,7 @@ impl Connection {
             // Callback infrastructure (Phase 2.7)
             callback_connection: Arc::new(Mutex::new(PoolConnectionSlot::default())),
             callback_operation_lock: Arc::new(Mutex::new(())),
+            cache_operation_lock: Arc::new(Mutex::new(())),
             callback_connection_required: Arc::new(StdMutex::new(false)),
             callback_features: Arc::new(AtomicU8::new(0)),
             extension_loading_allowed: Arc::new(StdMutex::new(false)),
@@ -2677,6 +2681,59 @@ impl Connection {
             };
             future_into_py(py, future).map(|bound| bound.unbind())
         })
+    }
+
+    /// Initialize the schema used by SQLiteCache without routing through the
+    /// Python DB-API cursor/factory path.
+    #[pyo3(name = "_cache_initialize", signature = (table_name))]
+    fn cache_initialize(self_: PyRef<Self>, table_name: String) -> PyResult<Py<PyAny>> {
+        let operation = cache::initialize_operation(table_name)?;
+        cache::start_cache_operation(self_, operation)
+    }
+
+    /// Read a live cache BLOB with Rust-side key binding and expiration time.
+    #[pyo3(name = "_cache_get", signature = (table_name, key))]
+    fn cache_get(self_: PyRef<Self>, table_name: String, key: String) -> PyResult<Py<PyAny>> {
+        let operation = cache::get_operation(table_name, key)?;
+        cache::start_cache_operation(self_, operation)
+    }
+
+    /// Store a cache BLOB using a Rust-side TTL clock and direct SQLx binding.
+    #[pyo3(
+        name = "_cache_set",
+        signature = (table_name, key, value, ttl_seconds=None)
+    )]
+    fn cache_set(
+        self_: PyRef<Self>,
+        table_name: String,
+        key: String,
+        value: &Bound<'_, PyBytes>,
+        ttl_seconds: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        let operation =
+            cache::set_operation(table_name, key, value.as_bytes().to_vec(), ttl_seconds)?;
+        cache::start_cache_operation(self_, operation)
+    }
+
+    /// Delete one cache key and return whether a row was removed.
+    #[pyo3(name = "_cache_delete", signature = (table_name, key))]
+    fn cache_delete(self_: PyRef<Self>, table_name: String, key: String) -> PyResult<Py<PyAny>> {
+        let operation = cache::delete_operation(table_name, key)?;
+        cache::start_cache_operation(self_, operation)
+    }
+
+    /// Delete a bounded number of expired cache rows.
+    #[pyo3(
+        name = "_cache_cleanup_expired",
+        signature = (table_name, limit)
+    )]
+    fn cache_cleanup_expired(
+        self_: PyRef<Self>,
+        table_name: String,
+        limit: i64,
+    ) -> PyResult<Py<PyAny>> {
+        let operation = cache::cleanup_expired_operation(table_name, limit)?;
+        cache::start_cache_operation(self_, operation)
     }
 
     /// Fetch one scalar column without constructing a general row or applying a

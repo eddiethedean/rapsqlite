@@ -2,10 +2,11 @@ Process-local cache API
 =======================
 
 ``SQLiteCache`` provides a compact TTL-aware BLOB cache on top of an existing
-rapsqlite connection. It uses a primary-key lookup and ``fetch_blob()`` for
-reads, so cache hits and misses avoid building general result rows. Writes use
-an atomic SQLite upsert. Values are bytes; serialize JSON or other application
-objects before storing them.
+rapsqlite connection. Cache reads and writes use native rapsqlite operations:
+keys and values are bound in Rust, TTL timestamps are computed there, and reads
+return BLOBs without building general result rows. Writes use an atomic SQLite
+upsert. Values are bytes; serialize JSON or other application objects before
+storing them.
 
 Basic usage
 -----------
@@ -69,11 +70,12 @@ constructing either on each request:
 
 An in-memory database is shared only by live connections with the same name
 inside the same process. Use a file-backed database or a separate shared cache
-service when entries must be shared across worker processes or hosts. Operations
-through one ``SQLiteCache`` instance are serialized on its connection; callers
-should coordinate any other concurrent work that shares that same connection.
-This API does not add a multiplexed read mode or Redis-style multi-command
-pipeline.
+service when entries must be shared across worker processes or hosts. Cache
+operations from multiple ``SQLiteCache`` objects sharing one logical connection
+are serialized by a native connection-level lock. That lock does not cover
+ordinary ``Connection`` calls; callers should coordinate concurrent database
+work that mixes those calls with cache operations. This API does not add a
+multiplexed read mode or Redis-style multi-command pipeline.
 
 The API is intended for process-local cache use, not as a universal Redis
 replacement. Benchmark it on deployment hardware with the payload and

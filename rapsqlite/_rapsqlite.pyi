@@ -200,6 +200,23 @@ class Connection:
     def prepare(
         self, query: str, *, raw: bool = False, blob: bool = False
     ) -> "PreparedQuery": ...
+    def _cache_initialize(self, table_name: str) -> Coroutine[Any, Any, None]: ...
+    def _cache_get(
+        self, table_name: str, key: str
+    ) -> Coroutine[Any, Any, Optional[bytes]]: ...
+    def _cache_set(
+        self,
+        table_name: str,
+        key: str,
+        value: bytes,
+        ttl_seconds: Optional[float] = None,
+    ) -> Coroutine[Any, Any, None]: ...
+    def _cache_delete(
+        self, table_name: str, key: str
+    ) -> Coroutine[Any, Any, bool]: ...
+    def _cache_cleanup_expired(
+        self, table_name: str, limit: int
+    ) -> Coroutine[Any, Any, int]: ...
     def execute_iter(
         self,
         sql: str,
