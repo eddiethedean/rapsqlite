@@ -77,11 +77,12 @@ constructing either on each request:
 An in-memory database is shared only by live connections with the same name
 inside the same process. Use a file-backed database or a separate shared cache
 service when entries must be shared across worker processes or hosts. Cache
-operations from multiple ``SQLiteCache`` objects sharing one logical connection
-are serialized by a native connection-level lock. That lock does not cover
-ordinary ``Connection`` calls; callers should coordinate concurrent database
-work that mixes those calls with cache operations. This API does not add a
-multiplexed read mode or Redis-style multi-command pipeline.
+operations share the connection's native operation locks with ordinary
+``Connection`` calls, so individual operations on that logical connection are
+serialized. This does not make a multi-operation sequence atomic or assign a
+transaction to a particular coroutine; coordinate tasks when transaction
+ownership or a read/modify/write sequence must not interleave. This API does not
+add a multiplexed read mode or Redis-style multi-command pipeline.
 
 The API is intended for process-local cache use, not as a universal Redis
 replacement. Benchmark it on deployment hardware with the payload and
