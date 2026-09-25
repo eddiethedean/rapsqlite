@@ -683,7 +683,7 @@ impl Connection {
                 let in_use = size as usize - num_idle;
                 let max_connections = p.options().get_max_connections();
                 #[allow(deprecated)]
-                Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+                Python::attach(|py| -> PyResult<Py<PyAny>> {
                     let dict = PyDict::new(py);
                     dict.set_item("size", size)?;
                     dict.set_item("num_idle", num_idle)?;
@@ -698,10 +698,10 @@ impl Connection {
 
     #[getter(connection_timeout)]
     fn connection_timeout(&self) -> PyResult<Py<PyAny>> {
-        // Note: Python::with_gil is used here for sync operation in async context.
+        // Note: Python::attach is used here for sync operation in async context.
         // The deprecation warning is acceptable as this is a sync operation within async.
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let guard = self.connection_timeout_secs.lock().unwrap();
             Ok(match guard.as_ref() {
                 Some(&n) => PyInt::new(py, n as i64).into_any().unbind(),
@@ -843,7 +843,7 @@ impl Connection {
     #[getter(idle_timeout)]
     fn idle_timeout(&self) -> PyResult<Py<PyAny>> {
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let guard = self.idle_timeout_secs.lock().unwrap();
             Ok(match guard.as_ref() {
                 Some(&n) => PyInt::new(py, n as i64).into_any().unbind(),
@@ -1102,13 +1102,13 @@ impl Connection {
                         if let Some(mut conn) = conn_guard.0.take() {
                             drop(trans_guard);
                             #[allow(deprecated)]
-                            let trace_cb = Python::with_gil(|py| {
+                            let trace_cb = Python::attach(|py| {
                                 let g = trace_callback.lock().unwrap();
                                 g.as_ref().map(|c| c.clone_ref(py))
                             });
                             if let Some(cb) = trace_cb {
                                 #[allow(deprecated)]
-                                Python::with_gil(|py| {
+                                Python::attach(|py| {
                                     let _ = cb.bind(py).call1(("COMMIT",));
                                 });
                             }
@@ -1127,13 +1127,13 @@ impl Connection {
                                 .unwrap_or_else(|| "IMMEDIATE".to_string());
                             let begin_sql = format!("BEGIN {level}");
                             #[allow(deprecated)]
-                            let trace_cb = Python::with_gil(|py| {
+                            let trace_cb = Python::attach(|py| {
                                 let g = trace_callback.lock().unwrap();
                                 g.as_ref().map(|c| c.clone_ref(py))
                             });
                             if let Some(cb) = trace_cb {
                                 #[allow(deprecated)]
-                                Python::with_gil(|py| {
+                                Python::attach(|py| {
                                     let _ = cb.bind(py).call1((begin_sql.as_str(),));
                                 });
                             }
@@ -1252,13 +1252,13 @@ impl Connection {
                         .unwrap_or_else(|| "IMMEDIATE".to_string());
                     let begin_sql = format!("BEGIN {level}");
                     #[allow(deprecated)]
-                    let trace_cb = Python::with_gil(|py| {
+                    let trace_cb = Python::attach(|py| {
                         let g = trace_callback.lock().unwrap();
                         g.as_ref().map(|c| c.clone_ref(py))
                     });
                     if let Some(cb) = trace_cb {
                         #[allow(deprecated)]
-                        Python::with_gil(|py| {
+                        Python::attach(|py| {
                             let _ = cb.bind(py).call1((begin_sql.as_str(),));
                         });
                     }
@@ -1374,13 +1374,13 @@ impl Connection {
 
                 // Execute COMMIT on the same connection that started the transaction
                 #[allow(deprecated)]
-                let trace_cb = Python::with_gil(|py| {
+                let trace_cb = Python::attach(|py| {
                     let g = trace_callback.lock().unwrap();
                     g.as_ref().map(|c| c.clone_ref(py))
                 });
                 if let Some(cb) = trace_cb {
                     #[allow(deprecated)]
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         let _ = cb.bind(py).call1(("COMMIT",));
                     });
                 }
@@ -1458,13 +1458,13 @@ impl Connection {
 
                 // Execute ROLLBACK on the same connection that started the transaction
                 #[allow(deprecated)]
-                let trace_cb = Python::with_gil(|py| {
+                let trace_cb = Python::attach(|py| {
                     let g = trace_callback.lock().unwrap();
                     g.as_ref().map(|c| c.clone_ref(py))
                 });
                 if let Some(cb) = trace_cb {
                     #[allow(deprecated)]
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         let _ = cb.bind(py).call1(("ROLLBACK",));
                     });
                 }
@@ -1584,10 +1584,10 @@ impl Connection {
         // Clone query before processing (it may be moved)
         let original_query = query.clone();
 
-        // Process parameters (sync; Python::with_gil acceptable here)
+        // Process parameters (sync; Python::attach acceptable here)
         #[allow(deprecated)]
         let (processed_query, param_values) =
-            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
+            Python::attach(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         // Track query usage for prepared statement cache analytics (Phase 2.13)
         track_query_usage(&query_cache, &processed_query);
@@ -1612,7 +1612,7 @@ impl Connection {
         // Otherwise create a new cursor. This allows await cursor.execute() to return self (aiosqlite compat).
         let cursor_arg = cursor.map(|c| c.clone().unbind());
         #[allow(deprecated)]
-        let cursor = Python::with_gil(|py| -> PyResult<Py<Cursor>> {
+        let cursor = Python::attach(|py| -> PyResult<Py<Cursor>> {
             if let Some(c) = cursor_arg {
                 let mut c_ref = c.borrow_mut(py);
                 if *c_ref.cursor_closed.lock().unwrap() {
@@ -1686,13 +1686,13 @@ impl Connection {
         // Actually, Futures implement __await__ which returns an iterator, so returning
         // the Future from __await__ should work. But Python is complaining.
         // Let's try returning the ExecuteContextManager and see if we can make __await__ work.
-        // Note: Python::with_gil is used here for sync context manager creation before async execution.
+        // Note: Python::attach is used here for sync context manager creation before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        // Note: Python::with_gil is used here for sync result conversion in async context.
+        // Note: Python::attach is used here for sync result conversion in async context.
         // The deprecation warning is acceptable as this is a sync operation within async.
         #[allow(deprecated)]
-        Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+        Python::attach(|py| -> PyResult<Py<PyAny>> {
             let state = ConnectionExecutionState {
                 path,
                 pool: Arc::clone(&pool),
@@ -1775,10 +1775,10 @@ impl Connection {
 
         // Process all parameter sets
         // Each element in parameters is a list/tuple of parameters for one execution
-        // Note: Python::with_gil is used here for sync parameter processing before async execution.
+        // Note: Python::attach is used here for sync parameter processing before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let processed_params = Python::with_gil(|py| -> PyResult<Vec<Vec<SqliteParam>>> {
+        let processed_params = Python::attach(|py| -> PyResult<Vec<Vec<SqliteParam>>> {
             let mut result = Vec::new();
             for param_set in parameters.iter() {
                 // Convert Vec<Py<PyAny>> to Vec<SqliteParam>
@@ -2010,10 +2010,10 @@ impl Connection {
         let callback_context = self_.callback_context();
         let connection_self = self_.into();
 
-        // Process parameters (sync; Python::with_gil acceptable here)
+        // Process parameters (sync; Python::attach acceptable here)
         #[allow(deprecated)]
         let (processed_query, param_values) =
-            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
+            Python::attach(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         // Track query usage for prepared statement cache analytics (Phase 2.13)
         track_query_usage(&query_cache, &processed_query);
@@ -2024,13 +2024,13 @@ impl Connection {
 
                 // Python-level trace callback.
                 #[allow(deprecated)]
-                let trace_cb = Python::with_gil(|py| {
+                let trace_cb = Python::attach(|py| {
                     let g = trace_callback.lock().unwrap();
                     g.as_ref().map(|c| c.clone_ref(py))
                 });
                 if let Some(cb) = trace_cb {
                     #[allow(deprecated)]
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         let _ = cb.bind(py).call1((processed_query.as_str(),));
                     });
                 }
@@ -2216,10 +2216,10 @@ impl Connection {
         let callback_context = self_.callback_context();
         let connection_self = self_.into();
 
-        // Process parameters (sync; Python::with_gil acceptable here)
+        // Process parameters (sync; Python::attach acceptable here)
         #[allow(deprecated)]
         let (processed_query, param_values) =
-            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
+            Python::attach(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         Python::attach(|py| {
             let future = async move {
@@ -2227,13 +2227,13 @@ impl Connection {
 
                 // Python-level trace callback.
                 #[allow(deprecated)]
-                let trace_cb = Python::with_gil(|py| {
+                let trace_cb = Python::attach(|py| {
                     let g = trace_callback.lock().unwrap();
                     g.as_ref().map(|c| c.clone_ref(py))
                 });
                 if let Some(cb) = trace_cb {
                     #[allow(deprecated)]
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         let _ = cb.bind(py).call1((processed_query.as_str(),));
                     });
                 }
@@ -2418,10 +2418,10 @@ impl Connection {
         let callback_context = self_.callback_context();
         let connection_self = self_.into();
 
-        // Process parameters (sync; Python::with_gil acceptable here)
+        // Process parameters (sync; Python::attach acceptable here)
         #[allow(deprecated)]
         let (processed_query, param_values) =
-            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
+            Python::attach(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         Python::attach(|py| {
             let future = async move {
@@ -2572,7 +2572,7 @@ impl Connection {
         let include_query_in_errors = *self_.include_query_in_errors.lock().unwrap();
         #[allow(deprecated)]
         let (processed_query, param_values) =
-            Python::with_gil(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
+            Python::attach(|py| process_parameters(py, &query, parameters, Some(&adapters)))?;
 
         if is_select_query(&processed_query) {
             return Err(ProgrammingError::new_err(
@@ -2922,10 +2922,10 @@ impl Connection {
         let connection_self = self_.into();
 
         // Convert value to string for PRAGMA
-        // Note: Python::with_gil is used here for sync PRAGMA value conversion before async execution.
+        // Note: Python::attach is used here for sync PRAGMA value conversion before async execution.
         // The deprecation warning is acceptable as this is a sync context.
         #[allow(deprecated)]
-        let pragma_value = Python::with_gil(|_py| -> PyResult<String> {
+        let pragma_value = Python::attach(|_py| -> PyResult<String> {
             if value.is_none() {
                 Ok("NULL".to_string())
             } else if let Ok(int_val) = value.extract::<i64>() {
@@ -3364,14 +3364,14 @@ impl Connection {
         let adapters = Arc::clone(&self.adapters);
         if let Some(adapter) = adapter {
             #[allow(deprecated)]
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let mut guard = adapters.lock().unwrap();
                 guard.push((type_.clone_ref(py), adapter.clone_ref(py)));
                 Ok(())
             })
         } else {
             #[allow(deprecated)]
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let type_bound = type_.bind(py);
                 let mut guard = adapters.lock().unwrap();
                 guard.retain(|(t, _)| !t.bind(py).get_type().is(type_bound.get_type()));

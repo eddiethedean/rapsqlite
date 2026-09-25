@@ -39,13 +39,29 @@ All must inherit from `Exception`:
 
 ``` python
 class Error(Exception): ...
+
+
 class InterfaceError(Error): ...
+
+
 class DatabaseError(Error): ...
+
+
 class DataError(DatabaseError): ...
+
+
 class OperationalError(DatabaseError): ...
+
+
 class IntegrityError(DatabaseError): ...
+
+
 class InternalError(DatabaseError): ...
+
+
 class ProgrammingError(DatabaseError): ...
+
+
 class NotSupportedError(DatabaseError): ...
 ```
 

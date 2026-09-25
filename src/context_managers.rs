@@ -37,12 +37,12 @@ fn maybe_trace_sql(trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>, sql: &str)
         let g = trace_callback.lock().unwrap();
         g.as_ref().map(|c| {
             #[allow(deprecated)]
-            Python::with_gil(|py| c.clone_ref(py))
+            Python::attach(|py| c.clone_ref(py))
         })
     };
     if let Some(cb) = cb {
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let _ = cb.bind(py).call1((sql,));
         });
     }
@@ -106,10 +106,10 @@ impl ExecuteContextManager {
             let converters = Arc::clone(&state.converters);
             let explicit_transaction = Arc::clone(&state.explicit_transaction);
             // Get cursor's results Arc to mark it as executed for non-SELECT queries
-            // Note: Python::with_gil is used here for sync result caching in async context.
+            // Note: Python::attach is used here for sync result caching in async context.
             // The deprecation warning is acceptable as this is a sync operation within async.
             #[allow(deprecated)]
-            let _cursor_results = Python::with_gil(
+            let _cursor_results = Python::attach(
                 |_py| -> PyResult<Arc<StdMutex<Option<Vec<sqlx::sqlite::SqliteRow>>>>> {
                     // We can't easily get the results Arc from Py<Cursor>
                     // Instead, we'll handle this in fetchall() by checking if it's non-SELECT
@@ -502,7 +502,7 @@ impl ExecuteContextManager {
 
                     // Update cursor lastrowid/rowcount (Phase 3.9)
                     #[allow(deprecated)]
-                    let _ = Python::with_gil(|py| -> pyo3::PyResult<()> {
+                    let _ = Python::attach(|py| -> pyo3::PyResult<()> {
                         cursor
                             .bind(py)
                             .call_method1("_update_last_result", (rowid, changes as i64))?;
@@ -512,7 +512,7 @@ impl ExecuteContextManager {
                     // For RETURNING: cache rows in cursor so fetchall() does not re-execute
                     if let DmlOutcome::Fetched(ref rows) = outcome {
                         #[allow(deprecated)]
-                        let _ = Python::with_gil(|py| -> PyResult<()> {
+                        let _ = Python::attach(|py| -> PyResult<()> {
                             let cur = cursor.bind(py);
                             let conn = connection_for_fetch.bind(py);
                             let rf = cur.getattr("row_factory").ok().map(|o| o.unbind());
@@ -673,7 +673,7 @@ impl ExecuteContextManager {
                         .await?
                     };
                     #[allow(deprecated)]
-                    let _ = Python::with_gil(|py| -> PyResult<()> {
+                    let _ = Python::attach(|py| -> PyResult<()> {
                         let cur = cursor.bind(py);
                         let conn = connection_for_fetch.bind(py);
                         let rf = cur.getattr("row_factory").ok().map(|o| o.unbind());
@@ -736,10 +736,10 @@ impl ExecuteContextManager {
     fn __await__(slf: PyRef<Self>) -> PyResult<Py<PyAny>> {
         // Call __aenter__ to get the Future, then call its __await__ to get the iterator
         let slf: Py<Self> = slf.into();
-        // Note: Python::with_gil is used here for sync operation in async context.
+        // Note: Python::attach is used here for sync operation in async context.
         // The deprecation warning is acceptable as this is a sync operation within async.
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let ctx_mgr = slf.bind(py);
             // Call __aenter__ to get the Future
             let future = ctx_mgr.call_method0("__aenter__")?;
@@ -949,7 +949,7 @@ impl TransactionContextManager {
                     drop(_callback_operation_guard);
                     // Run init_hook after transaction is active so hook's conn.execute() uses this connection
                     #[allow(deprecated)]
-                    let connection_for_hook = Python::with_gil(|py| connection.clone_ref(py));
+                    let connection_for_hook = Python::attach(|py| connection.clone_ref(py));
                     execute_init_hook_if_needed(&init_hook, &init_hook_called, connection_for_hook)
                         .await?;
                     Ok(connection.into())

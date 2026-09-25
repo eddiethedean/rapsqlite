@@ -23,7 +23,8 @@ try:
     from sqlalchemy import pool
     from sqlalchemy.engine import URL
     from sqlalchemy.engine.interfaces import DBAPIModule
-    from sqlalchemy.util.concurrency import await_fallback as _await
+
+    from sqlalchemy.util import concurrency as _concurrency
     from sqlalchemy.connectors.asyncio import (
         AsyncAdapt_dbapi_connection,
         AsyncAdapt_dbapi_cursor,
@@ -37,6 +38,12 @@ except ImportError as e:
 
 from . import dbapi as _dbapi
 
+_await: Any = getattr(_concurrency, "await_", None)
+if _await is None:
+    # SQLAlchemy 2.0 exposes the legacy fallback helper; SQLAlchemy 2.1 uses
+    # await_ for async DBAPI operations inside its greenlet bridge.
+    _await = getattr(_concurrency, "await_fallback")
+
 
 class _RapsqliteCursor(AsyncAdapt_dbapi_cursor):
     """Cache description so SQLAlchemy can build result metadata after cursor close."""
@@ -48,7 +55,8 @@ class _RapsqliteCursor(AsyncAdapt_dbapi_cursor):
         self._last_description: Any = None
 
     def _make_new_cursor(self, connection: Any) -> Any:
-        return self._adapt_connection.await_(connection.cursor())
+        await_fn = getattr(self._adapt_connection, "await_", _await)
+        return await_fn(connection.cursor())
 
     def execute(
         self,
@@ -101,13 +109,11 @@ class _RapsqliteDialectModule:
     NotSupportedError = _dbapi.NotSupportedError  # type: ignore[attr-defined]
 
     def connect(self, *arg: Any, **kw: Any) -> _RapsqliteConnection:
-        from sqlalchemy.util.concurrency import await_fallback
-
         creator_fn = kw.pop("async_creator_fn", None)
         if creator_fn:
-            raw = await_fallback(creator_fn(*arg, **kw))
+            raw = _await(creator_fn(*arg, **kw))
         else:
-            raw = await_fallback(_dbapi.connect(*arg, **kw))
+            raw = _await(_dbapi.connect(*arg, **kw))
         return _RapsqliteConnection(self, raw)
 
 

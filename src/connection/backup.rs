@@ -109,7 +109,7 @@ pub(crate) async fn run_backup_loop(params: BackupParams<'_>) -> Result<(), PyEr
                     let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
                     let pages_copied = page_count - remaining;
                     #[allow(deprecated)]
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         let callback = progress_cb.bind(py);
                         let remaining_py: Py<PyAny> =
                             PyInt::new(py, remaining as i64).into_any().unbind();
@@ -133,7 +133,7 @@ pub(crate) async fn run_backup_loop(params: BackupParams<'_>) -> Result<(), PyEr
                 if let Some(ref progress_cb) = params.progress_callback {
                     let page_count = unsafe { sqlite3_backup_pagecount(backup_handle.0) };
                     #[allow(deprecated)]
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         let callback = progress_cb.bind(py);
                         let remaining_py: Py<PyAny> = PyInt::new(py, 0i64).into_any().unbind();
                         let page_count_py: Py<PyAny> =
@@ -402,7 +402,7 @@ pub(crate) async fn run_backup(
             }
             BackupTarget::Sqlite3(target_clone) => {
                 #[allow(deprecated)]
-                let handle_ptr = Python::with_gil(|py| -> PyResult<*mut sqlite3> {
+                let handle_ptr = Python::attach(|py| -> PyResult<*mut sqlite3> {
                     let backup_helper = py.import("rapsqlite._backup_helper").map_err(|e| {
                         OperationalError::new_err(format!(
                             "Failed to import backup helper: {e}. Make sure rapsqlite package is properly installed."
