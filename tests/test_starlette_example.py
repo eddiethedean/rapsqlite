@@ -1,6 +1,6 @@
 """Smoke test for Starlette + rapsqlite integration pattern."""
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -34,6 +34,6 @@ async def test_starlette_rapsqlite_smoke(test_db: str) -> None:
         await conn.execute("INSERT INTO items (id, name) VALUES (1, 'foo')")
     app = _make_app(test_db)
     with TestClient(app) as client:
-        r = client.get("/")
+        r = cast(Any, client).get("/")
     assert r.status_code == 200
     assert r.json() == {"items": [[1, "foo"]]}
