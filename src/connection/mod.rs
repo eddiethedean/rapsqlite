@@ -1766,7 +1766,7 @@ impl Connection {
     fn execute_many(
         self_: PyRef<Self>,
         query: String,
-        parameters: Vec<Vec<Py<PyAny>>>,
+        parameters: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
@@ -1791,26 +1791,39 @@ impl Connection {
         let callback_context = self_.callback_context();
         let connection_self = self_.into();
 
-        // Process all parameter sets
-        // Each element in parameters is a list/tuple of parameters for one execution
-        // Note: Python::attach is used here for sync parameter processing before async execution.
-        // The deprecation warning is acceptable as this is a sync context.
+        // Process parameter sets before entering the async future. Row mappings
+        // are parsed with the same named-placeholder logic as execute(); other
+        // iterable rows are normalized to positional lists.
         #[allow(deprecated)]
-        let processed_params = Python::attach(|py| -> PyResult<Vec<Vec<SqliteParam>>> {
-            let mut result = Vec::new();
-            for param_set in parameters.iter() {
-                // Convert Vec<Py<PyAny>> to Vec<SqliteParam>
-                let mut params_vec = Vec::new();
-                for param in param_set {
-                    let bound_param = param.bind(py);
-                    let sqlx_param =
-                        SqliteParam::apply_adapters_then_from_py(py, bound_param, Some(&adapters))?;
-                    params_vec.push(sqlx_param);
+        let (query, processed_params) =
+            Python::attach(|py| -> PyResult<(String, Vec<Vec<SqliteParam>>)> {
+                let mut result = Vec::new();
+                let mut processed_query: Option<String> = None;
+                for param_set in parameters.try_iter()? {
+                    let param_set = param_set?;
+                    let row_parameters = if param_set.hasattr("keys")? {
+                        py.get_type::<PyDict>().call1((param_set,))?
+                    } else {
+                        let values = param_set
+                            .try_iter()?
+                            .collect::<PyResult<Vec<Bound<'_, PyAny>>>>()?;
+                        PyList::new(py, values)?.into_any()
+                    };
+                    let (row_query, row_values) =
+                        process_parameters(py, &query, Some(&row_parameters), Some(&adapters))?;
+                    if let Some(expected_query) = &processed_query {
+                        if expected_query != &row_query {
+                            return Err(ProgrammingError::new_err(
+                                "executemany parameter sets must use the same binding style",
+                            ));
+                        }
+                    } else {
+                        processed_query = Some(row_query);
+                    }
+                    result.push(row_values);
                 }
-                result.push(params_vec);
-            }
-            Ok(result)
-        })?;
+                Ok((processed_query.unwrap_or(query), result))
+            })?;
 
         Python::attach(|py| {
             let future = async move {

@@ -320,11 +320,7 @@ impl Cursor {
     }
 
     /// Execute a SQL query multiple times.
-    fn executemany(
-        &mut self,
-        query: String,
-        parameters: Vec<Vec<Py<PyAny>>>,
-    ) -> PyResult<Py<PyAny>> {
+    fn executemany(&mut self, query: String, parameters: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if *self.cursor_closed.lock().unwrap() {
             return Err(ProgrammingError::new_err(
                 "Cannot operate on a closed cursor.",
@@ -333,7 +329,7 @@ impl Cursor {
         self.query = query.clone();
         Python::attach(|py| {
             let conn = self.connection.bind(py);
-            conn.call_method1("execute_many", (query, parameters))
+            conn.call_method1("execute_many", (query, parameters.clone()))
                 .map(|bound| bound.unbind())
         })
     }

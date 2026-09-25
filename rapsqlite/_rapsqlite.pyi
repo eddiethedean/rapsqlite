@@ -8,7 +8,9 @@ from collections.abc import (
     Callable,
     Coroutine,
     Generator,
+    Iterable,
     Iterator,
+    Mapping,
     Sequence,
 )
 from typing import (
@@ -26,6 +28,7 @@ from rapsqlite._metrics import PoolMetrics
 
 # Type alias for init_hook callback
 InitHook = Callable[["Connection"], Coroutine[Any, Any, None]]
+ParameterSet: TypeAlias = Sequence[Any] | Mapping[str, Any]
 
 class PreparedQuery(Protocol):
     """Connection-bound reusable query object installed by rapsqlite."""
@@ -171,10 +174,10 @@ class Connection:
         cursor: Optional["Cursor"] = None,
     ) -> "ExecuteContextManager": ...
     def execute_many(
-        self, query: str, parameters: Sequence[Sequence[Any]]
+        self, query: str, parameters: Iterable[ParameterSet]
     ) -> Coroutine[Any, Any, None]: ...
     def executemany(
-        self, query: str, parameters: Sequence[Sequence[Any]]
+        self, query: str, parameters: Iterable[ParameterSet]
     ) -> Coroutine[Any, Any, None]: ...
     def fetch_all(
         self, query: str, parameters: Optional[Any] = None
@@ -575,7 +578,7 @@ class Cursor:
         self, query: str, parameters: Optional[Any] = None
     ) -> Coroutine[Any, Any, None]: ...
     def executemany(
-        self, query: str, parameters: Sequence[Sequence[Any]]
+        self, query: str, parameters: Iterable[ParameterSet]
     ) -> Coroutine[Any, Any, None]: ...
     def close(self) -> Coroutine[Any, Any, None]: ...
     @property

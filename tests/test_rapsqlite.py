@@ -1,6 +1,7 @@
 """Test rapsqlite async functionality."""
 
 import os
+from collections import UserDict
 
 import pytest
 
@@ -31,6 +32,20 @@ async def test_insert_data(test_db: str):
         await conn.execute(
             "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com')"
         )
+
+
+@pytest.mark.asyncio
+async def test_executemany_accepts_named_parameter_mappings():
+    async with connect(":memory:") as conn:
+        await conn.execute("CREATE TABLE values_table (value INTEGER)")
+        await conn.executemany(
+            "INSERT INTO values_table VALUES (:value)",
+            [UserDict({"value": 7}), UserDict({"value": 9})],
+        )
+
+        assert await conn.fetch_all(
+            "SELECT value FROM values_table ORDER BY value"
+        ) == [[7], [9]]
 
 
 @pytest.mark.asyncio

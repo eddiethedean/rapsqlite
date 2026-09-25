@@ -3,6 +3,7 @@
 import asyncio
 import os
 import time
+from collections import UserDict
 from typing import Any
 
 import pytest
@@ -121,6 +122,46 @@ async def test_executemany(unique_table_prefix: str):
     rows = await cur.fetchall()
     assert len(rows) == 3
     await cur.close()
+    await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_executemany_preserves_named_mapping_parameters(
+    unique_table_prefix: str,
+):
+    tbl = unique_table_prefix
+    conn = await dbapi.connect(":memory:")
+    await conn.execute(f"CREATE TABLE {tbl} (value INTEGER)")
+
+    await conn.executemany(
+        f"INSERT INTO {tbl} VALUES (:value)",
+        [{"value": 7}, {"value": 9}],
+    )
+
+    cur = await conn.execute(f"SELECT value FROM {tbl} ORDER BY value")
+    assert await cur.fetchall() == [[7], [9]]
+    await cur.close()
+    await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_cursor_executemany_preserves_named_mapping_parameters(
+    unique_table_prefix: str,
+):
+    tbl = unique_table_prefix
+    conn = await dbapi.connect(":memory:")
+    await conn.execute(f"CREATE TABLE {tbl} (value INTEGER)")
+    cur = await conn.cursor()
+
+    await cur.executemany(
+        f"INSERT INTO {tbl} VALUES (:value)",
+        [UserDict({"value": 7}), UserDict({"value": 9})],
+    )
+
+    result = await conn.execute(f"SELECT value FROM {tbl} ORDER BY value")
+    assert await result.fetchall() == [[7], [9]]
+    await cur.close()
+    await result.close()
     await conn.close()
 
 

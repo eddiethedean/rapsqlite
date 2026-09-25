@@ -7,7 +7,8 @@ from __future__ import annotations  # PEP 563: forward references without quotes
 
 import asyncio
 import re
-from typing import Any, Callable, Coroutine, Iterable, Sequence, TypeVar, cast
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Callable, Coroutine, TypeVar, cast
 
 from . import (
     ConnectionT,
@@ -20,6 +21,7 @@ from . import connect as _connect
 from ._compat.commit_rollback import _is_no_tx_error_message  # pyright: ignore[reportPrivateUsage]
 
 T = TypeVar("T")
+_ParameterSet = Sequence[Any] | Mapping[str, Any]
 _InterfaceError = cast(Any, InterfaceError)
 
 
@@ -230,13 +232,13 @@ class AsyncCursor:
         return await self._with_lock(_do)
 
     async def executemany(
-        self, sql: str, seq_of_params: Iterable[Sequence[Any]]
+        self, sql: str, seq_of_params: Iterable[_ParameterSet]
     ) -> None:
         async def _do() -> None:
             self._result_buffer = None
             self._result_index = 0
             self._cached_description = None
-            await self._raw.executemany(sql, [list(params) for params in seq_of_params])
+            await self._raw.executemany(sql, seq_of_params)
             self._cached_description = self._raw.description
             # DML/DDL does not return rows; buffer so fetchall() can be called later.
             self._result_buffer = await self._raw.fetchall()
@@ -378,11 +380,11 @@ class AsyncConnection:
 
         return await self._with_op_lock(_do)
 
-    async def executemany(self, sql: str, seq_of_params: Any) -> None:
+    async def executemany(
+        self, sql: str, seq_of_params: Iterable[_ParameterSet]
+    ) -> None:
         async def _do() -> None:
-            await self._conn.executemany(
-                sql, [list(params) for params in seq_of_params]
-            )
+            await self._conn.executemany(sql, seq_of_params)
 
         await self._with_op_lock(_do)
 
