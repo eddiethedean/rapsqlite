@@ -1,6 +1,7 @@
 """Robust tests for Phase 2.4 pool configuration (pool_size, connection_timeout)."""
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 
@@ -39,7 +40,7 @@ async def test_pool_size_rejects_non_int(test_db):
     """Setting pool_size to a non-int (e.g. str) raises TypeError."""
     async with connect(test_db) as db:
         with pytest.raises((TypeError, ValueError)):
-            db.pool_size = "10"
+            cast(Any, db).pool_size = "10"
 
 
 @pytest.mark.asyncio
@@ -47,7 +48,7 @@ async def test_connection_timeout_rejects_non_int(test_db):
     """Setting connection_timeout to a non-int (e.g. str) raises TypeError."""
     async with connect(test_db) as db:
         with pytest.raises((TypeError, ValueError)):
-            db.connection_timeout = "30"
+            cast(Any, db).connection_timeout = "30"
 
 
 # ---- Config applied before first use ----

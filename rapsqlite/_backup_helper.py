@@ -5,11 +5,10 @@ from Python's sqlite3.Connection objects for use in backup operations.
 """
 
 import ctypes
-import sqlite3
 import sys
 
 
-def get_sqlite3_handle(conn: sqlite3.Connection) -> int | None:
+def get_sqlite3_handle(conn: object) -> int | None:
     """
     Extract sqlite3* handle from sqlite3.Connection object.
 
@@ -39,7 +38,7 @@ def get_sqlite3_handle(conn: sqlite3.Connection) -> int | None:
         try:
             # Try to access a property that requires an open connection
             # This will raise an error if connection is closed
-            _ = conn.total_changes
+            _ = getattr(conn, "total_changes")
         except (AttributeError, ValueError, Exception):
             # Connection might be closed or invalid
             # Catch all exceptions to handle ProgrammingError for closed connections

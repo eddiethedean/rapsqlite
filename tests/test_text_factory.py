@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 
 import rapsqlite
@@ -11,7 +13,7 @@ async def test_text_factory_callable_applies_to_text_columns(test_db):
         await db.execute("CREATE TABLE t (v TEXT, b BLOB)")
         await db.execute("INSERT INTO t (v, b) VALUES (?, ?)", ["hello", b"bytes"])
 
-        seen = {"arg_type": None}
+        seen: dict[str, Any] = {"arg_type": None}
 
         def tf(raw: bytes):
             seen["arg_type"] = type(raw)

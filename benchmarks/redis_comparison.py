@@ -27,7 +27,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable, cast
 
 import redis as redis_package
 import redis.asyncio as redis
@@ -277,8 +277,8 @@ async def setup_redis(
         port=config.port,
         decode_responses=False,
     )
-    await client.ping()
-    await client.flushdb()
+    await cast(Awaitable[Any], client.ping())
+    await cast(Awaitable[Any], client.flushdb())
     pipe = client.pipeline(transaction=False)
     for index, key in enumerate(keys, 1):
         pipe.set(key, value, ex=ttl)
@@ -303,6 +303,7 @@ async def run_sequential_scenarios(
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for backend in ("rapsqlite", "redis.asyncio"):
+        handle: Any = None
         if backend == "rapsqlite":
             handle = await setup_sqlite(config, keys, value, expiry, pool_size=1)
 
@@ -355,6 +356,7 @@ async def run_batch_scenarios(
     results: list[dict[str, Any]] = []
     batch_keys = operation_keys(keys, config.sequential_ops)
     for backend in ("rapsqlite", "redis.asyncio"):
+        handle: Any = None
         if backend == "rapsqlite":
             handle = await setup_sqlite(config, keys, value, expiry, pool_size=1)
         else:
@@ -415,6 +417,8 @@ async def run_concurrent_scenarios(
     results: list[dict[str, Any]] = []
     for backend in ("rapsqlite", "redis.asyncio"):
         for pool_size in config.pool_sizes:
+            handle: Any = None
+            worker_handles: list[Any] = []
             if backend == "rapsqlite":
                 sqlite_name = f"redis-comparison-{uuid.uuid4().hex}"
                 primary_handle = await setup_sqlite(
@@ -457,23 +461,32 @@ async def run_concurrent_scenarios(
 
                     return write
 
-                read = [sqlite_read(handle) for handle in worker_handles]
-                write = [sqlite_write(handle) for handle in worker_handles]
+                read_operations: (
+                    Callable[[str], Awaitable[Any]]
+                    | list[Callable[[str], Awaitable[Any]]]
+                ) = [sqlite_read(handle) for handle in worker_handles]
+                write_operations: (
+                    Callable[[str], Awaitable[Any]]
+                    | list[Callable[[str], Awaitable[Any]]]
+                ) = [sqlite_write(handle) for handle in worker_handles]
             else:
                 handle = await setup_redis(
                     config, keys, value, config.expiration_seconds, pool_size=pool_size
                 )
 
-                async def read(key: str) -> Any:
+                async def read_redis(key: str) -> Any:
                     return await handle.get(key)
 
-                async def write(key: str) -> Any:
+                async def write_redis(key: str) -> Any:
                     return await handle.set(key, value, ex=config.expiration_seconds)
+
+                read_operations = read_redis
+                write_operations = write_redis
 
             try:
                 for concurrency in config.concurrency_levels:
                     read_result = await measure_concurrent(
-                        read,
+                        read_operations,
                         keys,
                         total_ops=config.concurrent_ops,
                         concurrency=concurrency,
@@ -488,7 +501,7 @@ async def run_concurrent_scenarios(
                         }
                     )
                     write_result = await measure_concurrent(
-                        write,
+                        write_operations,
                         keys,
                         total_ops=max(1000, config.concurrent_ops // 4),
                         concurrency=concurrency,

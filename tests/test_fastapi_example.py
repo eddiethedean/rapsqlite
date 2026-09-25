@@ -28,7 +28,7 @@ def _make_app(db_path: str) -> FastAPI:
             yield conn
 
     @app.get("/")
-    async def root(db: Any = Depends(get_db)) -> dict:
+    async def root(db: Any = Depends(get_db)) -> dict[str, list[list[Any]]]:  # pyright: ignore[reportUnusedFunction]
         rows = await db.fetch_all("SELECT id, name FROM items")
         return {"items": [list(r) for r in rows]}
 

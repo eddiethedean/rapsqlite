@@ -22,7 +22,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 
 try:
     import resource
@@ -163,7 +163,7 @@ async def setup_redis(host: str, port: int) -> Any | None:
         return None
     client = redis.Redis(host=host, port=port, decode_responses=False)
     try:
-        await client.ping()
+        await cast(Awaitable[Any], client.ping())
         await client.set("phase5-hot-key", b"x" * 1024, ex=3600)
     except Exception:
         await client.aclose()

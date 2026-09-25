@@ -8,6 +8,7 @@ validate behavior against a known-good dialect before rapsqlite.
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -157,7 +158,7 @@ def downgrade() -> None:
 
 def _run_alembic(
     cwd: str, *args: str, timeout: int = 30
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Run alembic in cwd with given args. Returns CompletedProcess."""
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
@@ -279,9 +280,8 @@ def test_alembic_upgrade_then_downgrade_base(alembic_root, tmp_path, dialect):
     cleanup_db(str(db_path))
 
 
-def _setup_three_revisions(root: object, db_url: str, db_path: object) -> None:
+def _setup_three_revisions(root: Path, db_url: str, db_path: Path) -> None:
     """Write alembic.ini and three revision files; touch db."""
-    root = root  # Path
     (root / "alembic.ini").write_text(
         _alembic_ini_content("alembic", db_url), encoding="utf-8"
     )

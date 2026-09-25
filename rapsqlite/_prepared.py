@@ -18,7 +18,7 @@ class PreparedQuery:
     def __init__(
         self,
         connection: Any,
-        query: str,
+        query: object,
         *,
         raw: bool = False,
         blob: bool = False,

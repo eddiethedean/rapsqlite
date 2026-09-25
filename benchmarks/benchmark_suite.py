@@ -14,6 +14,8 @@ import tempfile
 import os
 import sys
 import statistics
+import sqlite3
+from typing import Any
 
 # Number of times to run each benchmark; reported metrics are averages across runs.
 BENCHMARK_RUNS = 5
@@ -35,19 +37,16 @@ MIXED_WRITERS = 5
 MIXED_WRITES_PER_WRITER = 500
 TRANSACTION_COUNT = 100
 
+aiosqlite: Any = None
 try:
-    import aiosqlite
+    import aiosqlite as _aiosqlite
 
-    AIOSQLITE_AVAILABLE = True
+    aiosqlite = _aiosqlite
 except ImportError:
-    AIOSQLITE_AVAILABLE = False
+    pass
+AIOSQLITE_AVAILABLE = aiosqlite is not None
 
-try:
-    import sqlite3
-
-    SQLITE3_AVAILABLE = True
-except ImportError:
-    SQLITE3_AVAILABLE = False
+SQLITE3_AVAILABLE = True
 
 import rapsqlite  # noqa: E402
 

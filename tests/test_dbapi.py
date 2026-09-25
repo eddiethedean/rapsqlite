@@ -25,14 +25,14 @@ async def test_raw_cursor_has_close_and_lastrowid():
     conn = await dbapi.connect(":memory:")
     # From cursor()
     cur = await conn.cursor()
-    raw = cur._raw
+    raw = getattr(cur, "_raw")
     assert hasattr(raw, "close"), "raw Cursor from cursor() must have close"
     assert callable(getattr(raw, "close", None)), "raw close must be callable"
     assert hasattr(raw, "lastrowid"), "raw Cursor from cursor() must have lastrowid"
     await cur.close()
     # From execute()
     exec_cur = await conn.execute("SELECT 1")
-    raw_exec = exec_cur._raw
+    raw_exec = getattr(exec_cur, "_raw")
     assert hasattr(raw_exec, "close"), "raw Cursor from execute() must have close"
     assert hasattr(raw_exec, "lastrowid"), (
         "raw Cursor from execute() must have lastrowid"

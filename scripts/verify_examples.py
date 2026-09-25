@@ -8,6 +8,7 @@ import tempfile
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # Add parent directory to path to import rapsqlite
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -235,7 +236,7 @@ async def example_init_hook():
         db_path = f.name
     try:
 
-        async def init_hook(conn):
+        async def init_hook(conn: Any):
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY,

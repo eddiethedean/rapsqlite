@@ -294,7 +294,7 @@ async def test_unicode_in_queries(test_db):
             "\u0000",  # Null byte (should be handled)
         ]
 
-        for i, text in enumerate(unicode_strings):
+        for _, text in enumerate(unicode_strings):
             if "\u0000" in text:
                 # Null bytes might cause issues, skip for now
                 continue

@@ -1,7 +1,7 @@
 # rapsqlite Makefile
 # Pattern from https://github.com/eddiethedean/robin-sparkless/blob/main/Makefile
 
-.PHONY: build build-release test test-rust test-python check check-full fmt fmt-check clippy audit deny outdated lint-python clean
+.PHONY: build build-release test test-rust test-python check check-full fmt fmt-check clippy audit deny outdated lint-python typecheck clean
 
 # Use stable toolchain when no default is configured (override with RUSTUP_TOOLCHAIN=nightly etc.)
 export RUSTUP_TOOLCHAIN ?= stable
@@ -62,11 +62,16 @@ audit:
 outdated:
 	cargo outdated
 
-# Python lint (ruff format, ruff check, mypy). Uses same .venv as test-python.
-# Fails on mypy errors (no || true); check-full will fail if mypy reports issues.
+# Python lint and type checks. Uses the same .venv as test-python.
 lint-python:
 	@if [ ! -d .venv ]; then python3 -m venv .venv; fi
-	. .venv/bin/activate && pip install -q ruff 'mypy>=1.4' && ruff format --check . && ruff check . && mypy rapsqlite
+	. .venv/bin/activate && pip install -q -r requirements-ci.txt -r requirements-test.txt && pip install -q alembic aiohttp fastapi greenlet httpx redis sqlalchemy
+	. .venv/bin/activate && ./scripts/check_python_types.sh
+
+# Run only the strict Pyright checks in the active environment.
+typecheck:
+	pyright
+	pyright --verifytypes rapsqlite --ignoreexternal
 
 # Clean
 clean:

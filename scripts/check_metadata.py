@@ -10,7 +10,7 @@ import tarfile
 from pathlib import Path
 
 
-def check_wheel_metadata(wheel_path):
+def check_wheel_metadata(wheel_path: Path | str) -> bool:
     """Check wheel metadata for problematic fields."""
     print(f"📦 Checking wheel: {wheel_path}")
 
@@ -54,7 +54,7 @@ def check_wheel_metadata(wheel_path):
             return True
 
 
-def check_sdist_metadata(sdist_path):
+def check_sdist_metadata(sdist_path: Path | str) -> bool:
     """Check sdist PKG-INFO for problematic fields."""
     print(f"\n📦 Checking sdist: {sdist_path}")
 
@@ -65,7 +65,11 @@ def check_sdist_metadata(sdist_path):
             return False
 
         pkg_info_file = pkg_info_files[0]
-        pkg_info_content = tar.extractfile(pkg_info_file).read().decode("utf-8")
+        pkg_info_handle = tar.extractfile(pkg_info_file)
+        if pkg_info_handle is None:
+            print(f"❌ Could not read {pkg_info_file} from sdist")
+            return False
+        pkg_info_content = pkg_info_handle.read().decode("utf-8")
 
         print("\n📄 PKG-INFO content:")
         print("=" * 80)

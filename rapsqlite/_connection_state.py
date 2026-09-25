@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from typing import Protocol
 
     class Connection(Protocol):
-        def __aenter__(self): ...
-        def __aexit__(self, *args): ...
+        def __aenter__(self) -> Any: ...
+        def __aexit__(self, *args: Any, **kwargs: Any) -> Any: ...
         async def close(self): ...
 
         # total_changes, in_transaction, begin, commit, rollback, transaction
@@ -60,19 +60,6 @@ def _total_changes_prop(self: Connection) -> int:
 def _in_transaction_prop(self: Connection) -> bool:
     """Check if connection is in a transaction (sync property for aiosqlite compat)."""
     return cast(bool, _get_conn_state(self).get("in_transaction", False))
-
-
-async def _update_connection_state(conn: Connection) -> None:
-    """Update cached total_changes and in_transaction from the database."""
-    state = _get_conn_state(conn)
-    try:
-        state["total_changes"] = await _orig_total_changes(conn)
-    except Exception:
-        pass
-    try:
-        state["in_transaction"] = await _orig_in_transaction(conn)
-    except Exception:
-        pass
 
 
 async def _begin_with_state_update(self: Connection) -> None:

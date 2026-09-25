@@ -24,9 +24,12 @@ class _IterdumpWrapper:
         if self._lines is None:
             self._lines = await _raw_iterdump(self._conn)
             self._index = 0
-        if self._index >= len(self._lines):
+        lines = self._lines
+        if lines is None:
+            raise RuntimeError("iterdump did not return lines")
+        if self._index >= len(lines):
             raise StopAsyncIteration
-        line = self._lines[self._index]
+        line = lines[self._index]
         self._index += 1
         return line
 
