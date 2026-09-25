@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.edge_case]
 
 
 @pytest.mark.asyncio
-async def test_backup_concurrent_sources(test_db_file, target_db_file):
+async def test_backup_concurrent_sources(test_db_file: str, target_db_file: str):
     """Test backing up from multiple source connections concurrently."""
     # Setup source database
     async with connect(test_db_file) as src:
@@ -52,7 +52,7 @@ async def test_backup_concurrent_sources(test_db_file, target_db_file):
 
 
 @pytest.mark.asyncio
-async def test_backup_source_in_transaction(test_db_file, target_db_file):
+async def test_backup_source_in_transaction(test_db_file: str, target_db_file: str):
     """Test backup when source is in a transaction."""
     async with connect(test_db_file) as src:
         await src.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
@@ -75,7 +75,7 @@ async def test_backup_source_in_transaction(test_db_file, target_db_file):
 
 
 @pytest.mark.asyncio
-async def test_backup_large_database(test_db_file, target_db_file):
+async def test_backup_large_database(test_db_file: str, target_db_file: str):
     """Test backup with a moderately large database."""
     async with connect(test_db_file) as src:
         await src.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, data TEXT)")
@@ -84,9 +84,9 @@ async def test_backup_large_database(test_db_file, target_db_file):
         await src.execute_many("INSERT INTO t (data) VALUES (?)", [[d] for d in data])
 
     # Backup with pages parameter to allow progress callbacks
-    progress_calls = []
+    progress_calls: list[tuple[int, int, int]] = []
 
-    def progress(remaining, page_count, pages_copied):
+    def progress(remaining: int, page_count: int, pages_copied: int):
         progress_calls.append((remaining, page_count, pages_copied))
 
     async with connect(test_db_file) as src, connect(target_db_file) as tgt:
@@ -103,7 +103,7 @@ async def test_backup_large_database(test_db_file, target_db_file):
 
 
 @pytest.mark.asyncio
-async def test_backup_with_zero_pages(test_db_file, target_db_file):
+async def test_backup_with_zero_pages(test_db_file: str, target_db_file: str):
     """Test backup with pages=0 (copy all at once)."""
     async with connect(test_db_file) as src:
         await src.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
@@ -122,7 +122,7 @@ async def test_backup_with_zero_pages(test_db_file, target_db_file):
 
 @pytest.mark.asyncio
 async def test_backup_sqlite3_target_with_active_transaction(
-    test_db_file, target_db_file
+    test_db_file: str, target_db_file: str
 ):
     """Test backup to sqlite3.Connection fails if target has active transaction."""
     async with connect(test_db_file) as src:
@@ -157,7 +157,7 @@ async def test_backup_sqlite3_target_memory_source_raises():
 
 
 @pytest.mark.asyncio
-async def test_backup_same_database_raises(test_db_file, target_db_file):
+async def test_backup_same_database_raises(test_db_file: str, target_db_file: str):
     """Test that backing up to the same connection object is not supported."""
     async with connect(test_db_file) as src:
         await src.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -173,7 +173,9 @@ async def test_backup_same_database_raises(test_db_file, target_db_file):
 
 
 @pytest.mark.asyncio
-async def test_backup_progress_callback_errors_handled(test_db_file, target_db_file):
+async def test_backup_progress_callback_errors_handled(
+    test_db_file: str, target_db_file: str
+):
     """Test that errors in progress callback don't crash backup."""
     async with connect(test_db_file) as src:
         await src.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -181,7 +183,7 @@ async def test_backup_progress_callback_errors_handled(test_db_file, target_db_f
 
     error_raised = False
 
-    def progress(remaining, page_count, pages_copied):
+    def progress(remaining: int, page_count: int, pages_copied: int):
         nonlocal error_raised
         if not error_raised:
             error_raised = True
@@ -198,7 +200,7 @@ async def test_backup_progress_callback_errors_handled(test_db_file, target_db_f
 
 
 @pytest.mark.asyncio
-async def test_backup_with_custom_database_name(test_db_file, target_db_file):
+async def test_backup_with_custom_database_name(test_db_file: str, target_db_file: str):
     """Test backup with custom database name (not 'main').
 
     Note: This test is simplified - attached databases are connection-specific
@@ -220,7 +222,7 @@ async def test_backup_with_custom_database_name(test_db_file, target_db_file):
 
 
 @pytest.mark.asyncio
-async def test_backup_empty_target_database(test_db_file, target_db_file):
+async def test_backup_empty_target_database(test_db_file: str, target_db_file: str):
     """Test backup to an empty target database."""
     async with connect(test_db_file) as src:
         await src.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
@@ -239,7 +241,7 @@ async def test_backup_empty_target_database(test_db_file, target_db_file):
 
 
 @pytest.mark.asyncio
-async def test_backup_target_with_existing_data(test_db_file, target_db_file):
+async def test_backup_target_with_existing_data(test_db_file: str, target_db_file: str):
     """Test backup overwrites existing data in target."""
     # Setup target with existing data
     async with connect(target_db_file) as tgt:

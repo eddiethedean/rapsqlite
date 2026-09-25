@@ -14,7 +14,7 @@ from rapsqlite import connect
 @pytest.mark.performance
 @pytest.mark.perf_smoke  # Quick smoke test for PR CI
 @pytest.mark.asyncio
-async def test_query_execution_time(test_db):
+async def test_query_execution_time(test_db: str):
     """Test that query execution time is reasonable."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -38,7 +38,7 @@ async def test_query_execution_time(test_db):
 @pytest.mark.performance
 @pytest.mark.perf_smoke
 @pytest.mark.asyncio
-async def test_concurrent_reads_regression(test_db):
+async def test_concurrent_reads_regression(test_db: str):
     """Regression: concurrent reads complete in reasonable time (Phase 3.8)."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -64,7 +64,7 @@ async def test_concurrent_reads_regression(test_db):
 @pytest.mark.performance
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_connection_pool_performance(test_db):
+async def test_connection_pool_performance(test_db: str):
     """Test connection pool performance."""
     async with connect(test_db) as db:
         db.pool_size = 5
@@ -102,7 +102,7 @@ async def test_connection_pool_performance(test_db):
 @pytest.mark.performance
 @pytest.mark.perf_smoke  # Quick smoke test for PR CI
 @pytest.mark.asyncio
-async def test_prepared_statement_cache_performance(test_db):
+async def test_prepared_statement_cache_performance(test_db: str):
     """Test prepared statement cache effectiveness."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -135,7 +135,7 @@ async def test_prepared_statement_cache_performance(test_db):
 @pytest.mark.performance
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_execute_many_performance(test_db):
+async def test_execute_many_performance(test_db: str):
     """Test execute_many performance."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -169,7 +169,7 @@ async def test_execute_many_performance(test_db):
 @pytest.mark.performance
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_large_result_set_performance(test_db):
+async def test_large_result_set_performance(test_db: str):
     """Test performance with large result sets."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -201,7 +201,7 @@ async def test_large_result_set_performance(test_db):
 @pytest.mark.performance
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_transaction_performance(test_db):
+async def test_transaction_performance(test_db: str):
     """Test transaction performance."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")

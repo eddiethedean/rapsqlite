@@ -12,7 +12,7 @@ pytestmark = [
 
 
 @pytest.mark.asyncio
-async def test_pool_exhaustion_error_message(test_db):
+async def test_pool_exhaustion_error_message(test_db: str):
     """Test that pool exhaustion provides helpful error messages."""
     async with rapsqlite.connect(test_db) as db:
         db.pool_size = 1
@@ -40,7 +40,7 @@ async def test_pool_exhaustion_error_message(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_exhaustion_suggests_solutions(test_db):
+async def test_pool_exhaustion_suggests_solutions(test_db: str):
     """Test that pool exhaustion errors suggest increasing pool_size."""
     async with rapsqlite.connect(test_db) as db:
         db.pool_size = 1
@@ -66,7 +66,7 @@ async def test_pool_exhaustion_suggests_solutions(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_exhaustion_with_large_pool(test_db):
+async def test_pool_exhaustion_with_large_pool(test_db: str):
     """Test that larger pool sizes prevent exhaustion."""
     async with rapsqlite.connect(test_db) as db:
         db.pool_size = 5
@@ -77,7 +77,7 @@ async def test_pool_exhaustion_with_large_pool(test_db):
         # Start multiple transactions sequentially (not concurrently)
         # With pool_size=5, all should succeed, but we run sequentially to avoid
         # "transaction already in progress" errors in concurrent execution
-        async def worker(worker_id):
+        async def worker(worker_id: int):
             async with db.transaction():
                 await db.execute("INSERT INTO t (id) VALUES (?)", [worker_id])
 
@@ -91,7 +91,7 @@ async def test_pool_exhaustion_with_large_pool(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_exhaustion_recovery(test_db):
+async def test_pool_exhaustion_recovery(test_db: str):
     """Test that pool recovers after exhaustion when connections are released."""
     async with rapsqlite.connect(test_db) as db:
         db.pool_size = 1
@@ -114,7 +114,7 @@ async def test_pool_exhaustion_recovery(test_db):
 
 
 @pytest.mark.asyncio
-async def test_pool_exhaustion_with_callback_connection(test_db):
+async def test_pool_exhaustion_with_callback_connection(test_db: str):
     """Test pool exhaustion when callback connection is in use."""
     async with rapsqlite.connect(test_db) as db:
         db.pool_size = 1
@@ -125,7 +125,7 @@ async def test_pool_exhaustion_with_callback_connection(test_db):
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 
         # Set up a callback to use the callback connection
-        def trace_cb(sql):
+        def trace_cb(sql: str):
             pass
 
         await db.set_trace_callback(trace_cb)

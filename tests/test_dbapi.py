@@ -3,6 +3,7 @@
 import asyncio
 import os
 import time
+from typing import Any
 
 import pytest
 
@@ -52,6 +53,13 @@ async def test_exception_hierarchy():
     assert issubclass(dbapi.NotSupportedError, dbapi.DatabaseError)
 
 
+def test_dbapi_exception_compatibility_fallback_does_not_duplicate_base() -> None:
+    fallback = dbapi._dbapi_exc(  # pyright: ignore[reportPrivateUsage]
+        "LegacyDataError", dbapi.DatabaseError, dbapi.DatabaseError
+    )
+    assert issubclass(fallback, dbapi.DatabaseError)
+
+
 @pytest.mark.asyncio
 async def test_async_connect_returns_connection():
     conn = await dbapi.connect(":memory:")
@@ -70,7 +78,11 @@ async def test_async_connection_create_function():
     """DBAPI AsyncConnection has create_function; register and use in SELECT."""
     conn = await dbapi.connect(":memory:")
     assert hasattr(conn, "create_function")
-    await conn.create_function("double", 1, lambda x: x * 2 if x is not None else None)
+
+    def double(x: Any) -> Any:
+        return x * 2 if x is not None else None
+
+    await conn.create_function("double", 1, double)
     cur = await conn.execute("SELECT double(21)")
     row = await cur.fetchone()
     await cur.close()
@@ -100,7 +112,7 @@ async def test_execute_returns_cursor():
 
 
 @pytest.mark.asyncio
-async def test_executemany(unique_table_prefix):
+async def test_executemany(unique_table_prefix: str):
     tbl = unique_table_prefix
     conn = await dbapi.connect(":memory:")
     await conn.execute(f"CREATE TABLE {tbl} (a INT)")
@@ -113,7 +125,7 @@ async def test_executemany(unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_commit_reproducer(test_db, unique_table_prefix):
+async def test_commit_reproducer(test_db: str, unique_table_prefix: str):
     """Minimal reproducer: connect -> CREATE -> INSERT -> commit -> close; reconnect and verify row."""
     tbl = unique_table_prefix
     path = test_db
@@ -133,7 +145,7 @@ async def test_commit_reproducer(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_commit_rollback(test_db, unique_table_prefix):
+async def test_commit_rollback(test_db: str, unique_table_prefix: str):
     tbl = unique_table_prefix
     path = test_db
     conn = await dbapi.connect(path)
@@ -151,7 +163,9 @@ async def test_commit_rollback(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_description_rowcount_lastrowid_arraysize(unique_table_prefix):
+async def test_cursor_description_rowcount_lastrowid_arraysize(
+    unique_table_prefix: str,
+):
     tbl = unique_table_prefix
     conn = await dbapi.connect(":memory:")
     await conn.execute(f"CREATE TABLE {tbl} (id INTEGER PRIMARY KEY, x TEXT)")
@@ -174,7 +188,7 @@ async def test_cursor_description_rowcount_lastrowid_arraysize(unique_table_pref
 
 
 @pytest.mark.asyncio
-async def test_cursor_async_iteration(unique_table_prefix):
+async def test_cursor_async_iteration(unique_table_prefix: str):
     tbl = unique_table_prefix
     conn = await dbapi.connect(":memory:")
     await conn.execute(f"CREATE TABLE {tbl} (a INT)")
@@ -182,7 +196,7 @@ async def test_cursor_async_iteration(unique_table_prefix):
     await conn.commit()
     cur = await conn.execute(f"SELECT * FROM {tbl} ORDER BY a")
     # Equivalent to async for: fetchone until None (lazy execution on first fetch)
-    fetched = []
+    fetched: list[Any] = []
     while True:
         row = await cur.fetchone()
         if row is None:
@@ -194,7 +208,7 @@ async def test_cursor_async_iteration(unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cursor_async_for_after_execute(unique_table_prefix):
+async def test_cursor_async_for_after_execute(unique_table_prefix: str):
     """Rows are available after execute(SELECT); use fetchone loop (async for may require eager results)."""
     tbl = unique_table_prefix
     conn = await dbapi.connect(":memory:")
@@ -202,7 +216,7 @@ async def test_cursor_async_for_after_execute(unique_table_prefix):
     await conn.executemany(f"INSERT INTO {tbl} VALUES (?)", [[1], [2], [3]])
     await conn.commit()
     cur = await conn.execute(f"SELECT * FROM {tbl} ORDER BY a")
-    fetched = []
+    fetched: list[Any] = []
     while True:
         row = await cur.fetchone()
         if row is None:
@@ -257,7 +271,7 @@ async def test_connect_missing_database_raises():
 
 
 @pytest.mark.asyncio
-async def test_concurrent_connection_usage_raises(unique_table_prefix):
+async def test_concurrent_connection_usage_raises(unique_table_prefix: str):
     """Concurrent operations on same connection must raise ProgrammingError."""
     tbl = unique_table_prefix
     conn = await dbapi.connect(":memory:")
@@ -277,7 +291,7 @@ async def test_concurrent_connection_usage_raises(unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_cancellation_interrupts_and_connection_usable(unique_table_prefix):
+async def test_cancellation_interrupts_and_connection_usable(unique_table_prefix: str):
     """Cancellation interrupts underlying SQLite work and leaves connection usable."""
     tbl = unique_table_prefix
     # Use a file-backed DB so we can create a deterministic lock wait.

@@ -8,7 +8,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_text_factory_callable_applies_to_text_columns(test_db):
+async def test_text_factory_callable_applies_to_text_columns(test_db: str):
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (v TEXT, b BLOB)")
         await db.execute("INSERT INTO t (v, b) VALUES (?, ?)", ["hello", b"bytes"])
@@ -28,7 +28,7 @@ async def test_text_factory_callable_applies_to_text_columns(test_db):
 
 
 @pytest.mark.asyncio
-async def test_text_factory_none_uses_default_utf8(test_db):
+async def test_text_factory_none_uses_default_utf8(test_db: str):
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (v TEXT)")
         await db.execute("INSERT INTO t (v) VALUES (?)", ["hello"])

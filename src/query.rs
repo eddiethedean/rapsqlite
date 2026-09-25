@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 use sqlx::pool::PoolConnection;
+use sqlx::{Executor, Row};
 
 use crate::types::SqliteParam;
 
@@ -288,4 +289,38 @@ pub(crate) async fn bind_and_fetch_optional_on_connection(
         .fetch_optional(&mut **conn)
         .await
         .map_err(|e| crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query))
+}
+
+/// Fetch an optional row and retain result metadata when the query returns no
+/// rows. The metadata lookup is only needed for empty results, whose row shape
+/// is otherwise unavailable to the caller.
+pub(crate) async fn bind_and_fetch_optional_with_column_count_on_connection(
+    query: &str,
+    params: &[SqliteParam],
+    conn: &mut PoolConnection<sqlx::Sqlite>,
+    path: &str,
+    include_query: bool,
+) -> Result<(Option<sqlx::sqlite::SqliteRow>, usize), PyErr> {
+    let query_builder = build_bound_query(query, params).map_err(|e| {
+        crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query)
+    })?;
+    let row = query_builder
+        .fetch_optional(&mut **conn)
+        .await
+        .map_err(|e| {
+            crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query)
+        })?;
+    let column_count = if let Some(row) = row.as_ref() {
+        row.columns().len()
+    } else {
+        (&mut **conn)
+            .describe(query)
+            .await
+            .map_err(|e| {
+                crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query)
+            })?
+            .columns()
+            .len()
+    };
+    Ok((row, column_count))
 }

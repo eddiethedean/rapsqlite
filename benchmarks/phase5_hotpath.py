@@ -71,7 +71,7 @@ def summarize(samples: list[float], elapsed: float) -> dict[str, float]:
 async def measure_sequential(
     operation: Callable[[], Awaitable[Any]], ops: int, runs: int
 ) -> dict[str, Any]:
-    run_results = []
+    run_results: list[dict[str, float]] = []
     for _ in range(runs):
         for _ in range(min(100, ops)):
             await operation()
@@ -161,7 +161,7 @@ async def setup_sqlite(session_affinity: bool) -> Any:
 async def setup_redis(host: str, port: int) -> Any | None:
     if redis is None:
         return None
-    client = redis.Redis(host=host, port=port, decode_responses=False)
+    client: Any = redis.Redis(host=host, port=port, decode_responses=False)
     try:
         await cast(Awaitable[Any], client.ping())
         await client.set("phase5-hot-key", b"x" * 1024, ex=3600)
@@ -187,7 +187,7 @@ def sqlite3_baseline(ops: int, runs: int) -> dict[str, Any]:
         "INSERT INTO cache VALUES (?, ?, ?)",
         ("hot-key", b"x" * 1024, time.time() + 3600),
     )
-    run_results = []
+    run_results: list[dict[str, float]] = []
     for _ in range(runs):
         samples: list[float] = []
         started = time.perf_counter()
@@ -312,7 +312,7 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
             None
             if resource is None
             else resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            / (1024 * 1024 if sys.platform == "darwin" else 1024)
+            / (1024 if sys.platform == "darwin" else 1)
         ),
     }
     payload = {"metadata": metadata, "results": results}

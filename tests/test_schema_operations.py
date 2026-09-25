@@ -1,5 +1,8 @@
 """Comprehensive tests for Phase 2.10: Schema Operations and Introspection."""
 
+from collections.abc import Iterator
+from typing import Any, cast
+
 import pytest
 import tempfile
 
@@ -10,7 +13,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.fixture
-def test_db():
+def test_db() -> Iterator[str]:
     """Create a temporary database file for testing."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
@@ -21,7 +24,7 @@ def test_db():
 
 
 @pytest.mark.asyncio
-async def test_get_tables_empty_database(test_db):
+async def test_get_tables_empty_database(test_db: str):
     """Test get_tables on empty database."""
     async with Connection(test_db) as conn:
         tables = await conn.get_tables()
@@ -30,7 +33,7 @@ async def test_get_tables_empty_database(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_tables_basic(test_db):
+async def test_get_tables_basic(test_db: str):
     """Test get_tables with multiple tables."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
@@ -48,7 +51,7 @@ async def test_get_tables_basic(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_tables_filter_by_name(test_db):
+async def test_get_tables_filter_by_name(test_db: str):
     """Test get_tables with name filter."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
@@ -67,7 +70,7 @@ async def test_get_tables_filter_by_name(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_basic(test_db):
+async def test_get_table_info_basic(test_db: str):
     """Test get_table_info with basic table."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -93,7 +96,7 @@ async def test_get_table_info_basic(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_with_constraints(test_db):
+async def test_get_table_info_with_constraints(test_db: str):
     """Test get_table_info with various column constraints."""
     async with Connection(test_db) as conn:
         await conn.execute("""
@@ -118,7 +121,7 @@ async def test_get_table_info_with_constraints(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_nonexistent_table(test_db):
+async def test_get_table_info_nonexistent_table(test_db: str):
     """Test get_table_info with non-existent table."""
     async with Connection(test_db) as conn:
         # PRAGMA table_info returns empty list for non-existent tables
@@ -128,7 +131,7 @@ async def test_get_table_info_nonexistent_table(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_no_indexes(test_db):
+async def test_get_indexes_no_indexes(test_db: str):
     """Test get_indexes when no indexes exist."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
@@ -140,7 +143,7 @@ async def test_get_indexes_no_indexes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_basic(test_db):
+async def test_get_indexes_basic(test_db: str):
     """Test get_indexes with explicit indexes."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
@@ -164,7 +167,7 @@ async def test_get_indexes_basic(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_filter_by_table(test_db):
+async def test_get_indexes_filter_by_table(test_db: str):
     """Test get_indexes with table filter."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
@@ -181,7 +184,7 @@ async def test_get_indexes_filter_by_table(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_foreign_keys_no_foreign_keys(test_db):
+async def test_get_foreign_keys_no_foreign_keys(test_db: str):
     """Test get_foreign_keys when no foreign keys exist."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
@@ -192,7 +195,7 @@ async def test_get_foreign_keys_no_foreign_keys(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_foreign_keys_with_foreign_keys(test_db):
+async def test_get_foreign_keys_with_foreign_keys(test_db: str):
     """Test get_foreign_keys with foreign key constraints."""
     async with Connection(test_db) as conn:
         await conn.execute("PRAGMA foreign_keys = ON")
@@ -220,7 +223,7 @@ async def test_get_foreign_keys_with_foreign_keys(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_foreign_keys_nonexistent_table(test_db):
+async def test_get_foreign_keys_nonexistent_table(test_db: str):
     """Test get_foreign_keys with non-existent table."""
     async with Connection(test_db) as conn:
         # Should return empty list, not raise error
@@ -230,7 +233,7 @@ async def test_get_foreign_keys_nonexistent_table(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_schema_all_tables(test_db):
+async def test_get_schema_all_tables(test_db: str):
     """Test get_schema for all tables."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
@@ -239,7 +242,7 @@ async def test_get_schema_all_tables(test_db):
         schema = await conn.get_schema()
         assert isinstance(schema, dict)
         assert "tables" in schema
-        tables = schema["tables"]
+        tables = cast(list[dict[str, Any]], schema["tables"])
         assert isinstance(tables, list)
         assert len(tables) == 2
         assert all("name" in t for t in tables)
@@ -249,7 +252,7 @@ async def test_get_schema_all_tables(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_schema_single_table(test_db):
+async def test_get_schema_single_table(test_db: str):
     """Test get_schema for a specific table."""
     async with Connection(test_db) as conn:
         await conn.execute("""
@@ -270,7 +273,7 @@ async def test_get_schema_single_table(test_db):
         assert "foreign_keys" in schema
 
         # Check columns
-        columns = schema["columns"]
+        columns = cast(list[dict[str, Any]], schema["columns"])
         assert isinstance(columns, list)
         assert len(columns) == 3
         column_names = [c["name"] for c in columns]
@@ -279,18 +282,18 @@ async def test_get_schema_single_table(test_db):
         assert "email" in column_names
 
         # Check indexes
-        indexes = schema["indexes"]
+        indexes = cast(list[dict[str, Any]], schema["indexes"])
         assert isinstance(indexes, list)
         index_names = [idx["name"] for idx in indexes]
         assert "idx_email" in index_names
 
         # Check foreign keys (should be empty)
-        fks = schema["foreign_keys"]
+        fks = cast(list[dict[str, Any]], schema["foreign_keys"])
         assert isinstance(fks, list)
 
 
 @pytest.mark.asyncio
-async def test_get_schema_with_foreign_keys(test_db):
+async def test_get_schema_with_foreign_keys(test_db: str):
     """Test get_schema with foreign key relationships."""
     async with Connection(test_db) as conn:
         await conn.execute("PRAGMA foreign_keys = ON")
@@ -305,14 +308,14 @@ async def test_get_schema_with_foreign_keys(test_db):
 
         schema = await conn.get_schema(table_name="posts")
         assert "foreign_keys" in schema
-        fks = schema["foreign_keys"]
+        fks = cast(list[dict[str, Any]], schema["foreign_keys"])
         assert isinstance(fks, list)
         assert len(fks) >= 1
         assert fks[0]["table"] == "users"
 
 
 @pytest.mark.asyncio
-async def test_get_schema_nonexistent_table(test_db):
+async def test_get_schema_nonexistent_table(test_db: str):
     """Test get_schema with non-existent table."""
     async with Connection(test_db) as conn:
         schema = await conn.get_schema(table_name="nonexistent")
@@ -322,7 +325,7 @@ async def test_get_schema_nonexistent_table(test_db):
 
 
 @pytest.mark.asyncio
-async def test_schema_operations_in_transaction(test_db):
+async def test_schema_operations_in_transaction(test_db: str):
     """Test schema operations work within transactions."""
     async with Connection(test_db) as conn:
         await conn.begin()
@@ -342,7 +345,7 @@ async def test_schema_operations_in_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_various_types(test_db):
+async def test_get_table_info_various_types(test_db: str):
     """Test get_table_info with various SQLite types."""
     async with Connection(test_db) as conn:
         await conn.execute("""
@@ -367,7 +370,7 @@ async def test_get_table_info_various_types(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_multiple_tables(test_db):
+async def test_get_indexes_multiple_tables(test_db: str):
     """Test get_indexes across multiple tables."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
@@ -386,7 +389,7 @@ async def test_get_indexes_multiple_tables(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_tables_special_characters(test_db):
+async def test_get_tables_special_characters(test_db: str):
     """Test get_tables with table names containing special characters."""
     async with Connection(test_db) as conn:
         # SQLite allows quoted identifiers with special characters
@@ -408,7 +411,7 @@ async def test_get_tables_special_characters(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_composite_primary_key(test_db):
+async def test_get_table_info_composite_primary_key(test_db: str):
     """Test get_table_info with composite primary key."""
     async with Connection(test_db) as conn:
         await conn.execute("""
@@ -432,7 +435,7 @@ async def test_get_table_info_composite_primary_key(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_default_values_various_types(test_db):
+async def test_get_table_info_default_values_various_types(test_db: str):
     """Test get_table_info with various default value types."""
     async with Connection(test_db) as conn:
         await conn.execute("""
@@ -465,7 +468,7 @@ async def test_get_table_info_default_values_various_types(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_composite_index(test_db):
+async def test_get_indexes_composite_index(test_db: str):
     """Test get_indexes with composite (multi-column) indexes."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -489,7 +492,7 @@ async def test_get_indexes_composite_index(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_partial_index(test_db):
+async def test_get_indexes_partial_index(test_db: str):
     """Test get_indexes with partial index (WHERE clause)."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -510,7 +513,7 @@ async def test_get_indexes_partial_index(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_foreign_keys_multiple_foreign_keys(test_db):
+async def test_get_foreign_keys_multiple_foreign_keys(test_db: str):
     """Test get_foreign_keys with multiple foreign key constraints."""
     async with Connection(test_db) as conn:
         await conn.execute("PRAGMA foreign_keys = ON")
@@ -546,7 +549,7 @@ async def test_get_foreign_keys_multiple_foreign_keys(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_foreign_keys_composite_foreign_key(test_db):
+async def test_get_foreign_keys_composite_foreign_key(test_db: str):
     """Test get_foreign_keys with composite foreign key."""
     async with Connection(test_db) as conn:
         await conn.execute("PRAGMA foreign_keys = ON")
@@ -574,7 +577,7 @@ async def test_get_foreign_keys_composite_foreign_key(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_schema_complex_schema(test_db):
+async def test_get_schema_complex_schema(test_db: str):
     """Test get_schema with complex schema (multiple tables, indexes, foreign keys)."""
     async with Connection(test_db) as conn:
         await conn.execute("PRAGMA foreign_keys = ON")
@@ -613,7 +616,7 @@ async def test_get_schema_complex_schema(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_schema_with_views(test_db):
+async def test_get_schema_with_views(test_db: str):
     """Test get_schema excludes views (views are not tables)."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
@@ -633,7 +636,7 @@ async def test_get_schema_with_views(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_without_row_factory(test_db):
+async def test_get_table_info_without_row_factory(test_db: str):
     """Test get_table_info returns dicts regardless of row_factory setting."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -648,7 +651,7 @@ async def test_get_table_info_without_row_factory(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_implicit_indexes(test_db):
+async def test_get_indexes_implicit_indexes(test_db: str):
     """Test get_indexes includes implicit indexes from UNIQUE constraints."""
     async with Connection(test_db) as conn:
         await conn.execute("""
@@ -666,7 +669,7 @@ async def test_get_indexes_implicit_indexes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_tables_case_sensitivity(test_db):
+async def test_get_tables_case_sensitivity(test_db: str):
     """Test get_tables handles case sensitivity correctly."""
     async with Connection(test_db) as conn:
         await conn.execute('CREATE TABLE "Users" (id INTEGER PRIMARY KEY)')
@@ -679,7 +682,7 @@ async def test_get_tables_case_sensitivity(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_all_column_attributes(test_db):
+async def test_get_table_info_all_column_attributes(test_db: str):
     """Test get_table_info returns all expected attributes for each column."""
     async with Connection(test_db) as conn:
         await conn.execute("""
@@ -709,7 +712,7 @@ async def test_get_table_info_all_column_attributes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_all_index_attributes(test_db):
+async def test_get_indexes_all_index_attributes(test_db: str):
     """Test get_indexes returns all expected attributes."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, email TEXT)")
@@ -733,7 +736,7 @@ async def test_get_indexes_all_index_attributes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_foreign_keys_all_attributes(test_db):
+async def test_get_foreign_keys_all_attributes(test_db: str):
     """Test get_foreign_keys returns all expected attributes."""
     async with Connection(test_db) as conn:
         await conn.execute("PRAGMA foreign_keys = ON")
@@ -770,15 +773,15 @@ async def test_get_foreign_keys_all_attributes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_schema_operations_with_callbacks(test_db):
+async def test_schema_operations_with_callbacks(test_db: str):
     """Test schema operations work when callbacks are active."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
         # Set a trace callback
-        trace_calls = []
+        trace_calls: list[str] = []
 
-        def trace_callback(sql):
+        def trace_callback(sql: str):
             trace_calls.append(sql)
 
         await conn.set_trace_callback(trace_callback)
@@ -795,7 +798,7 @@ async def test_schema_operations_with_callbacks(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_schema_large_database(test_db):
+async def test_get_schema_large_database(test_db: str):
     """Test get_schema with many tables."""
     async with Connection(test_db) as conn:
         # Create many tables
@@ -814,7 +817,7 @@ async def test_get_schema_large_database(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_empty_database(test_db):
+async def test_get_indexes_empty_database(test_db: str):
     """Test get_indexes on empty database."""
     async with Connection(test_db) as conn:
         indexes = await conn.get_indexes()
@@ -823,7 +826,7 @@ async def test_get_indexes_empty_database(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_table_with_no_columns(test_db):
+async def test_get_table_info_table_with_no_columns(test_db: str):
     """Test get_table_info edge case (though SQLite doesn't allow this)."""
     # SQLite requires at least one column, so this test verifies we handle it
     async with Connection(test_db) as conn:
@@ -834,7 +837,7 @@ async def test_get_table_info_table_with_no_columns(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_schema_after_table_modification(test_db):
+async def test_get_schema_after_table_modification(test_db: str):
     """Test get_schema reflects table modifications."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -852,7 +855,7 @@ async def test_get_schema_after_table_modification(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_tables_after_drop_table(test_db):
+async def test_get_tables_after_drop_table(test_db: str):
     """Test get_tables reflects dropped tables."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test1 (id INTEGER PRIMARY KEY)")
@@ -870,7 +873,7 @@ async def test_get_tables_after_drop_table(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_indexes_after_drop_index(test_db):
+async def test_get_indexes_after_drop_index(test_db: str):
     """Test get_indexes reflects dropped indexes."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, email TEXT)")
@@ -886,7 +889,7 @@ async def test_get_indexes_after_drop_index(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_schema_empty_database(test_db):
+async def test_get_schema_empty_database(test_db: str):
     """Test get_schema on empty database."""
     async with Connection(test_db) as conn:
         schema = await conn.get_schema()
@@ -896,7 +899,7 @@ async def test_get_schema_empty_database(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_info_column_order(test_db):
+async def test_get_table_info_column_order(test_db: str):
     """Test get_table_info returns columns in correct order (by cid)."""
     async with Connection(test_db) as conn:
         await conn.execute("""
@@ -924,7 +927,7 @@ async def test_get_table_info_column_order(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_views_basic(test_db):
+async def test_get_views_basic(test_db: str):
     """Test get_views with basic views."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
@@ -942,7 +945,7 @@ async def test_get_views_basic(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_views_filter_by_name(test_db):
+async def test_get_views_filter_by_name(test_db: str):
     """Test get_views with name filter."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
@@ -961,7 +964,7 @@ async def test_get_views_filter_by_name(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_views_empty_database(test_db):
+async def test_get_views_empty_database(test_db: str):
     """Test get_views on empty database."""
     async with Connection(test_db) as conn:
         views = await conn.get_views()
@@ -970,7 +973,7 @@ async def test_get_views_empty_database(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_list_basic(test_db):
+async def test_get_index_list_basic(test_db: str):
     """Test get_index_list with basic indexes."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
@@ -997,7 +1000,7 @@ async def test_get_index_list_basic(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_list_no_indexes(test_db):
+async def test_get_index_list_no_indexes(test_db: str):
     """Test get_index_list when no indexes exist."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
@@ -1008,7 +1011,7 @@ async def test_get_index_list_no_indexes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_info_basic(test_db):
+async def test_get_index_info_basic(test_db: str):
     """Test get_index_info with basic index."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -1029,7 +1032,7 @@ async def test_get_index_info_basic(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_info_composite_index(test_db):
+async def test_get_index_info_composite_index(test_db: str):
     """Test get_index_info with composite index."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -1052,7 +1055,7 @@ async def test_get_index_info_composite_index(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_info_nonexistent_index(test_db):
+async def test_get_index_info_nonexistent_index(test_db: str):
     """Test get_index_info with non-existent index."""
     async with Connection(test_db) as conn:
         # PRAGMA index_info returns empty list for non-existent indexes
@@ -1062,7 +1065,7 @@ async def test_get_index_info_nonexistent_index(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_xinfo_basic(test_db):
+async def test_get_table_xinfo_basic(test_db: str):
     """Test get_table_xinfo with basic table."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -1087,7 +1090,7 @@ async def test_get_table_xinfo_basic(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_xinfo_vs_table_info(test_db):
+async def test_get_table_xinfo_vs_table_info(test_db: str):
     """Test that get_table_xinfo returns same info as get_table_info plus hidden."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -1112,7 +1115,7 @@ async def test_get_table_xinfo_vs_table_info(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_xinfo_nonexistent_table(test_db):
+async def test_get_table_xinfo_nonexistent_table(test_db: str):
     """Test get_table_xinfo with non-existent table."""
     async with Connection(test_db) as conn:
         # PRAGMA table_xinfo returns empty list for non-existent tables
@@ -1122,7 +1125,7 @@ async def test_get_table_xinfo_nonexistent_table(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_views_with_special_characters(test_db):
+async def test_get_views_with_special_characters(test_db: str):
     """Test get_views with view names containing special characters."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
@@ -1139,7 +1142,7 @@ async def test_get_views_with_special_characters(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_views_in_transaction(test_db):
+async def test_get_views_in_transaction(test_db: str):
     """Test get_views works within transactions."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
@@ -1155,7 +1158,7 @@ async def test_get_views_in_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_list_all_attributes(test_db):
+async def test_get_index_list_all_attributes(test_db: str):
     """Test get_index_list returns all expected attributes."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, email TEXT)")
@@ -1179,7 +1182,7 @@ async def test_get_index_list_all_attributes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_list_partial_index(test_db):
+async def test_get_index_list_partial_index(test_db: str):
     """Test get_index_list with partial index."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -1198,7 +1201,7 @@ async def test_get_index_list_partial_index(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_list_origin_values(test_db):
+async def test_get_index_list_origin_values(test_db: str):
     """Test get_index_list origin field values."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -1216,7 +1219,7 @@ async def test_get_index_list_origin_values(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_list_nonexistent_table(test_db):
+async def test_get_index_list_nonexistent_table(test_db: str):
     """Test get_index_list with non-existent table."""
     async with Connection(test_db) as conn:
         # PRAGMA index_list returns empty list for non-existent tables
@@ -1226,7 +1229,7 @@ async def test_get_index_list_nonexistent_table(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_info_all_attributes(test_db):
+async def test_get_index_info_all_attributes(test_db: str):
     """Test get_index_info returns all expected attributes."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, email TEXT)")
@@ -1246,7 +1249,7 @@ async def test_get_index_info_all_attributes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_info_column_order(test_db):
+async def test_get_index_info_column_order(test_db: str):
     """Test get_index_info returns columns in correct order."""
     async with Connection(test_db) as conn:
         await conn.execute(
@@ -1269,7 +1272,7 @@ async def test_get_index_info_column_order(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_info_primary_key_index(test_db):
+async def test_get_index_info_primary_key_index(test_db: str):
     """Test get_index_info with primary key index."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -1285,7 +1288,7 @@ async def test_get_index_info_primary_key_index(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_xinfo_all_attributes(test_db):
+async def test_get_table_xinfo_all_attributes(test_db: str):
     """Test get_table_xinfo returns all expected attributes."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -1308,7 +1311,7 @@ async def test_get_table_xinfo_all_attributes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_xinfo_hidden_values(test_db):
+async def test_get_table_xinfo_hidden_values(test_db: str):
     """Test get_table_xinfo hidden field values."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -1322,7 +1325,7 @@ async def test_get_table_xinfo_hidden_values(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_xinfo_with_constraints(test_db):
+async def test_get_table_xinfo_with_constraints(test_db: str):
     """Test get_table_xinfo with various column constraints."""
     async with Connection(test_db) as conn:
         await conn.execute("""
@@ -1349,7 +1352,7 @@ async def test_get_table_xinfo_with_constraints(test_db):
 
 
 @pytest.mark.asyncio
-async def test_schema_methods_integration(test_db):
+async def test_schema_methods_integration(test_db: str):
     """Test integration between new schema methods."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
@@ -1379,7 +1382,7 @@ async def test_schema_methods_integration(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_list_vs_get_indexes(test_db):
+async def test_get_index_list_vs_get_indexes(test_db: str):
     """Test that get_index_list and get_indexes return consistent information."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
@@ -1402,7 +1405,7 @@ async def test_get_index_list_vs_get_indexes(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_views_with_tables(test_db):
+async def test_get_views_with_tables(test_db: str):
     """Test that get_views only returns views, not tables."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
@@ -1424,7 +1427,7 @@ async def test_get_views_with_tables(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_list_multiple_tables(test_db):
+async def test_get_index_list_multiple_tables(test_db: str):
     """Test get_index_list with multiple tables."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
@@ -1445,7 +1448,7 @@ async def test_get_index_list_multiple_tables(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_index_info_with_dropped_index(test_db):
+async def test_get_index_info_with_dropped_index(test_db: str):
     """Test get_index_info after dropping an index."""
     async with Connection(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, email TEXT)")
@@ -1461,7 +1464,7 @@ async def test_get_index_info_with_dropped_index(test_db):
 
 
 @pytest.mark.asyncio
-async def test_get_table_xinfo_column_order(test_db):
+async def test_get_table_xinfo_column_order(test_db: str):
     """Test get_table_xinfo returns columns in correct order."""
     async with Connection(test_db) as conn:
         await conn.execute("""

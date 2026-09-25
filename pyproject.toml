@@ -157,43 +157,8 @@ exclude = [
 ]
 typeCheckingMode = "strict"
 pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
 extraPaths = ["."]
 reportMissingImports = "error"
 reportMissingTypeStubs = "warning"
-
-# Pytest injects fixtures dynamically and the compatibility suite deliberately
-# exercises objects from multiple third-party implementations. Keep strict
-# checking for real type relationships while treating those dynamic boundary
-# values as explicitly unknown until they are narrowed in the test body.
-[[tool.pyright.executionEnvironments]]
-root = "tests"
-reportMissingParameterType = "none"
-reportUnknownArgumentType = "none"
-reportUnknownLambdaType = "none"
-reportUnknownMemberType = "none"
-reportUnknownParameterType = "none"
-reportUnknownVariableType = "none"
-
-[[tool.pyright.executionEnvironments]]
-root = "benchmarks"
-reportUnknownArgumentType = "none"
-reportUnknownLambdaType = "none"
-reportUnknownMemberType = "none"
-reportUnknownParameterType = "none"
-reportUnknownVariableType = "none"
-
-[[tool.pyright.executionEnvironments]]
-root = "examples"
-reportUnknownArgumentType = "none"
-reportUnknownLambdaType = "none"
-reportUnknownMemberType = "none"
-reportUnknownParameterType = "none"
-reportUnknownVariableType = "none"
-
-[[tool.pyright.executionEnvironments]]
-root = "scripts"
-reportUnknownArgumentType = "none"
-reportUnknownLambdaType = "none"
-reportUnknownMemberType = "none"
-reportUnknownParameterType = "none"
-reportUnknownVariableType = "none"

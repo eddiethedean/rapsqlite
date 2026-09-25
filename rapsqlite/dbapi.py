@@ -54,6 +54,12 @@ DatabaseError = _ext.DatabaseError
 
 def _dbapi_exc(name: str, ext_cls: Any, base: type) -> type:
     """Ensure exception class is a subclass of base (DBAPI hierarchy)."""
+    # Compatibility fallbacks may supply ``base`` as ``ext_cls`` itself. Avoid
+    # creating an invalid duplicate-base class in that case. If the extension
+    # class already inherits from the DB-API base, wrapping it alone preserves
+    # that hierarchy too.
+    if ext_cls is base or issubclass(ext_cls, base):
+        return type(name, (ext_cls,), {})
     return type(name, (ext_cls, base), {})
 
 

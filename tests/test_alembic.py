@@ -5,6 +5,8 @@ and verifies database state. Tests are parametrized with aiosqlite first so we
 validate behavior against a known-good dialect before rapsqlite.
 """
 
+from typing import Any
+
 import os
 import subprocess
 import sys
@@ -179,7 +181,7 @@ def _db_url(dialect: str, db_path_str: str) -> str:
 
 
 @pytest.fixture
-def alembic_root(tmp_path):
+def alembic_root(tmp_path: Path):
     """Create temp dir, run alembic init -t async, return path to root (tmp_path)."""
     root = tmp_path
     result = subprocess.run(
@@ -195,7 +197,7 @@ def alembic_root(tmp_path):
     return root
 
 
-def test_alembic_upgrade_head_with_rapsqlite(alembic_root, tmp_path):
+def test_alembic_upgrade_head_with_rapsqlite(alembic_root: Any, tmp_path: Path):
     """Run alembic upgrade head with sqlite+rapsqlite and verify table and row."""
     pytest.importorskip("alembic")
     from rapsqlite import connect
@@ -245,7 +247,9 @@ def test_alembic_upgrade_head_with_rapsqlite(alembic_root, tmp_path):
 
 
 @pytest.mark.parametrize("dialect", DIALECT_ORDER)
-def test_alembic_upgrade_then_downgrade_base(alembic_root, tmp_path, dialect):
+def test_alembic_upgrade_then_downgrade_base(
+    alembic_root: Any, tmp_path: Path, dialect: Any
+):
     """Upgrade head then downgrade base. aiosqlite first to validate test."""
     pytest.importorskip("alembic")
     if dialect == "aiosqlite":
@@ -298,7 +302,7 @@ def _setup_three_revisions(root: Path, db_url: str, db_path: Path) -> None:
 
 @pytest.mark.parametrize("dialect", DIALECT_ORDER)
 def test_alembic_multiple_revisions_upgrade_downgrade_stepwise(
-    alembic_root, tmp_path, dialect
+    alembic_root: Any, tmp_path: Path, dialect: Any
 ):
     """Three revisions: upgrade head, verify; downgrade stepwise to base; upgrade head again."""
     pytest.importorskip("alembic")
@@ -365,7 +369,7 @@ def test_alembic_multiple_revisions_upgrade_downgrade_stepwise(
 
 @pytest.mark.parametrize("dialect", DIALECT_ORDER)
 def test_alembic_upgrade_to_revision_then_head_then_downgrade_steps(
-    alembic_root, tmp_path, dialect
+    alembic_root: Any, tmp_path: Path, dialect: Any
 ):
     """Upgrade to 002 (has email), verify; upgrade to head (has extra table); downgrade to 001, 002, base."""
     pytest.importorskip("alembic")

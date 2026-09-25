@@ -166,7 +166,9 @@ async def _connection_fetch_blob(
 ) -> bytes | None:
     """Fetch one BLOB value without constructing a general row."""
 
-    value = await self.fetch_scalar(query, parameters)
+    # Check SQLite's runtime storage class before text_factory/converters can
+    # turn a TEXT value into Python bytes.
+    value = await cast(Any, self).fetch_scalar(query, parameters, _require_blob=True)
     if value is None:
         return None
     if not isinstance(value, bytes):

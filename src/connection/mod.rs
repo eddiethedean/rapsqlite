@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
 use pyo3_async_runtimes::tokio::future_into_py;
 use sqlx::sqlite::SqliteConnection;
-use sqlx::{Column, Row};
+use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -40,6 +40,7 @@ use crate::pool::{
 use crate::query::{
     bind_and_execute_on_connection, bind_and_fetch_all_on_connection,
     bind_and_fetch_one_on_connection, bind_and_fetch_optional_on_connection,
+    bind_and_fetch_optional_with_column_count_on_connection,
 };
 use crate::types::{
     Adapters, Converters, ProgressHandler, SqliteParam, TransactionState, UserAggregates,
@@ -135,6 +136,23 @@ pub(crate) struct Connection {
 // For proper cleanup including transaction rollback, always:
 // - Use async context managers: `async with rapsqlite.connect(...) as db:`
 // - Or call close() explicitly: `await db.close()`
+
+fn invoke_trace_callback(trace_callback: &Arc<StdMutex<Option<Py<PyAny>>>>, sql: &str) {
+    #[allow(deprecated)]
+    let callback = Python::attach(|py| {
+        trace_callback
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|callback| callback.clone_ref(py))
+    });
+    if let Some(callback) = callback {
+        #[allow(deprecated)]
+        Python::attach(|py| {
+            let _ = callback.bind(py).call1((sql,));
+        });
+    }
+}
 
 /// Shared state needed to run a single execute. Used by Connection and ExecuteContextManager
 /// so we clone one struct instead of 25+ individual fields when creating ExecuteContextManager.
@@ -2507,6 +2525,7 @@ impl Connection {
         let transaction_connection = Arc::clone(&self_.transaction_connection);
         let session_connection = self_.session_connection.clone();
         let callback_features = Arc::clone(&self_.callback_features);
+        let trace_callback = Arc::clone(&self_.trace_callback);
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let init_hook_present = Arc::clone(&self_.init_hook_present);
@@ -2528,6 +2547,7 @@ impl Connection {
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
+                invoke_trace_callback(&trace_callback, &processed_query);
                 if callbacks_enabled(&callback_features) {
                     return Err(NotSupportedError::new_err(
                         "raw_fetch_scalar() is unavailable when SQLite callbacks are configured",
@@ -2649,11 +2669,12 @@ impl Connection {
     /// Fetch one scalar column without constructing a general row or applying a
     /// row factory. This is intended for repeated local lookups such as cache
     /// reads; use ``fetch_optional`` for DB-API-compatible row behavior.
-    #[pyo3(signature = (query, parameters = None))]
+    #[pyo3(signature = (query, parameters = None, *, _require_blob = false))]
     fn fetch_scalar(
         self_: PyRef<Self>,
         query: String,
         parameters: Option<&Bound<'_, PyAny>>,
+        _require_blob: bool,
     ) -> PyResult<Py<PyAny>> {
         let path = self_.path.clone();
         let pool = Arc::clone(&self_.pool);
@@ -2667,6 +2688,7 @@ impl Connection {
         let callback_connection = Arc::clone(&self_.callback_connection);
         let callback_features = Arc::clone(&self_.callback_features);
         let callback_context = self_.callback_context();
+        let trace_callback = Arc::clone(&self_.trace_callback);
         let init_hook = Arc::clone(&self_.init_hook);
         let init_hook_called = Arc::clone(&self_.init_hook_called);
         let init_hook_present = Arc::clone(&self_.init_hook_present);
@@ -2687,6 +2709,7 @@ impl Connection {
         Python::attach(|py| {
             let future = async move {
                 ensure_not_closed(&closed)?;
+                invoke_trace_callback(&trace_callback, &processed_query);
                 let in_transaction = {
                     let guard = transaction_state.lock().await;
                     guard.is_active()
@@ -2720,12 +2743,12 @@ impl Connection {
                     callbacks::rebind_callbacks(callback_context.clone()).await?;
                 }
 
-                let row = if in_transaction {
+                let (row, column_count) = if in_transaction {
                     let mut guard = transaction_connection.lock().await;
                     let conn = guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Transaction connection not available")
                     })?;
-                    bind_and_fetch_optional_on_connection(
+                    bind_and_fetch_optional_with_column_count_on_connection(
                         &processed_query,
                         &param_values,
                         conn,
@@ -2738,7 +2761,7 @@ impl Connection {
                     let conn = guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Callback connection not available")
                     })?;
-                    let result = bind_and_fetch_optional_on_connection(
+                    let result = bind_and_fetch_optional_with_column_count_on_connection(
                         &processed_query,
                         &param_values,
                         conn,
@@ -2764,7 +2787,7 @@ impl Connection {
                     let conn = guard.0.as_mut().ok_or_else(|| {
                         OperationalError::new_err("Session connection not available")
                     })?;
-                    bind_and_fetch_optional_on_connection(
+                    bind_and_fetch_optional_with_column_count_on_connection(
                         &processed_query,
                         &param_values,
                         conn,
@@ -2776,14 +2799,26 @@ impl Connection {
 
                 #[allow(deprecated)]
                 Python::attach(|py| -> PyResult<Py<PyAny>> {
+                    if column_count != 1 {
+                        return Err(ProgrammingError::new_err(format!(
+                            "fetch_scalar() requires exactly one result column; got {column_count}"
+                        )));
+                    }
                     let Some(row) = row else {
                         return Ok(py.None());
                     };
-                    if row.columns().len() != 1 {
-                        return Err(ProgrammingError::new_err(format!(
-                            "fetch_scalar() requires exactly one result column; got {}",
-                            row.columns().len()
-                        )));
+                    if _require_blob {
+                        let raw_value = row.try_get_raw(0).map_err(|error| {
+                            ProgrammingError::new_err(format!(
+                                "could not inspect SQLite result type: {error}"
+                            ))
+                        })?;
+                        let type_info = raw_value.type_info();
+                        if !raw_value.is_null() && type_info.name() != "BLOB" {
+                            return Err(pyo3::exceptions::PyTypeError::new_err(
+                                "fetch_blob() requires a BLOB or NULL result",
+                            ));
+                        }
                     }
                     let tf_guard = text_factory.lock().unwrap();
                     let value = crate::conversion::sqlite_value_to_py(

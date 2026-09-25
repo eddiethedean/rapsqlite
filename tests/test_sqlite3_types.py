@@ -5,6 +5,8 @@
 
 """Tests for rapsqlite type handling (ported from CPython test_sqlite3)."""
 
+from typing import Any
+
 import pytest
 
 from conftest import skip_if_no_register_adapter, skip_if_no_register_converter
@@ -17,7 +19,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_type_string(test_db, unique_table_prefix):
+async def test_type_string(test_db: str, unique_table_prefix: str):
     """String round-trip."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -32,7 +34,7 @@ async def test_type_string(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_type_string_with_null_character(test_db, unique_table_prefix):
+async def test_type_string_with_null_character(test_db: str, unique_table_prefix: str):
     """String with null byte round-trip."""
     async with connect(test_db) as cx:
         await cx.execute(f"CREATE TABLE {unique_table_prefix} (i INTEGER, s TEXT)")
@@ -43,7 +45,7 @@ async def test_type_string_with_null_character(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_type_small_int(test_db, unique_table_prefix):
+async def test_type_small_int(test_db: str, unique_table_prefix: str):
     """Small integer round-trip."""
     async with connect(test_db) as cx:
         await cx.execute(
@@ -56,7 +58,7 @@ async def test_type_small_int(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_type_large_int(test_db, unique_table_prefix):
+async def test_type_large_int(test_db: str, unique_table_prefix: str):
     """Large integer round-trip."""
     num = 123456789123456789
     async with connect(test_db) as cx:
@@ -68,7 +70,7 @@ async def test_type_large_int(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_type_float(test_db, unique_table_prefix):
+async def test_type_float(test_db: str, unique_table_prefix: str):
     """Float round-trip."""
     val = 3.14
     async with connect(test_db) as cx:
@@ -80,7 +82,7 @@ async def test_type_float(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_type_blob(test_db, unique_table_prefix):
+async def test_type_blob(test_db: str, unique_table_prefix: str):
     """Blob (bytes/memoryview) round-trip."""
     sample = b"Guglhupf"
     async with connect(test_db) as cx:
@@ -94,7 +96,7 @@ async def test_type_blob(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_type_unicode_execute(test_db):
+async def test_type_unicode_execute(test_db: str):
     """Unicode in SELECT literal."""
     async with connect(test_db) as cx:
         row = await cx.fetch_one("SELECT 'Österreich'")
@@ -106,12 +108,12 @@ async def test_type_unicode_execute(test_db):
 
 
 @pytest.mark.asyncio
-async def test_register_adapter_round_trip(test_db, unique_table_prefix):
+async def test_register_adapter_round_trip(test_db: str, unique_table_prefix: str):
     """register_adapter converts custom type for binding."""
     skip_if_no_register_adapter()
 
     class Point:
-        def __init__(self, x, y):
+        def __init__(self, x: Any, y: Any):
             self.x = x
             self.y = y
 
@@ -130,7 +132,7 @@ async def test_register_adapter_round_trip(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_register_converter_declared_type(test_db, unique_table_prefix):
+async def test_register_converter_declared_type(test_db: str, unique_table_prefix: str):
     """register_converter converts column value by declared type."""
     skip_if_no_register_converter()
 
@@ -150,7 +152,7 @@ async def test_register_converter_declared_type(test_db, unique_table_prefix):
 
 
 @pytest.mark.asyncio
-async def test_register_converter_remove(test_db, unique_table_prefix):
+async def test_register_converter_remove(test_db: str, unique_table_prefix: str):
     """register_converter(typename, None) removes converter."""
     skip_if_no_register_converter()
 

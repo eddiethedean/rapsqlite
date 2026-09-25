@@ -1,5 +1,8 @@
 """Tests for init_hook functionality (Phase 2.11)."""
 
+from typing import Any
+from pathlib import Path
+
 import pytest
 import asyncio
 import rapsqlite
@@ -13,7 +16,13 @@ pytestmark = [
 ]
 
 
-def _isolated_connection(path, *, init_hook=None, pragmas=None, **kwargs):
+def _isolated_connection(
+    path: str | Path,
+    *,
+    init_hook: Any = None,
+    pragmas: Any = None,
+    **kwargs: Any,
+) -> rapsqlite.Connection:
     """Create a Connection with connection_timeout=60 for isolation under parallel load."""
     c = rapsqlite.Connection(str(path), init_hook=init_hook, pragmas=pragmas, **kwargs)
     c.connection_timeout = 60
@@ -21,14 +30,14 @@ def _isolated_connection(path, *, init_hook=None, pragmas=None, **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_basic(tmp_path):
+async def test_init_hook_basic(tmp_path: Path):
     """Test basic init_hook execution."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
-    call_count = []
+    call_count: list[int] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         call_count.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
@@ -47,13 +56,13 @@ async def test_init_hook_basic(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_init_hook_creates_tables(tmp_path):
+async def test_init_hook_creates_tables(tmp_path: Path):
     """Test init_hook creates tables/schema."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("""
             CREATE TABLE users (
                 id INTEGER PRIMARY KEY,
@@ -93,13 +102,13 @@ async def test_init_hook_creates_tables(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_sets_pragmas(tmp_path):
+async def test_init_hook_sets_pragmas(tmp_path: Path):
     """Test init_hook sets additional PRAGMAs."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.set_pragma("foreign_keys", True)
         await conn.set_pragma("journal_mode", "WAL")
 
@@ -116,13 +125,13 @@ async def test_init_hook_sets_pragmas(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_inserts_data(tmp_path):
+async def test_init_hook_inserts_data(tmp_path: Path):
     """Test init_hook inserts initial data."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
         await conn.execute("INSERT INTO users (name) VALUES (?)", ["Bob"])
@@ -141,14 +150,14 @@ async def test_init_hook_inserts_data(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_init_hook_only_called_once(tmp_path):
+async def test_init_hook_only_called_once(tmp_path: Path):
     """Test init_hook is only called once per connection."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
-    call_count = []
+    call_count: list[int] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         call_count.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
@@ -165,14 +174,14 @@ async def test_init_hook_only_called_once(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_pool_size_one(tmp_path):
+async def test_init_hook_with_pool_size_one(tmp_path: Path):
     """Test init_hook works with default pool."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
-    call_count = []
+    call_count: list[int] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         call_count.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
@@ -190,14 +199,14 @@ async def test_init_hook_with_pool_size_one(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_init_hook_with_pool_size_multiple(tmp_path):
+async def test_init_hook_with_pool_size_multiple(tmp_path: Path):
     """Test init_hook works with concurrent operations."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
-    call_count = []
+    call_count: list[int] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         call_count.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
@@ -221,13 +230,13 @@ async def test_init_hook_with_pool_size_multiple(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_error_handling(tmp_path):
+async def test_init_hook_error_handling(tmp_path: Path):
     """Test error in init_hook is properly raised."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
         raise ValueError("Init hook error")
 
@@ -245,7 +254,7 @@ async def test_init_hook_error_handling(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_none(tmp_path):
+async def test_init_hook_none(tmp_path: Path):
     """Test no error when init_hook is None."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
@@ -261,13 +270,13 @@ async def test_init_hook_none(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_in_transaction(tmp_path):
+async def test_init_hook_in_transaction(tmp_path: Path):
     """Test init_hook can begin transactions."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
         async with conn:
             await conn.execute("INSERT INTO test (id) VALUES (1)")
@@ -284,13 +293,13 @@ async def test_init_hook_in_transaction(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_other_operations(tmp_path):
+async def test_init_hook_with_other_operations(tmp_path: Path):
     """Test init_hook works with subsequent operations."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
         await conn.execute("INSERT INTO test (id, value) VALUES (1, 'initial')")
 
@@ -312,13 +321,13 @@ async def test_init_hook_with_other_operations(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_pragmas_constructor(tmp_path):
+async def test_init_hook_with_pragmas_constructor(tmp_path: Path):
     """Test init_hook works alongside pragmas in constructor."""
     db_path = tmp_path / "test.db"
     # Create empty file - SQLite needs file to exist
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
         # Set additional PRAGMA in hook
         await conn.set_pragma("synchronous", "NORMAL")
@@ -338,21 +347,21 @@ async def test_init_hook_with_pragmas_constructor(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_multiple_connections(tmp_path):
+async def test_init_hook_multiple_connections(tmp_path: Path):
     """Test each connection instance calls init_hook independently."""
     db_path1 = tmp_path / "test1.db"
     db_path2 = tmp_path / "test2.db"
     # Create empty files - SQLite needs files to exist
     db_path1.touch()
     db_path2.touch()
-    call_count1 = []
-    call_count2 = []
+    call_count1: list[int] = []
+    call_count2: list[int] = []
 
-    async def init_hook1(conn):
+    async def init_hook1(conn: Any):
         call_count1.append(1)
         await conn.execute("CREATE TABLE test1 (id INTEGER PRIMARY KEY)")
 
-    async def init_hook2(conn):
+    async def init_hook2(conn: Any):
         call_count2.append(1)
         await conn.execute("CREATE TABLE test2 (id INTEGER PRIMARY KEY)")
 
@@ -376,23 +385,23 @@ async def test_init_hook_multiple_connections(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_fetch_methods(tmp_path):
+async def test_init_hook_with_fetch_methods(tmp_path: Path):
     """Test init_hook is triggered by different fetch methods."""
-    call_count1 = []
-    call_count2 = []
-    call_count3 = []
+    call_count1: list[int] = []
+    call_count2: list[int] = []
+    call_count3: list[int] = []
 
-    async def init_hook1(conn):
+    async def init_hook1(conn: Any):
         call_count1.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice')")
 
-    async def init_hook2(conn):
+    async def init_hook2(conn: Any):
         call_count2.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice')")
 
-    async def init_hook3(conn):
+    async def init_hook3(conn: Any):
         call_count3.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice')")
@@ -424,12 +433,12 @@ async def test_init_hook_with_fetch_methods(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_schema_introspection(tmp_path):
+async def test_init_hook_with_schema_introspection(tmp_path: Path):
     """Test init_hook works with schema introspection methods."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("CREATE INDEX idx_name ON users(name)")
 
@@ -449,12 +458,12 @@ async def test_init_hook_with_schema_introspection(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_execute_many(tmp_path):
+async def test_init_hook_with_execute_many(tmp_path: Path):
     """Test init_hook works with execute_many."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
 
     async with _isolated_connection(db_path, init_hook=init_hook) as conn:
@@ -474,12 +483,12 @@ async def test_init_hook_with_execute_many(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_set_pragma(tmp_path):
+async def test_init_hook_with_set_pragma(tmp_path: Path):
     """Test init_hook is triggered by set_pragma."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
     async with _isolated_connection(db_path, init_hook=init_hook) as conn:
@@ -499,7 +508,7 @@ async def test_init_hook_with_set_pragma(tmp_path):
     reason="init_hook + begin(): Transaction connection not available when hook runs (known limitation)"
 )
 @pytest.mark.asyncio
-async def test_init_hook_with_begin(tmp_path):
+async def test_init_hook_with_begin(tmp_path: Path):
     """Test init_hook is triggered by begin().
 
     init_hook runs after the transaction is active, so the table it creates
@@ -508,7 +517,7 @@ async def test_init_hook_with_begin(tmp_path):
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
     async with _isolated_connection(db_path, init_hook=init_hook) as conn:
@@ -527,7 +536,7 @@ async def test_init_hook_with_begin(tmp_path):
     reason="init_hook + transaction(): Transaction connection not available when hook runs (known limitation)"
 )
 @pytest.mark.asyncio
-async def test_init_hook_with_transaction_context_manager(tmp_path):
+async def test_init_hook_with_transaction_context_manager(tmp_path: Path):
     """Test init_hook is triggered by transaction context manager.
 
     init_hook runs after the transaction is active, so the table it creates
@@ -536,7 +545,7 @@ async def test_init_hook_with_transaction_context_manager(tmp_path):
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
     async with _isolated_connection(db_path, init_hook=init_hook) as conn:
@@ -549,12 +558,12 @@ async def test_init_hook_with_transaction_context_manager(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_sql_error(tmp_path):
+async def test_init_hook_sql_error(tmp_path: Path):
     """Test init_hook with SQL syntax error."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         # Invalid SQL - use a syntax that will definitely fail
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
         await conn.execute("INVALID SQL STATEMENT THAT WILL FAIL")
@@ -573,12 +582,12 @@ async def test_init_hook_sql_error(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_database_error(tmp_path):
+async def test_init_hook_database_error(tmp_path: Path):
     """Test init_hook with database constraint error."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute(
             "CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER UNIQUE)"
         )
@@ -600,13 +609,13 @@ async def test_init_hook_database_error(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_recursive_prevention(tmp_path):
+async def test_init_hook_recursive_prevention(tmp_path: Path):
     """Test that init_hook calling other methods doesn't cause recursion."""
     db_path = tmp_path / "test.db"
     db_path.touch()
-    call_count = []
+    call_count: list[int] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         call_count.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
         # Call other methods that would normally trigger init_hook
@@ -623,12 +632,12 @@ async def test_init_hook_recursive_prevention(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_concurrent_first_access(tmp_path):
+async def test_init_hook_concurrent_first_access(tmp_path: Path):
     """Test init_hook with concurrent first access (race condition)."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
     async with _isolated_connection(db_path, init_hook=init_hook) as conn:
@@ -649,13 +658,13 @@ async def test_init_hook_concurrent_first_access(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_init_hook_with_cursor(tmp_path):
+async def test_init_hook_with_cursor(tmp_path: Path):
     """Test init_hook works with cursor operations."""
     db_path = tmp_path / "test.db"
     db_path.touch()
-    call_count = []
+    call_count: list[int] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         call_count.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
 
@@ -671,12 +680,12 @@ async def test_init_hook_with_cursor(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_row_factory(tmp_path):
+async def test_init_hook_with_row_factory(tmp_path: Path):
     """Test init_hook works with row factory configuration."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
         await conn.execute("INSERT INTO test (name) VALUES (?)", ["Alice"])
         # Set row factory in hook
@@ -692,12 +701,12 @@ async def test_init_hook_with_row_factory(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_callbacks(tmp_path):
+async def test_init_hook_with_callbacks(tmp_path: Path):
     """Test init_hook works before setting up callbacks."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
     async with _isolated_connection(db_path, init_hook=init_hook) as conn:
@@ -714,12 +723,12 @@ async def test_init_hook_with_callbacks(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_user_function(tmp_path):
+async def test_init_hook_with_user_function(tmp_path: Path):
     """Test init_hook works before creating user-defined functions."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
 
     async with _isolated_connection(db_path, init_hook=init_hook) as conn:
@@ -735,13 +744,13 @@ async def test_init_hook_with_user_function(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_empty_hook(tmp_path):
+async def test_init_hook_empty_hook(tmp_path: Path):
     """Test init_hook that does nothing."""
     db_path = tmp_path / "test.db"
     db_path.touch()
-    call_count = []
+    call_count: list[int] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         call_count.append(1)
         # Do nothing
 
@@ -756,12 +765,12 @@ async def test_init_hook_empty_hook(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_multiple_statements(tmp_path):
+async def test_init_hook_multiple_statements(tmp_path: Path):
     """Test init_hook with many operations."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         # Create multiple tables
         for i in range(5):
             await conn.execute(f"CREATE TABLE table{i} (id INTEGER PRIMARY KEY)")
@@ -785,12 +794,12 @@ async def test_init_hook_multiple_statements(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_connection_string_pragmas(tmp_path):
+async def test_init_hook_with_connection_string_pragmas(tmp_path: Path):
     """Test init_hook works with connection string pragmas."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
         # Set additional pragma
         await conn.set_pragma("synchronous", "NORMAL")
@@ -811,15 +820,15 @@ async def test_init_hook_with_connection_string_pragmas(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_backup(tmp_path):
+async def test_init_hook_with_backup(tmp_path: Path):
     """Test init_hook works before backup operations."""
     db_path1 = tmp_path / "test1.db"
     db_path2 = tmp_path / "test2.db"
     db_path1.touch()
     db_path2.touch()
-    call_count = []
+    call_count: list[int] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         call_count.append(1)
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
         await conn.execute("INSERT INTO test (id) VALUES (1)")
@@ -840,12 +849,12 @@ async def test_init_hook_with_backup(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_with_iterdump(tmp_path):
+async def test_init_hook_with_iterdump(tmp_path: Path):
     """Test init_hook works with iterdump."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
         await conn.execute("INSERT INTO test (value) VALUES (?)", ["test"])
 
@@ -863,13 +872,13 @@ async def test_init_hook_with_iterdump(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_exception_different_types(tmp_path):
+async def test_init_hook_exception_different_types(tmp_path: Path):
     """Test init_hook with different exception types."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
     # Test with RuntimeError
-    async def init_hook_runtime(conn):
+    async def init_hook_runtime(conn: Any):
         raise RuntimeError("Runtime error in hook")
 
     conn1 = _isolated_connection(db_path, init_hook=init_hook_runtime)
@@ -886,7 +895,7 @@ async def test_init_hook_exception_different_types(tmp_path):
     db_path2 = tmp_path / "test2.db"
     db_path2.touch()
 
-    async def init_hook_key(conn):
+    async def init_hook_key(conn: Any):
         raise KeyError("key error")
 
     conn2 = _isolated_connection(db_path2, init_hook=init_hook_key)
@@ -900,13 +909,13 @@ async def test_init_hook_exception_different_types(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_timing_execute_first(tmp_path):
+async def test_init_hook_timing_execute_first(tmp_path: Path):
     """Test init_hook timing - execute called first."""
     db_path = tmp_path / "test.db"
     db_path.touch()
-    execution_order = []
+    execution_order: list[str] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         execution_order.append("init_hook")
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
 
@@ -920,13 +929,13 @@ async def test_init_hook_timing_execute_first(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_init_hook_timing_fetch_first(tmp_path):
+async def test_init_hook_timing_fetch_first(tmp_path: Path):
     """Test init_hook timing - fetch called first."""
     db_path = tmp_path / "test.db"
     db_path.touch()
-    execution_order = []
+    execution_order: list[str] = []
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         execution_order.append("init_hook")
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
         await conn.execute("INSERT INTO test (id) VALUES (1)")
@@ -943,12 +952,12 @@ async def test_init_hook_timing_fetch_first(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_init_hook_with_complex_schema(tmp_path):
+async def test_init_hook_with_complex_schema(tmp_path: Path):
     """Test init_hook creating complex schema with indexes and foreign keys."""
     db_path = tmp_path / "test.db"
     db_path.touch()
 
-    async def init_hook(conn):
+    async def init_hook(conn: Any):
         await conn.execute("""
             CREATE TABLE users (
                 id INTEGER PRIMARY KEY,

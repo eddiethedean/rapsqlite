@@ -96,7 +96,7 @@ Out of scope for 0.5:
 
 The planned implementation work is complete. The release candidate includes:
 
-- ✅ A release-build hot-path benchmark covering generic rows, scalar/BLOB paths, prepared-query dispatch, session affinity, synchronous `sqlite3`, and optional local `redis.asyncio`
+- ✅ A release-build hot-path benchmark covering generic rows, scalar/BLOB paths, prepared-query dispatch, session affinity, synchronous `sqlite3`, and optional local `redis.asyncio`; one same-machine run is recorded in [`benchmarks/phase5_hotpath_results.md`](../benchmarks/phase5_hotpath_results.md)
 - ✅ One-time PRAGMA application per physical connection, opt-in query-usage tracking, atomic callback/feature presence checks, and fast common parameter conversion
 - ✅ Scalar and BLOB fetch APIs with documented behavior for misses, `NULL`, transactions, callbacks, and unsupported row factories
 - ✅ Opt-in session affinity with pool-capacity, transaction, close/reopen, and shared-memory behavior covered by tests
@@ -113,8 +113,8 @@ The issues are intentionally ordered by risk and dependency. The first workstrea
 
 - Add a release-build benchmark harness covering the current generic path, synchronous `sqlite3`, each optimized candidate, and local `redis.asyncio` where available.
 - Separate individual-call latency from aggregate throughput. Run sequential calls and concurrency levels such as 1, 8, and 32.
-- Record p50/p95/p99 latency, throughput, event-loop delay, lock/busy errors, cancellations, and memory use for representative key/value sizes.
-- Keep benchmark inputs and output stable enough to detect regressions in CI or a scheduled performance job.
+- Record p50/p95/p99 latency, throughput, event-loop delay, operation errors, and peak process RSS for representative key/value sizes; cancellation correctness remains covered by focused tests.
+- Keep benchmark inputs and output stable enough for repeatable local and release-validation comparisons. Automated performance thresholds remain deferred until CI hardware and variance are controlled.
 
 #### 0.5.2 — Remove unconditional hot-path overhead ✅
 

@@ -1,5 +1,7 @@
 """Robust tests for Connection.row_factory and Cursor row_factory behavior."""
 
+from typing import Any
+
 import pytest
 
 from rapsqlite import DatabaseError, Row, connect
@@ -7,7 +9,9 @@ from rapsqlite import DatabaseError, Row, connect
 pytestmark = [pytest.mark.unit]
 
 
-async def _ensure_table(db, table="t", cols="id INTEGER PRIMARY KEY, a TEXT, b REAL"):
+async def _ensure_table(
+    db: Any, table: str = "t", cols: Any = "id INTEGER PRIMARY KEY, a TEXT, b REAL"
+):
     await db.execute(f"CREATE TABLE IF NOT EXISTS {table} ({cols})")
     await db.execute(f"DELETE FROM {table}")
 
@@ -16,7 +20,7 @@ async def _ensure_table(db, table="t", cols="id INTEGER PRIMARY KEY, a TEXT, b R
 
 
 @pytest.mark.asyncio
-async def test_row_factory_fetch_one(test_db):
+async def test_row_factory_fetch_one(test_db: str):
     """fetch_one respects row_factory (None, dict, tuple, callable)."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -40,7 +44,7 @@ async def test_row_factory_fetch_one(test_db):
         assert isinstance(row, tuple)
         assert row[0] == 1 and row[1] == "x" and row[2] == 1.5
 
-        def fac(r):
+        def fac(r: Any):
             return (r[0] * 10, r[1].upper())
 
         db.row_factory = fac
@@ -49,7 +53,7 @@ async def test_row_factory_fetch_one(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_fetch_one_no_rows(test_db):
+async def test_row_factory_fetch_one_no_rows(test_db: str):
     """fetch_one raises when no rows; fetch_optional returns None."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -62,7 +66,7 @@ async def test_row_factory_fetch_one_no_rows(test_db):
             opt = await db.fetch_optional("SELECT * FROM t")
             assert opt is None
 
-        def fac(r):
+        def fac(r: Any):
             return {"k": r[0]}
 
         db.row_factory = fac
@@ -73,7 +77,7 @@ async def test_row_factory_fetch_one_no_rows(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_fetch_optional_some(test_db):
+async def test_row_factory_fetch_optional_some(test_db: str):
     """fetch_optional returns factory-shaped row when a row exists."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -96,7 +100,7 @@ async def test_row_factory_fetch_optional_some(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_fetch_all_empty(test_db):
+async def test_row_factory_fetch_all_empty(test_db: str):
     """fetch_all returns [] with each factory when no rows."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -112,7 +116,7 @@ async def test_row_factory_fetch_all_empty(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_fetch_all_multiple_rows(test_db):
+async def test_row_factory_fetch_all_multiple_rows(test_db: str):
     """All rows are transformed, not just the first."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -139,7 +143,7 @@ async def test_row_factory_fetch_all_multiple_rows(test_db):
         assert len(rows) == 3
         assert rows[0][1] == "a" and rows[1][1] == "b" and rows[2][1] == "c"
 
-        def fac(r):
+        def fac(r: Any):
             return r[1] + str(r[2])
 
         db.row_factory = fac
@@ -151,7 +155,7 @@ async def test_row_factory_fetch_all_multiple_rows(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_null_values(test_db):
+async def test_row_factory_null_values(test_db: str):
     """NULLs are represented as None in list/dict/tuple/callable."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -173,7 +177,7 @@ async def test_row_factory_null_values(test_db):
         assert rows[0][1] is None and rows[0][2] == 1.0
         assert rows[1][1] == "x" and rows[1][2] is None
 
-        def fac(r):
+        def fac(r: Any):
             return (r[1], r[2])
 
         db.row_factory = fac
@@ -182,7 +186,7 @@ async def test_row_factory_null_values(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_duplicate_column_names(test_db):
+async def test_row_factory_duplicate_column_names(test_db: str):
     """With duplicate column names, dict uses last occurrence (overwrites)."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -201,7 +205,7 @@ async def test_row_factory_duplicate_column_names(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_cursor_fetchone_fetchall_fetchmany(test_db):
+async def test_row_factory_cursor_fetchone_fetchall_fetchmany(test_db: str):
     """Cursor fetchone/fetchall/fetchmany use Connection row_factory at creation."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -230,7 +234,7 @@ async def test_row_factory_cursor_fetchone_fetchall_fetchmany(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_cursor_uses_connection_factory(test_db):
+async def test_row_factory_cursor_uses_connection_factory(test_db: str):
     """Cursor uses Connection's row_factory (shared state)."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -245,7 +249,7 @@ async def test_row_factory_cursor_uses_connection_factory(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_cursor_empty_and_multiple(test_db):
+async def test_row_factory_cursor_empty_and_multiple(test_db: str):
     """Cursor fetchone returns None when no rows; fetchall returns []."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -262,7 +266,7 @@ async def test_row_factory_cursor_empty_and_multiple(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_parameterized_queries(test_db):
+async def test_row_factory_parameterized_queries(test_db: str):
     """fetch_all/fetch_one/fetch_optional with parameters respect row_factory."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -283,7 +287,7 @@ async def test_row_factory_parameterized_queries(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_in_transaction(test_db):
+async def test_row_factory_in_transaction(test_db: str):
     """fetch_* inside transaction() respect row_factory."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -302,7 +306,7 @@ async def test_row_factory_in_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_callable_returns_tuple(test_db):
+async def test_row_factory_callable_returns_tuple(test_db: str):
     """Custom factory can return tuple (or any type), not only dict."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -318,15 +322,15 @@ async def test_row_factory_callable_returns_tuple(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_callable_receives_list(test_db):
+async def test_row_factory_callable_receives_list(test_db: str):
     """Custom factory receives a list; row[0], row[1] etc. work."""
     async with connect(test_db) as db:
         await _ensure_table(db)
         await db.execute("INSERT INTO t (a, b) VALUES ('hi', 3.14)")
 
-        seen = []
+        seen: list[list[Any]] = []
 
-        def fac(row):
+        def fac(row: Any):
             seen.append(list(row))
             return row[0] + row[2]
 
@@ -341,7 +345,7 @@ async def test_row_factory_callable_receives_list(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_switch_mid_session(test_db):
+async def test_row_factory_switch_mid_session(test_db: str):
     """Switching row_factory between fetches works correctly."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -365,7 +369,7 @@ async def test_row_factory_switch_mid_session(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_getter_setter_roundtrip(test_db):
+async def test_row_factory_getter_setter_roundtrip(test_db: str):
     """Getter returns what we set; setter accepts None and values."""
     async with connect(test_db) as db:
         assert db.row_factory is None
@@ -376,7 +380,7 @@ async def test_row_factory_getter_setter_roundtrip(test_db):
         db.row_factory = "tuple"
         assert db.row_factory == "tuple"
 
-        def f(row):
+        def f(row: Any):
             return row
 
         db.row_factory = f
@@ -387,7 +391,7 @@ async def test_row_factory_getter_setter_roundtrip(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_single_column(test_db):
+async def test_row_factory_single_column(test_db: str):
     """Single-column SELECT works with each factory."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -411,7 +415,7 @@ async def test_row_factory_single_column(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_rapsqlite_row_mixed_access(test_db):
+async def test_row_factory_rapsqlite_row_mixed_access(test_db: str):
     """rapsqlite.Row supports both index and key access with keys()/values()/items()."""
     async with connect(test_db) as db:
         await _ensure_table(db)
@@ -452,7 +456,7 @@ async def test_row_factory_rapsqlite_row_mixed_access(test_db):
 
 
 @pytest.mark.asyncio
-async def test_row_factory_blob(test_db):
+async def test_row_factory_blob(test_db: str):
     """BLOB columns work with dict/tuple/list factories."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE bin (id INTEGER PRIMARY KEY, data BLOB)")

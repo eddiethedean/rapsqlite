@@ -29,7 +29,7 @@ def check_wheel_metadata(wheel_path: Path | str) -> bool:
         print("=" * 80)
 
         # Check for problematic fields
-        issues = []
+        issues: list[str] = []
         # License-File is valid in modern Core Metadata (e.g., Metadata-Version: 2.4).
         if (
             "License-File:" in metadata_content
@@ -77,7 +77,7 @@ def check_sdist_metadata(sdist_path: Path | str) -> bool:
         print("=" * 80)
 
         # Check for problematic fields
-        issues = []
+        issues: list[str] = []
         # License-File is valid in modern Core Metadata (e.g., Metadata-Version: 2.4).
         if (
             "License-File:" in pkg_info_content

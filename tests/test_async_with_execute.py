@@ -8,7 +8,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_async_with_execute_select(test_db):
+async def test_async_with_execute_select(test_db: str):
     """Test async with db.execute() for SELECT queries."""
     async with connect(test_db) as conn:
         # For non-SELECT queries, use the old pattern (execute immediately)
@@ -28,7 +28,7 @@ async def test_async_with_execute_select(test_db):
 
 
 @pytest.mark.asyncio
-async def test_async_with_execute_insert(test_db):
+async def test_async_with_execute_insert(test_db: str):
     """Test async with db.execute() for INSERT queries (non-SELECT)."""
     async with connect(test_db) as conn:
         # Use async with for CREATE (executes in __aenter__)
@@ -52,7 +52,7 @@ async def test_async_with_execute_insert(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_returns_cursor(test_db):
+async def test_execute_returns_cursor(test_db: str):
     """Test that execute() returns ExecuteContextManager which works with async with."""
     async with connect(test_db) as conn:
         async with conn.execute(
@@ -71,7 +71,7 @@ async def test_execute_returns_cursor(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_from_execute_fetchone(test_db):
+async def test_cursor_from_execute_fetchone(test_db: str):
     """Test fetchone() on cursor returned from execute()."""
     async with connect(test_db) as conn:
         async with conn.execute(
@@ -92,7 +92,7 @@ async def test_cursor_from_execute_fetchone(test_db):
 
 
 @pytest.mark.asyncio
-async def test_cursor_from_execute_fetchmany(test_db):
+async def test_cursor_from_execute_fetchmany(test_db: str):
     """Test fetchmany() on cursor returned from execute()."""
     async with connect(test_db) as conn:
         async with conn.execute(
@@ -123,7 +123,7 @@ async def test_cursor_from_execute_fetchmany(test_db):
 
 
 @pytest.mark.asyncio
-async def test_async_with_execute_parameterized(test_db):
+async def test_async_with_execute_parameterized(test_db: str):
     """Test async with db.execute() with parameterized queries."""
     async with connect(test_db) as conn:
         async with conn.execute(
@@ -153,7 +153,7 @@ async def test_async_with_execute_parameterized(test_db):
 
 
 @pytest.mark.asyncio
-async def test_async_with_execute_in_transaction(test_db):
+async def test_async_with_execute_in_transaction(test_db: str):
     """Test async with db.execute() inside a transaction."""
     async with connect(test_db) as conn:
         async with conn.execute(
@@ -177,7 +177,7 @@ async def test_async_with_execute_in_transaction(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_cursor_context_manager(test_db):
+async def test_execute_cursor_context_manager(test_db: str):
     """Test that cursor from execute() works as context manager."""
     async with connect(test_db) as conn:
         async with conn.execute(
@@ -195,7 +195,7 @@ async def test_execute_cursor_context_manager(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_update_returns_cursor(test_db):
+async def test_execute_update_returns_cursor(test_db: str):
     """Test that UPDATE queries return cursor (even though no results)."""
     async with connect(test_db) as conn:
         async with conn.execute(
@@ -217,7 +217,7 @@ async def test_execute_update_returns_cursor(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_delete_returns_cursor(test_db):
+async def test_execute_delete_returns_cursor(test_db: str):
     """Test that DELETE queries return cursor."""
     async with connect(test_db) as conn:
         async with conn.execute(

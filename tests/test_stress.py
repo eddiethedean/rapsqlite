@@ -13,7 +13,7 @@ from rapsqlite import Connection, connect
 @pytest.mark.stress
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_high_concurrency_operations(test_db):
+async def test_high_concurrency_operations(test_db: str):
     """Test high concurrency scenarios (100+ concurrent operations)."""
     # Use pool_size so shared pool has enough connections for 100 concurrent workers
     async with connect(test_db, pool_size=110) as db:
@@ -35,7 +35,7 @@ async def test_high_concurrency_operations(test_db):
 @pytest.mark.stress
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_many_small_operations(test_db):
+async def test_many_small_operations(test_db: str):
     """Test many small operations vs few large operations."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -54,7 +54,7 @@ async def test_many_small_operations(test_db):
 @pytest.mark.stress
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_large_result_set(test_db):
+async def test_large_result_set(test_db: str):
     """Test large result sets (10K+ rows)."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -73,7 +73,7 @@ async def test_large_result_set(test_db):
 @pytest.mark.stress
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_connection_pool_heavy_load(test_db):
+async def test_connection_pool_heavy_load(test_db: str):
     """Test connection pool under heavy load."""
     async with connect(test_db) as db:
         db.pool_size = 5
@@ -102,7 +102,7 @@ async def test_connection_pool_heavy_load(test_db):
 @pytest.mark.stress
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_memory_leak_detection(test_db):
+async def test_memory_leak_detection(test_db: str):
     """Test for memory leaks with repeated operations."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT)")
@@ -129,7 +129,7 @@ async def test_memory_leak_detection(test_db):
 @pytest.mark.stress
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_long_running_transaction(test_db):
+async def test_long_running_transaction(test_db: str):
     """Test long-running transaction."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -160,7 +160,7 @@ async def test_long_running_transaction(test_db):
 @pytest.mark.stress
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_repeated_prepared_statements(test_db):
+async def test_repeated_prepared_statements(test_db: str):
     """Test repeated use of prepared statements (cache effectiveness)."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -179,7 +179,7 @@ async def test_repeated_prepared_statements(test_db):
 @pytest.mark.stress
 @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_concurrent_connections_stress(test_db):
+async def test_concurrent_connections_stress(test_db: str):
     """Test stress with many concurrent connections."""
     async with connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value INTEGER)")

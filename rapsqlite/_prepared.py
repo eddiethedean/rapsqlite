@@ -75,7 +75,9 @@ class PreparedQuery:
                 self._query, parameters, True
             )
         else:
-            value = await self._connection.fetch_scalar(self._query, parameters)
+            value = await self._connection.fetch_scalar(
+                self._query, parameters, _require_blob=True
+            )
         if value is None:
             return None
         if not isinstance(value, bytes):

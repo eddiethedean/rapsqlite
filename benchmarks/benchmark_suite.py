@@ -66,14 +66,14 @@ def cleanup_db(test_db: str) -> None:
 @pytest.mark.asyncio
 async def test_simple_query_throughput():
     """Benchmark: Simple SELECT queries throughput (avg over BENCHMARK_RUNS)."""
-    results = {}
+    results: dict[str, Any] = {}
     runs = BENCHMARK_RUNS
 
     # rapsqlite
-    run_means = []
-    run_medians = []
-    run_p95 = []
-    run_p99 = []
+    run_means: list[float] = []
+    run_medians: list[float] = []
+    run_p95: list[float] = []
+    run_p99: list[float] = []
     for _ in range(runs):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             test_db = f.name
@@ -86,7 +86,7 @@ async def test_simple_query_throughput():
                     await conn.execute("INSERT INTO test (value) VALUES (?)", [i])
 
             async with rapsqlite.connect(test_db) as conn:
-                times = []
+                times: list[float] = []
                 for _ in range(SIMPLE_QUERY_COUNT):
                     start = time.perf_counter()
                     await conn.fetch_all("SELECT * FROM test WHERE value = ?", [50])
@@ -122,7 +122,7 @@ async def test_simple_query_throughput():
                         await conn.execute("INSERT INTO test (value) VALUES (?)", (i,))
 
                 async with aiosqlite.connect(test_db) as conn:
-                    times = []
+                    times: list[float] = []
                     for _ in range(SIMPLE_QUERY_COUNT):
                         start = time.perf_counter()
                         async with conn.execute(
@@ -161,7 +161,7 @@ async def test_simple_query_throughput():
                     conn.execute("INSERT INTO test (value) VALUES (?)", (i,))
                 conn.commit()
 
-                times = []
+                times: list[float] = []
                 for _ in range(SIMPLE_QUERY_COUNT):
                     start = time.perf_counter()
                     conn.execute("SELECT * FROM test WHERE value = ?", (50,)).fetchall()
@@ -193,11 +193,11 @@ async def test_simple_query_throughput():
 @pytest.mark.asyncio
 async def test_batch_insert_performance():
     """Benchmark: Batch insert performance with execute_many (avg over BENCHMARK_RUNS)."""
-    results = {}
+    results: dict[str, Any] = {}
     runs = BENCHMARK_RUNS
 
     # rapsqlite
-    elapsed_ms = []
+    elapsed_ms: list[float] = []
     for _ in range(runs):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             test_db = f.name
@@ -217,7 +217,7 @@ async def test_batch_insert_performance():
 
     # aiosqlite
     if AIOSQLITE_AVAILABLE:
-        elapsed_ms = []
+        elapsed_ms: list[float] = []
         for _ in range(runs):
             with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
                 test_db = f.name
@@ -240,7 +240,7 @@ async def test_batch_insert_performance():
 
     # sqlite3
     if SQLITE3_AVAILABLE:
-        elapsed_ms = []
+        elapsed_ms: list[float] = []
         for _ in range(runs):
             with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
                 test_db = f.name
@@ -268,11 +268,11 @@ async def test_batch_insert_performance():
 @pytest.mark.asyncio
 async def test_concurrent_reads():
     """Benchmark: Concurrent read operations (avg over BENCHMARK_RUNS)."""
-    results = {}
+    results: dict[str, Any] = {}
     runs = BENCHMARK_RUNS
 
     # rapsqlite
-    elapsed_ms = []
+    elapsed_ms: list[float] = []
     for _ in range(runs):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             test_db = f.name
@@ -300,7 +300,7 @@ async def test_concurrent_reads():
 
     # aiosqlite
     if AIOSQLITE_AVAILABLE:
-        elapsed_ms = []
+        elapsed_ms: list[float] = []
         for _ in range(runs):
             with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
                 test_db = f.name
@@ -339,11 +339,11 @@ async def test_concurrent_reads():
 @pytest.mark.asyncio
 async def test_transaction_performance():
     """Benchmark: Transaction performance (avg over BENCHMARK_RUNS)."""
-    results = {}
+    results: dict[str, Any] = {}
     runs = BENCHMARK_RUNS
 
     # rapsqlite
-    elapsed_ms = []
+    elapsed_ms: list[float] = []
     for _ in range(runs):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             test_db = f.name
@@ -368,7 +368,7 @@ async def test_transaction_performance():
 
     # aiosqlite
     if AIOSQLITE_AVAILABLE:
-        elapsed_ms = []
+        elapsed_ms: list[float] = []
         for _ in range(runs):
             with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
                 test_db = f.name
@@ -408,11 +408,11 @@ async def test_transaction_performance():
 @pytest.mark.asyncio
 async def test_high_concurrency_reads():
     """Benchmark: Many concurrent readers. Shows rapsqlite scaling."""
-    results = {}
+    results: dict[str, Any] = {}
     runs = BENCHMARK_RUNS
 
     # rapsqlite
-    elapsed_ms = []
+    elapsed_ms: list[float] = []
     for _ in range(runs):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             test_db = f.name
@@ -440,7 +440,7 @@ async def test_high_concurrency_reads():
 
     # aiosqlite
     if AIOSQLITE_AVAILABLE:
-        elapsed_ms = []
+        elapsed_ms: list[float] = []
         for _ in range(runs):
             with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
                 test_db = f.name
@@ -481,11 +481,11 @@ async def test_high_concurrency_reads():
 @pytest.mark.asyncio
 async def test_concurrent_batch_inserts():
     """Benchmark: Many coroutines each doing one batch insert in parallel."""
-    results = {}
+    results: dict[str, Any] = {}
     runs = BENCHMARK_RUNS
 
     # rapsqlite
-    elapsed_ms = []
+    elapsed_ms: list[float] = []
     for _ in range(runs):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             test_db = f.name
@@ -516,7 +516,7 @@ async def test_concurrent_batch_inserts():
 
     # aiosqlite
     if AIOSQLITE_AVAILABLE:
-        elapsed_ms = []
+        elapsed_ms: list[float] = []
         for _ in range(runs):
             with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
                 test_db = f.name
@@ -558,11 +558,11 @@ async def test_concurrent_batch_inserts():
 @pytest.mark.asyncio
 async def test_mixed_concurrent_workload():
     """Benchmark: Mixed workload — many readers + writers concurrently."""
-    results = {}
+    results: dict[str, float] = {}
     runs = BENCHMARK_RUNS
 
     # rapsqlite
-    elapsed_ms = []
+    elapsed_ms: list[float] = []
     for _ in range(runs):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             test_db = f.name

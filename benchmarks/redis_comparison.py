@@ -188,11 +188,11 @@ async def measure_concurrent(
 
     async def worker(worker_id: int, count: int) -> None:
         scheduled = operation_keys(keys, count, offset=worker_id * 13)
-        worker_operation = (
-            operation[worker_id % len(operation)]
-            if isinstance(operation, list)
-            else operation
-        )
+        if isinstance(operation, list):
+            operations = cast(list[Callable[[str], Awaitable[Any]]], operation)
+            worker_operation = operations[worker_id % len(operations)]
+        else:
+            worker_operation = operation
         for key in scheduled:
             started = time.perf_counter_ns()
             try:
@@ -277,8 +277,9 @@ async def setup_redis(
         port=config.port,
         decode_responses=False,
     )
-    await cast(Awaitable[Any], client.ping())
-    await cast(Awaitable[Any], client.flushdb())
+    redis_client: Any = client
+    await cast(Awaitable[Any], redis_client.ping())
+    await cast(Awaitable[Any], redis_client.flushdb())
     pipe = client.pipeline(transaction=False)
     for index, key in enumerate(keys, 1):
         pipe.set(key, value, ex=ttl)
@@ -597,10 +598,12 @@ async def main(config: Config) -> dict[str, Any]:
     redis_probe = redis.Redis(
         host=config.host, port=config.port, decode_responses=False
     )
-    info = await redis_probe.info("server")
+    info: dict[str, Any] = await cast(
+        Awaitable[dict[str, Any]], cast(Any, redis_probe).info("server")
+    )
     await redis_probe.aclose()
 
-    results = []
+    results: list[dict[str, Any]] = []
     results.extend(await run_sequential_scenarios(config, keys, value, expiry))
     results.extend(await run_batch_scenarios(config, keys, value, expiry))
     results.extend(await run_concurrent_scenarios(config, keys, value, expiry))

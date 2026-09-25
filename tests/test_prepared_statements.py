@@ -14,7 +14,7 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_query_normalization(test_db):
+async def test_query_normalization(test_db: str):
     """Test that queries with different whitespace are normalized correctly."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -33,7 +33,7 @@ async def test_query_normalization(test_db):
 
 
 @pytest.mark.asyncio
-async def test_repeated_query_performance(test_db):
+async def test_repeated_query_performance(test_db: str):
     """Test that repeated queries benefit from prepared statement caching."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -57,7 +57,7 @@ async def test_repeated_query_performance(test_db):
 
 
 @pytest.mark.asyncio
-async def test_parameterized_query_caching(test_db):
+async def test_parameterized_query_caching(test_db: str):
     """Test that parameterized queries benefit from caching."""
     async with connect(test_db) as conn:
         await conn.execute(
@@ -92,7 +92,7 @@ async def test_parameterized_query_caching(test_db):
 
 
 @pytest.mark.asyncio
-async def test_transaction_query_caching(test_db):
+async def test_transaction_query_caching(test_db: str):
     """Test that queries in transactions benefit from caching."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -110,7 +110,7 @@ async def test_transaction_query_caching(test_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_many_caching(test_db):
+async def test_execute_many_caching(test_db: str):
     """Test that execute_many benefits from prepared statement caching."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -133,7 +133,7 @@ async def test_execute_many_caching(test_db):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_query_caching(test_db):
+async def test_concurrent_query_caching(test_db: str):
     """Test that concurrent queries benefit from connection pool caching."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER)")
@@ -164,7 +164,7 @@ async def test_concurrent_query_caching(test_db):
 
 
 @pytest.mark.asyncio
-async def test_different_query_structures(test_db):
+async def test_different_query_structures(test_db: str):
     """Test that different query structures don't interfere with caching."""
     async with connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)")
@@ -182,7 +182,7 @@ async def test_different_query_structures(test_db):
 
 
 @pytest.mark.asyncio
-async def test_repeated_vs_unique_queries_performance(test_db):
+async def test_repeated_vs_unique_queries_performance(test_db: str):
     """Test that repeated identical queries perform better than unique queries.
 
     This test demonstrates the performance benefit of prepared statement caching.

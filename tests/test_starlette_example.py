@@ -1,5 +1,7 @@
 """Smoke test for Starlette + rapsqlite integration pattern."""
 
+from typing import Any
+
 import pytest
 
 pytest.importorskip("starlette")
@@ -15,7 +17,7 @@ pytestmark = [pytest.mark.integration]
 
 
 def _make_app(db_path: str) -> Starlette:
-    async def homepage(request):
+    async def homepage(request: Any):
         from starlette.responses import JSONResponse
 
         async with connect(db_path) as conn:

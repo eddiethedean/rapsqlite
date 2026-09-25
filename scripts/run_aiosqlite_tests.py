@@ -79,7 +79,7 @@ def patch_imports(content: str) -> str:
     # Pattern 2: from aiosqlite import ... (need to handle this carefully)
     # We'll replace with import rapsqlite as aiosqlite, then the import should work
     lines = content.split("\n")
-    patched_lines = []
+    patched_lines: list[str] = []
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -250,9 +250,9 @@ def run_tests(
             if f.name not in ("__init__.py", "helpers.py", "__main__.py")
         ]
 
-    passed = []
-    failed = []
-    skipped = []
+    passed: list[str] = []
+    failed: list[str] = []
+    skipped: list[str] = []
     per_test_results: dict[str, list[dict[str, str]]] = {}
 
     # Run from parent so patched_dir is a package (enables "from .helpers" in smoke.py)

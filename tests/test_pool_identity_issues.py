@@ -1,5 +1,7 @@
 """Regression tests for pool sizing, URI handling, and pool lifetimes."""
 
+from pathlib import Path
+
 import gc
 import os
 import sqlite3
@@ -13,7 +15,9 @@ pytestmark = [pytest.mark.unit]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pool_size", [1, 4, 8])
-async def test_explicit_pool_size_and_shared_pool_metrics(test_db, tmp_path, pool_size):
+async def test_explicit_pool_size_and_shared_pool_metrics(
+    test_db: str, tmp_path: Path, pool_size: int
+):
     db_path = tmp_path / f"pool-size-{pool_size}.db"
     first = connect(db_path, pool_size=pool_size)
     second = connect(db_path, pool_size=2)
@@ -32,7 +36,7 @@ async def test_explicit_pool_size_and_shared_pool_metrics(test_db, tmp_path, poo
 
 
 @pytest.mark.asyncio
-async def test_default_pool_size_is_reported_from_shared_pool(tmp_path):
+async def test_default_pool_size_is_reported_from_shared_pool(tmp_path: Path):
     db = connect(tmp_path / "default-pool-size.db")
     try:
         metrics = await db.pool_metrics()
@@ -81,7 +85,7 @@ async def test_connect_memory_without_name_is_isolated():
 
 
 @pytest.mark.asyncio
-async def test_file_uri_memory_mode_does_not_create_a_disk_file(tmp_path):
+async def test_file_uri_memory_mode_does_not_create_a_disk_file(tmp_path: Path):
     db_path = tmp_path / "cache"
     async with connect(f"file:{db_path}?mode=memory&cache=shared") as db:
         await db.execute("CREATE TABLE cache_data (value TEXT)")
@@ -92,7 +96,7 @@ async def test_file_uri_memory_mode_does_not_create_a_disk_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_file_uri_read_only_mode_rejects_writes(tmp_path):
+async def test_file_uri_read_only_mode_rejects_writes(tmp_path: Path):
     db_path = tmp_path / "readonly.db"
     with sqlite3.connect(db_path) as setup:
         setup.execute("CREATE TABLE existing (value TEXT)")
@@ -115,7 +119,9 @@ async def test_file_uri_read_only_mode_rejects_writes(tmp_path):
 @pytest.mark.skipif(
     not os.path.isdir("/dev/fd"), reason="requires /dev/fd descriptor listing"
 )
-async def test_closing_many_unique_database_pools_releases_file_descriptors(tmp_path):
+async def test_closing_many_unique_database_pools_releases_file_descriptors(
+    tmp_path: Path,
+):
     gc.collect()
     baseline = len(os.listdir("/dev/fd"))
     for index in range(12):

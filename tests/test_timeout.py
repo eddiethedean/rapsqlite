@@ -7,21 +7,21 @@ pytestmark = [pytest.mark.unit]
 
 
 @pytest.mark.asyncio
-async def test_timeout_default_value(test_db):
+async def test_timeout_default_value(test_db: str):
     """Test that default timeout is 5.0 seconds (matching sqlite3/aiosqlite)."""
     async with rapsqlite.connect(test_db) as db:
         assert db.timeout == 5.0
 
 
 @pytest.mark.asyncio
-async def test_timeout_parameter_in_connect(test_db):
+async def test_timeout_parameter_in_connect(test_db: str):
     """Test setting timeout via connect() parameter."""
     async with rapsqlite.connect(test_db, timeout=10.0) as db:
         assert db.timeout == 10.0
 
 
 @pytest.mark.asyncio
-async def test_timeout_property_getter_setter(test_db):
+async def test_timeout_property_getter_setter(test_db: str):
     """Test timeout property getter and setter."""
     db = rapsqlite.connect(test_db)
 
@@ -44,7 +44,7 @@ async def test_timeout_property_getter_setter(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_negative_value_raises_error(test_db):
+async def test_timeout_negative_value_raises_error(test_db: str):
     """Test that negative timeout values raise ValueError."""
     with pytest.raises(rapsqlite.ValueError, match="timeout must be >= 0.0"):
         rapsqlite.connect(test_db, timeout=-1.0)
@@ -56,7 +56,7 @@ async def test_timeout_negative_value_raises_error(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_applied_in_transactions(test_db):
+async def test_timeout_applied_in_transactions(test_db: str):
     """Test that timeout is applied when starting transactions."""
     async with rapsqlite.connect(test_db, timeout=30.0) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -72,7 +72,7 @@ async def test_timeout_applied_in_transactions(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_applied_in_transaction_context_manager(test_db):
+async def test_timeout_applied_in_transaction_context_manager(test_db: str):
     """Test that timeout is applied in transaction context managers."""
     async with rapsqlite.connect(test_db, timeout=25.0) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -87,7 +87,7 @@ async def test_timeout_applied_in_transaction_context_manager(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_zero_disables_timeout(test_db):
+async def test_timeout_zero_disables_timeout(test_db: str):
     """Test that timeout=0.0 disables busy_timeout."""
     async with rapsqlite.connect(test_db, timeout=0.0) as db:
         assert db.timeout == 0.0
@@ -100,7 +100,7 @@ async def test_timeout_zero_disables_timeout(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_connection_constructor(test_db):
+async def test_timeout_connection_constructor(test_db: str):
     """Test timeout parameter in Connection constructor."""
     db = rapsqlite.Connection(test_db, timeout=12.5)
     assert db.timeout == 12.5
@@ -108,7 +108,7 @@ async def test_timeout_connection_constructor(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_aiosqlite_compatibility(test_db):
+async def test_timeout_aiosqlite_compatibility(test_db: str):
     """Test that timeout works the same way as aiosqlite."""
     # aiosqlite pattern: connect with timeout
     async with rapsqlite.connect(test_db, timeout=10.0) as conn:
@@ -122,7 +122,7 @@ async def test_timeout_aiosqlite_compatibility(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_changes_apply_to_new_transactions(test_db):
+async def test_timeout_changes_apply_to_new_transactions(test_db: str):
     """Test that changing timeout applies to new transactions."""
     async with rapsqlite.connect(test_db) as db:
         await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -144,7 +144,7 @@ async def test_timeout_changes_apply_to_new_transactions(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_float_values(test_db):
+async def test_timeout_float_values(test_db: str):
     """Test that timeout accepts float values."""
     async with rapsqlite.connect(test_db, timeout=7.5) as db:
         assert db.timeout == 7.5
@@ -154,7 +154,7 @@ async def test_timeout_float_values(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_multiple_connections_independent(test_db):
+async def test_timeout_multiple_connections_independent(test_db: str):
     """Test that timeout is independent per connection."""
     db1 = rapsqlite.connect(test_db, timeout=10.0)
     db2 = rapsqlite.connect(test_db, timeout=20.0)
@@ -172,7 +172,7 @@ async def test_timeout_multiple_connections_independent(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_with_pragmas(test_db):
+async def test_timeout_with_pragmas(test_db: str):
     """Test that timeout works alongside PRAGMA settings."""
     async with rapsqlite.connect(
         test_db, timeout=15.0, pragmas={"journal_mode": "WAL", "synchronous": "NORMAL"}
@@ -190,7 +190,7 @@ async def test_timeout_with_pragmas(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_converted_to_milliseconds(test_db):
+async def test_timeout_converted_to_milliseconds(test_db: str):
     """Test that timeout is correctly converted to milliseconds for SQLite PRAGMA."""
     # SQLite's busy_timeout PRAGMA expects milliseconds
     # We set timeout in seconds, so 5.0 seconds = 5000 milliseconds
@@ -214,7 +214,7 @@ async def test_timeout_converted_to_milliseconds(test_db):
 
 
 @pytest.mark.asyncio
-async def test_timeout_large_value(test_db):
+async def test_timeout_large_value(test_db: str):
     """Test that large timeout values work correctly."""
     async with rapsqlite.connect(test_db, timeout=300.0) as db:
         assert db.timeout == 300.0

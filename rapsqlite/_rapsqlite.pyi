@@ -8,16 +8,24 @@ from collections.abc import (
     Callable,
     Coroutine,
     Generator,
-    Iterable,
     Iterator,
     Sequence,
 )
-from typing import Any, Dict, List, Optional, Protocol, Type, TypeAlias, TypeVar
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Type,
+    TypeAlias,
+    TypeVar,
+    overload,
+)
 from rapsqlite._metrics import PoolMetrics
 
 # Type alias for init_hook callback
 InitHook = Callable[["Connection"], Coroutine[Any, Any, None]]
-
 
 class PreparedQuery(Protocol):
     """Connection-bound reusable query object installed by rapsqlite."""
@@ -27,17 +35,19 @@ class PreparedQuery(Protocol):
     def execute(self, parameters: Optional[Any] = None) -> Awaitable[Any]: ...
     def fetch_all(self, parameters: Optional[Any] = None) -> Awaitable[List[Any]]: ...
     def fetch_one(self, parameters: Optional[Any] = None) -> Awaitable[Any]: ...
-    def fetch_optional(self, parameters: Optional[Any] = None) -> Awaitable[Optional[Any]]: ...
+    def fetch_optional(
+        self, parameters: Optional[Any] = None
+    ) -> Awaitable[Optional[Any]]: ...
     def fetch_scalar(self, parameters: Optional[Any] = None) -> Awaitable[Any]: ...
-    def fetch_blob(self, parameters: Optional[Any] = None) -> Awaitable[Optional[bytes]]: ...
-
+    def fetch_blob(
+        self, parameters: Optional[Any] = None
+    ) -> Awaitable[Optional[bytes]]: ...
 
 class StreamChunksIterator(Protocol):
     """Async iterator installed by the Python compatibility layer."""
 
     def __aiter__(self) -> "StreamChunksIterator": ...
     def __anext__(self) -> Coroutine[Any, Any, List[Any]]: ...
-
 
 class ExecuteContextManager:
     """Awaitable and async context manager returned by Connection.execute()."""
@@ -95,7 +105,7 @@ class ValueError(builtins.ValueError):
     """Exception raised for invalid argument values."""
     def __init__(self, message: str) -> None: ...
 
-_T_co = TypeVar("_T_co", covariant=True)
+_T_co = TypeVar("_T_co")
 
 class _AwaitableAsyncIterator(Protocol[_T_co]):
     """A value that can be awaited and also async-iterated.
@@ -107,7 +117,7 @@ class _AwaitableAsyncIterator(Protocol[_T_co]):
 
     def __aiter__(self) -> "_AwaitableAsyncIterator[_T_co]": ...
     def __anext__(self) -> Coroutine[Any, Any, _T_co]: ...
-    def __await__(self) -> Generator[Any, Any, Any]: ...
+    def __await__(self) -> Generator[Any, Any, List[_T_co]]: ...
 
 class Connection:
     """Async SQLite connection."""
@@ -123,7 +133,7 @@ class Connection:
         loop_param: Optional[Any] = None,
     ) -> "Connection":
         """Create a new async SQLite connection.
-        
+
         Args:
             path: Path to SQLite database file
             pragmas: Optional dict of PRAGMA settings
@@ -134,7 +144,7 @@ class Connection:
                 process/thread before raising an error. Default: 5.0 seconds.
                 This sets SQLite's busy_timeout PRAGMA. Set to 0.0 to disable timeout.
                 This matches aiosqlite and sqlite3's timeout parameter.
-                
+
         Note:
             init_hook is a rapsqlite-specific enhancement and is not available in aiosqlite.
             This feature provides automatic database initialization capabilities beyond
@@ -155,13 +165,16 @@ class Connection:
     def commit(self) -> Coroutine[Any, Any, None]: ...
     def rollback(self) -> Coroutine[Any, Any, None]: ...
     def execute(
-        self, query: str, parameters: Optional[Any] = None, cursor: Optional["Cursor"] = None
+        self,
+        query: str,
+        parameters: Optional[Any] = None,
+        cursor: Optional["Cursor"] = None,
     ) -> "ExecuteContextManager": ...
     def execute_many(
-        self, query: str, parameters: Iterable[Sequence[Any]]
+        self, query: str, parameters: Sequence[Sequence[Any]]
     ) -> Coroutine[Any, Any, None]: ...
     def executemany(
-        self, query: str, parameters: Iterable[Sequence[Any]]
+        self, query: str, parameters: Sequence[Sequence[Any]]
     ) -> Coroutine[Any, Any, None]: ...
     def fetch_all(
         self, query: str, parameters: Optional[Any] = None
@@ -215,9 +228,13 @@ class Connection:
         """Path to the SQLite database file (as passed to the constructor)."""
         ...
     @property
-    def row_factory(self) -> Any: ...
+    def row_factory(
+        self,
+    ) -> Optional[str | Callable[[List[Any]], Any] | Type["RapRow"]]: ...
     @row_factory.setter
-    def row_factory(self, value: Optional[Any]) -> None: ...
+    def row_factory(
+        self, value: Optional[str | Callable[[List[Any]], Any] | Type["RapRow"]]
+    ) -> None: ...
     @property
     def text_factory(self) -> Any:
         """Get the text factory for decoding TEXT columns."""
@@ -272,7 +289,7 @@ class Connection:
         self,
         name: str,
         nargs: int,
-        func: Optional[Any],
+        func: Optional[Callable[..., Any]],
         deterministic: bool = False,
     ) -> Coroutine[Any, Any, None]: ...
     def create_aggregate(
@@ -305,11 +322,24 @@ class Connection:
         """Register converter for a declared column type when reading rows. converter(bytes) is used; pass None to remove."""
         ...
     def set_trace_callback(
-        self, callback: Optional[Any]
+        self, callback: Optional[Callable[[str], Any]]
     ) -> Coroutine[Any, Any, None]: ...
-    def set_authorizer(self, callback: Optional[Any]) -> Coroutine[Any, Any, None]: ...
+    def set_authorizer(
+        self,
+        callback: Optional[
+            Callable[
+                [int, Optional[str], Optional[str], Optional[str], Optional[str]],
+                Any,
+            ]
+        ],
+    ) -> Coroutine[Any, Any, None]: ...
+    @overload
     def set_progress_handler(
-        self, n: int | Callable[[], Any], callback: Optional[Any] = None
+        self, n: int, callback: Optional[Callable[[], Any]] = None
+    ) -> Coroutine[Any, Any, None]: ...
+    @overload
+    def set_progress_handler(
+        self, n: Callable[[], Any], callback: int
     ) -> Coroutine[Any, Any, None]: ...
     def set_pragma(self, name: str, value: Any) -> Coroutine[Any, Any, None]: ...
     @property
@@ -317,7 +347,9 @@ class Connection:
     @include_query_in_errors.setter
     def include_query_in_errors(self, value: bool) -> None: ...
     def set_slow_query_threshold(
-        self, threshold_secs: float, callback: Optional[Callable[[float, str], None]] = None
+        self,
+        threshold_secs: float,
+        callback: Optional[Callable[[float, str], None]] = None,
     ) -> None: ...
     def iterdump(self) -> _AwaitableAsyncIterator[str]: ...
     def backup(
@@ -330,7 +362,7 @@ class Connection:
         sleep: float = 0.25,
     ) -> Coroutine[Any, Any, None]:
         """Make a backup of the current database to a target database.
-        
+
         Args:
             target: Target connection for backup. Can be a rapsqlite.Connection or
                 sqlite3.Connection. For sqlite3.Connection targets, only file-backed
@@ -340,39 +372,37 @@ class Connection:
                 Default: None
             name: Database name to backup (e.g., "main", "temp"). Default: "main"
             sleep: Sleep duration in seconds between backup steps. Default: 0.25
-        
+
         Raises:
             OperationalError: If backup fails, target connection is invalid, or
                 target is sqlite3.Connection with an active transaction
-        
+
         Note:
             For sqlite3.Connection targets, the source database must be file-backed.
             The backup operation performs a WAL checkpoint before backing up to ensure
             committed state is visible. See README.md for details.
         """
         ...
-    
-    def get_tables(
-        self, name: Optional[str] = None
-    ) -> Coroutine[Any, Any, List[str]]:
+
+    def get_tables(self, name: Optional[str] = None) -> Coroutine[Any, Any, List[str]]:
         """Get list of table names in the database.
-        
+
         Args:
             name: Optional table name filter. If provided, returns only that table if it exists.
-        
+
         Returns:
             List of table names (strings), excluding system tables (sqlite_*).
         """
         ...
-    
+
     def get_table_info(
         self, table_name: str
     ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
         """Get table information (columns) for a specific table.
-        
+
         Args:
             table_name: Name of the table to get information for.
-        
+
         Returns:
             List of dictionaries with column metadata:
             - cid: Column ID
@@ -381,20 +411,20 @@ class Connection:
             - notnull: Not null constraint (0 or 1)
             - dflt_value: Default value (can be None)
             - pk: Primary key (0 or 1)
-        
+
         Raises:
             OperationalError: If table does not exist.
         """
         ...
-    
+
     def get_indexes(
         self, table_name: Optional[str] = None
     ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
         """Get list of indexes in the database.
-        
+
         Args:
             table_name: Optional table name filter. If provided, returns only indexes for that table.
-        
+
         Returns:
             List of dictionaries with index information:
             - name: Index name
@@ -403,15 +433,15 @@ class Connection:
             - sql: CREATE INDEX SQL statement (can be None)
         """
         ...
-    
+
     def get_foreign_keys(
         self, table_name: str
     ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
         """Get foreign key constraints for a specific table.
-        
+
         Args:
             table_name: Name of the table to get foreign keys for.
-        
+
         Returns:
             List of dictionaries with foreign key information:
             - id: Foreign key ID
@@ -424,44 +454,42 @@ class Connection:
             - match: MATCH clause
         """
         ...
-    
+
     def get_schema(
         self, table_name: Optional[str] = None
     ) -> Coroutine[Any, Any, Dict[str, Any]]:
         """Get comprehensive schema information for a table or all tables.
-        
+
         Args:
             table_name: Optional table name. If provided, returns detailed info for that table.
                 If None, returns list of all tables.
-        
+
         Returns:
             Dictionary with schema information:
             - If table_name provided: columns, indexes, foreign_keys, table_name
             - If table_name is None: tables (list of table names)
         """
         ...
-    
-    def get_views(
-        self, name: Optional[str] = None
-    ) -> Coroutine[Any, Any, List[str]]:
+
+    def get_views(self, name: Optional[str] = None) -> Coroutine[Any, Any, List[str]]:
         """Get list of view names in the database.
-        
+
         Args:
             name: Optional view name filter. If provided, returns only that view if it exists.
-        
+
         Returns:
             List of view names (strings).
         """
         ...
-    
+
     def get_index_list(
         self, table_name: str
     ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
         """Get list of indexes for a specific table using PRAGMA index_list.
-        
+
         Args:
             table_name: Name of the table to get indexes for.
-        
+
         Returns:
             List of dictionaries with index list information:
             - seq: Sequence number
@@ -471,15 +499,15 @@ class Connection:
             - partial: Whether index is partial (0 or 1)
         """
         ...
-    
+
     def get_index_info(
         self, index_name: str
     ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
         """Get information about columns in an index using PRAGMA index_info.
-        
+
         Args:
             index_name: Name of the index to get information for.
-        
+
         Returns:
             List of dictionaries with index column information:
             - seqno: Sequence number in index
@@ -487,17 +515,17 @@ class Connection:
             - name: Column name
         """
         ...
-    
+
     def get_table_xinfo(
         self, table_name: str
     ) -> Coroutine[Any, Any, List[Dict[str, Any]]]:
         """Get extended table information using PRAGMA table_xinfo (SQLite 3.26.0+).
-        
+
         Returns additional information beyond table_info, including hidden columns.
-        
+
         Args:
             table_name: Name of the table to get extended information for.
-        
+
         Returns:
             List of dictionaries with extended column metadata:
             - cid: Column ID
@@ -509,7 +537,6 @@ class Connection:
             - hidden: Hidden column flag (0=normal, 1=hidden, 2=virtual, 3=stored)
         """
         ...
-
 
 class TransactionContextManager:
     """Async context manager for transactions. Returned by Connection.transaction()."""
@@ -548,7 +575,7 @@ class Cursor:
         self, query: str, parameters: Optional[Any] = None
     ) -> Coroutine[Any, Any, None]: ...
     def executemany(
-        self, query: str, parameters: Iterable[Sequence[Any]]
+        self, query: str, parameters: Sequence[Sequence[Any]]
     ) -> Coroutine[Any, Any, None]: ...
     def close(self) -> Coroutine[Any, Any, None]: ...
     @property
@@ -568,9 +595,13 @@ class Cursor:
     @property
     def rowcount(self) -> int: ...
     @property
-    def row_factory(self) -> Any: ...
+    def row_factory(
+        self,
+    ) -> Optional[str | Callable[[List[Any]], Any] | Type["RapRow"]]: ...
     @row_factory.setter
-    def row_factory(self, value: Optional[Any]) -> None: ...
+    def row_factory(
+        self, value: Optional[str | Callable[[List[Any]], Any] | Type["RapRow"]]
+    ) -> None: ...
     def fetchone(self) -> Coroutine[Any, Any, Optional[Any]]: ...
     def fetchall(self) -> Coroutine[Any, Any, List[Any]]: ...
     def fetchmany(
@@ -585,7 +616,7 @@ class Cursor:
 
 class RapRow:
     """Row class for dict-like access to query results (similar to aiosqlite.Row)."""
-    
+
     def __new__(cls, columns: List[str], values: List[Any]) -> "RapRow": ...
     def __getitem__(self, key: Any) -> Any: ...
     """Get item by index (int) or column name (str)."""

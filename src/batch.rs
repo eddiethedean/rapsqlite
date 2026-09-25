@@ -3,11 +3,13 @@
 
 use libsqlite3_sys::{
     sqlite3, sqlite3_bind_blob, sqlite3_bind_double, sqlite3_bind_int64, sqlite3_bind_null,
-    sqlite3_bind_text, sqlite3_column_blob, sqlite3_column_bytes, sqlite3_column_count,
-    sqlite3_column_double, sqlite3_column_int64, sqlite3_column_text, sqlite3_column_type,
-    sqlite3_errmsg, sqlite3_finalize, sqlite3_last_insert_rowid, sqlite3_prepare_v2, sqlite3_reset,
-    sqlite3_step, SQLITE_BLOB, SQLITE_DONE, SQLITE_ERROR, SQLITE_FLOAT, SQLITE_INTEGER,
-    SQLITE_MISMATCH, SQLITE_MISUSE, SQLITE_NULL, SQLITE_OK, SQLITE_ROW, SQLITE_STATIC, SQLITE_TEXT,
+    sqlite3_bind_parameter_count, sqlite3_bind_text, sqlite3_changes, sqlite3_column_blob,
+    sqlite3_column_bytes, sqlite3_column_count, sqlite3_column_double, sqlite3_column_int64,
+    sqlite3_column_text, sqlite3_column_type, sqlite3_errmsg, sqlite3_finalize,
+    sqlite3_last_insert_rowid, sqlite3_prepare_v2, sqlite3_reset, sqlite3_step,
+    sqlite3_total_changes, SQLITE_BLOB, SQLITE_DONE, SQLITE_ERROR, SQLITE_FLOAT, SQLITE_INTEGER,
+    SQLITE_MISMATCH, SQLITE_MISUSE, SQLITE_NULL, SQLITE_OK, SQLITE_RANGE, SQLITE_ROW,
+    SQLITE_STATIC, SQLITE_TEXT,
 };
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
@@ -34,6 +36,55 @@ fn errmsg_from_db(db: *mut sqlite3) -> String {
     } else {
         unsafe { CStr::from_ptr(c_msg).to_string_lossy().into_owned() }
     }
+}
+
+/// Prepare exactly one SQL statement, rejecting any executable SQL left in
+/// SQLite's tail pointer. sqlite3_prepare_v2() otherwise silently ignores
+/// everything after the first statement when its tail argument is omitted.
+fn prepare_single_statement(
+    db: *mut sqlite3,
+    query: &CString,
+) -> Result<*mut libsqlite3_sys::sqlite3_stmt, (i32, String)> {
+    let mut stmt = std::ptr::null_mut();
+    let mut tail: *const c_char = std::ptr::null();
+    let rc = unsafe { sqlite3_prepare_v2(db, query.as_ptr(), -1_i32, &mut stmt, &mut tail) };
+    if rc != SQLITE_OK {
+        return Err((rc, errmsg_from_db(db)));
+    }
+    if stmt.is_null() {
+        return Err((
+            SQLITE_ERROR,
+            "sqlite3_prepare_v2 returned null statement".to_string(),
+        ));
+    }
+
+    let mut remaining = tail;
+    while !remaining.is_null() && unsafe { *remaining != 0 } {
+        let mut extra_stmt = std::ptr::null_mut();
+        let mut next_tail: *const c_char = std::ptr::null();
+        let rc =
+            unsafe { sqlite3_prepare_v2(db, remaining, -1_i32, &mut extra_stmt, &mut next_tail) };
+        if rc != SQLITE_OK {
+            let error = (rc, errmsg_from_db(db));
+            let _ = unsafe { sqlite3_finalize(stmt) };
+            return Err(error);
+        }
+        if !extra_stmt.is_null() {
+            let _ = unsafe { sqlite3_finalize(extra_stmt) };
+            let _ = unsafe { sqlite3_finalize(stmt) };
+            return Err((
+                SQLITE_ERROR,
+                "only one SQL statement is allowed".to_string(),
+            ));
+        }
+        if next_tail.is_null() || next_tail == remaining {
+            let _ = unsafe { sqlite3_finalize(stmt) };
+            return Err((SQLITE_ERROR, "unable to parse trailing SQL".to_string()));
+        }
+        remaining = next_tail;
+    }
+
+    Ok(stmt)
 }
 
 /// Run a single SQL statement (no parameters). Used for BEGIN/COMMIT.
@@ -81,8 +132,6 @@ pub(crate) fn execute_many_raw_core(
         ));
     }
 
-    exec_simple(db, "BEGIN")?;
-
     let query_c = CString::new(query).map_err(|e| {
         (
             libsqlite3_sys::SQLITE_ERROR,
@@ -90,25 +139,33 @@ pub(crate) fn execute_many_raw_core(
         )
     })?;
 
-    let mut stmt = std::ptr::null_mut();
-    let rc = unsafe {
-        sqlite3_prepare_v2(
-            db,
-            query_c.as_ptr(),
-            -1_i32,
-            &mut stmt,
-            std::ptr::null_mut(),
-        )
+    exec_simple(db, "BEGIN")?;
+
+    let stmt = match prepare_single_statement(db, &query_c) {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            let _ = exec_simple(db, "ROLLBACK");
+            return Err(error);
+        }
     };
-    if rc != SQLITE_OK {
+
+    let expected_params = unsafe { sqlite3_bind_parameter_count(stmt) } as usize;
+    if let Some(param_set) = params
+        .iter()
+        .find(|param_set| param_set.len() != expected_params)
+    {
+        let provided_params = param_set.len();
+        let _ = unsafe { sqlite3_finalize(stmt) };
         let _ = exec_simple(db, "ROLLBACK");
-        return Err((rc, errmsg_from_db(db)));
-    }
-    if stmt.is_null() {
-        let _ = exec_simple(db, "ROLLBACK");
-        return Err((rc, "sqlite3_prepare_v2 returned null statement".to_string()));
+        return Err((
+            SQLITE_RANGE,
+            format!(
+                "Incorrect number of bindings supplied: statement uses {expected_params}, but {provided_params} were supplied"
+            ),
+        ));
     }
 
+    let mut total_changes = 0u64;
     for param_set in params.iter() {
         let rc_reset = unsafe { sqlite3_reset(stmt) };
         if rc_reset != SQLITE_OK {
@@ -160,11 +217,20 @@ pub(crate) fn execute_many_raw_core(
             }
         }
 
+        let changes_before = unsafe { sqlite3_total_changes(db) };
         loop {
             let rc_step = unsafe { sqlite3_step(stmt) };
             match rc_step {
                 SQLITE_ROW => continue,
-                SQLITE_DONE => break,
+                SQLITE_DONE => {
+                    // sqlite3_changes() retains its previous value after non-DML
+                    // statements. The total-change counter tells us whether this
+                    // execution changed the database before reading its row count.
+                    if unsafe { sqlite3_total_changes(db) } != changes_before {
+                        total_changes += unsafe { sqlite3_changes(db) } as u64;
+                    }
+                    break;
+                }
                 _ => {
                     let _ = unsafe { sqlite3_finalize(stmt) };
                     let _ = exec_simple(db, "ROLLBACK");
@@ -174,7 +240,6 @@ pub(crate) fn execute_many_raw_core(
         }
     }
 
-    let total_changes = params.len() as u64;
     let last_rowid = unsafe { sqlite3_last_insert_rowid(db) };
 
     let rc_fin = unsafe { sqlite3_finalize(stmt) };
@@ -183,7 +248,13 @@ pub(crate) fn execute_many_raw_core(
         return Err((rc_fin, errmsg_from_db(db)));
     }
 
-    exec_simple(db, "COMMIT")?;
+    if let Err(error) = exec_simple(db, "COMMIT") {
+        // SQLite leaves the transaction active for some COMMIT failures (for
+        // example, deferred constraint violations). Do not return that handle
+        // to the pool in a partially committed state.
+        let _ = exec_simple(db, "ROLLBACK");
+        return Err(error);
+    }
     Ok((total_changes, last_rowid))
 }
 
@@ -203,23 +274,26 @@ pub(crate) fn fetch_scalar_raw_core(
         return Err((SQLITE_MISUSE, "db pointer is null".to_string()));
     }
     let query_c = CString::new(query).map_err(|e| (SQLITE_ERROR, e.to_string()))?;
-    let mut stmt = std::ptr::null_mut();
-    let rc = unsafe {
-        sqlite3_prepare_v2(
-            db,
-            query_c.as_ptr(),
-            -1_i32,
-            &mut stmt,
-            std::ptr::null_mut(),
-        )
-    };
-    if rc != SQLITE_OK {
-        return Err((rc, errmsg_from_db(db)));
+    let stmt = prepare_single_statement(db, &query_c)?;
+
+    let expected_params = unsafe { sqlite3_bind_parameter_count(stmt) } as usize;
+    if params.len() != expected_params {
+        let _ = unsafe { sqlite3_finalize(stmt) };
+        return Err((
+            SQLITE_RANGE,
+            format!(
+                "Incorrect number of bindings supplied: statement uses {expected_params}, but {} were supplied",
+                params.len()
+            ),
+        ));
     }
-    if stmt.is_null() {
+
+    let columns = unsafe { sqlite3_column_count(stmt) };
+    if columns != 1 {
+        let _ = unsafe { sqlite3_finalize(stmt) };
         return Err((
             SQLITE_ERROR,
-            "sqlite3_prepare_v2 returned null statement".to_string(),
+            format!("raw scalar queries must return exactly one column; got {columns}"),
         ));
     }
 
@@ -273,13 +347,6 @@ pub(crate) fn fetch_scalar_raw_core(
         match unsafe { sqlite3_step(stmt) } {
             SQLITE_DONE => Ok(None),
             SQLITE_ROW => {
-                let columns = unsafe { sqlite3_column_count(stmt) };
-                if columns != 1 {
-                    return Err((
-                        SQLITE_ERROR,
-                        format!("raw scalar queries must return exactly one column; got {columns}"),
-                    ));
-                }
                 let column_type = unsafe { sqlite3_column_type(stmt, 0) };
                 let value = match column_type {
                     SQLITE_NULL => RawScalar::Null,

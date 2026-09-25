@@ -6,7 +6,7 @@ from rapsqlite import connect
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
-async def test_execute_and_fetch_support_50_parameters(test_db) -> None:
+async def test_execute_and_fetch_support_50_parameters(test_db: str) -> None:
     values = list(range(1, 51))
 
     async with connect(test_db) as conn:
