@@ -2556,6 +2556,11 @@ impl Connection {
                     connection_self,
                 )
                 .await?;
+                if callbacks_enabled(&callback_features) {
+                    return Err(NotSupportedError::new_err(
+                        "raw_fetch_scalar() is unavailable when SQLite callbacks are configured",
+                    ));
+                }
 
                 let raw = if in_transaction {
                     let mut guard = transaction_connection.lock().await;

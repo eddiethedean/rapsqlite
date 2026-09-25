@@ -4,7 +4,13 @@ import asyncio
 
 import pytest
 
-from rapsqlite import DatabaseError, NotSupportedError, ProgrammingError, connect_memory
+from rapsqlite import (
+    Connection,
+    DatabaseError,
+    NotSupportedError,
+    ProgrammingError,
+    connect_memory,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -116,6 +122,16 @@ async def test_query_usage_tracking_is_opt_in() -> None:
 async def test_raw_scalar_rejects_callback_connections() -> None:
     async with connect_memory() as conn:
         await conn.create_function("identity", 1, lambda value: value)
+        with pytest.raises(NotSupportedError, match="callbacks"):
+            await conn.raw_fetch_scalar("SELECT identity(?)", [1])
+
+
+@pytest.mark.asyncio
+async def test_raw_scalar_rejects_callbacks_registered_by_init_hook() -> None:
+    async def init_hook(conn) -> None:
+        await conn.create_function("identity", 1, lambda value: value)
+
+    async with Connection(":memory:", init_hook=init_hook) as conn:
         with pytest.raises(NotSupportedError, match="callbacks"):
             await conn.raw_fetch_scalar("SELECT identity(?)", [1])
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 
 class PreparedQuery:
@@ -44,7 +44,9 @@ class PreparedQuery:
     async def fetch_all(self, parameters: Any | None = None) -> list[Any]:
         """Fetch rows through the normal compatibility path."""
 
-        return await self._connection.fetch_all(self._query, parameters)
+        return cast(
+            list[Any], await self._connection.fetch_all(self._query, parameters)
+        )
 
     async def fetch_one(self, parameters: Any | None = None) -> Any:
         """Fetch exactly one row through the normal compatibility path."""

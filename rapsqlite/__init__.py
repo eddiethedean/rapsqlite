@@ -184,8 +184,8 @@ def _connection_prepare(
     return PreparedQuery(self, query, raw=raw, blob=blob)
 
 
-Connection.fetch_blob = _connection_fetch_blob  # type: ignore[attr-defined]
-Connection.prepare = _connection_prepare  # type: ignore[attr-defined]
+Connection.fetch_blob = _connection_fetch_blob
+Connection.prepare = _connection_prepare
 
 
 # Connection.execute_iter (streaming helper) - uses Connection.fetch_all
