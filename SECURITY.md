@@ -1,12 +1,12 @@
 # Security Audit Report - rapsqlite
 
-**Version:** 0.3.1  
-**Last Audit Date:** January 27, 2026
+**Version:** 0.4.0
+**Last Audit Date:** September 24, 2026
 
 ## Security Status
 
 - ✅ **Clippy Security Lints**: Passed
-- ✅ **Unsafe Code Blocks**: 0 found
+- ✅ **Unsafe FFI Blocks**: Confined to reviewed PyO3 and SQLite integration boundaries
 - ✅ **Dependency Vulnerabilities**: All resolved
 - ✅ **SQL Injection Protection**: Parameterized queries via sqlx
 - ✅ **Input Validation**: Implemented
@@ -14,20 +14,20 @@
 
 ## Resolved Vulnerabilities
 
-### ✅ Resolved: pyo3 0.20.3 → 0.27
+### ✅ Resolved: pyo3 0.20.3 → 0.29
 
 **Advisory ID:** RUSTSEC-2025-0020  
 **Severity:** Critical  
 **Issue:** Risk of buffer overflow in `PyString::from_object`  
 **Previous Version:** 0.20.3  
-**Current Version:** 0.27  
+**Current Version:** 0.29
 **Status:** ✅ RESOLVED  
 **URL:** https://rustsec.org/advisories/RUSTSEC-2025-0020
 
 **Resolution:**
-- Upgraded pyo3 from 0.20.3 to 0.27 (fixes vulnerability)
-- Migrated from pyo3-asyncio 0.20 to pyo3-async-runtimes 0.27 (required for pyo3 0.27 compatibility)
-- Updated code to use pyo3 0.27 API (Bound types, Python::attach, etc.)
+- Upgraded pyo3 from 0.20.3 to 0.29 (fixes vulnerability)
+- Migrated from pyo3-asyncio 0.20 to pyo3-async-runtimes 0.29
+- Updated code to use the current Bound/Python::attach APIs
 
 ---
 
@@ -109,7 +109,7 @@ grep -r "unsafe {" src/ --include="*.rs"
 
 Security audits should be run:
 - Before each release
-- Weekly via automated CI/CD (see `.github/workflows/security.yml`)
+- On every CI and release run via `.github/workflows/ci.yml` and `.github/workflows/release.yml`
 - After any dependency updates
 
 ## Previous Vulnerabilities (Now Resolved)
@@ -121,4 +121,3 @@ All vulnerabilities have been resolved in v0.1.0. The indirect dependency issues
 If you discover a security vulnerability, please email: odosmatthews@gmail.com
 
 Do not open public GitHub issues for security vulnerabilities.
-

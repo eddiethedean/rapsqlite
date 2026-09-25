@@ -76,7 +76,7 @@ rapsqlite supports both async iteration and await-to-list:
    lines = await db.iterdump()  # Returns List[str]
 
 10. ``init_hook`` parameter
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 This is a rapsqlite-specific enhancement for automatic database initialization. It's not available in aiosqlite.
 

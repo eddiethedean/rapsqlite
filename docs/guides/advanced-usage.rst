@@ -70,10 +70,10 @@ Use ``connect(..., idle_timeout=60)`` or ``conn.idle_timeout = 60`` before the p
 .. _monitoring:
 
 Monitoring
----------
+----------
 
 Pool metrics
-~~~~~~~~~~~
+~~~~~~~~~~~~
 
 ``Connection.pool_metrics()`` returns a dict with pool usage: ``size`` (total connections), ``num_idle`` (idle), ``in_use`` (active), and ``max_connections`` (configured maximum). Use it to observe pool health in production:
 
@@ -125,7 +125,7 @@ Connection health and recovery
 The underlying pool (sqlx) acquires connections on demand; when a connection is returned to the pool after use, it remains available for reuse. If a connection fails (e.g. database closed or I/O error), the pool can replace it on the next acquire. Use **``pool_health()``** periodically (e.g. in a liveness probe) to detect when the database is unavailable; combine with **``pool_metrics()``** to observe pool usage. For transient errors (e.g. ``SQLITE_BUSY``), retry the operation or use a transaction retry pattern (see :ref:`transaction-patterns`).
 
 Query logging and slow-query detection
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Use ``set_trace_callback`` to log every SQL statement executed on the connection. For slow-query detection, record the time before and after the query in your callback (the callback is invoked before the statement runs; you can pair it with a wrapper that measures duration around execute calls, or log and correlate with application metrics).
 
@@ -145,7 +145,7 @@ Use ``set_trace_callback`` to log every SQL statement executed on the connection
 For slow-query detection, measure elapsed time around your own execute calls (e.g. with a small helper or middleware) and log when a threshold is exceeded; the trace callback alone does not provide timing. This gives a clear path to observe queries without implementing a full metrics pipeline.
 
 Slow query threshold (Phase 3.5 — implemented)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Use **``Connection.set_slow_query_threshold(threshold_secs, callback=None)``** to automatically detect and report slow queries. When ``fetch_all()`` takes longer than ``threshold_secs``, the optional callback is invoked with ``callback(duration_secs, sql)``. Set ``threshold_secs`` to 0 to disable.
 
@@ -784,7 +784,7 @@ Common Anti-Patterns
    # conn closed on exit
 
 ❌ Blocking the Event Loop
-~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
@@ -819,7 +819,7 @@ Use ``async with connect(...)`` or ``async with Connection(...)`` so connections
        await conn.execute("CREATE TABLE test (id INTEGER)")
 
 2. Use Transactions for Related Operations and Keep Them Short
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Wrap related reads/writes in a single transaction. Keep transaction boundaries tight so locks are held briefly; avoid long-running work (e.g. network calls) inside a transaction.
 
