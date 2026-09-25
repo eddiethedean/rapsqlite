@@ -199,12 +199,11 @@ async def close_handle(handle: Any) -> None:
 
 def sqlite3_baseline(ops: int, runs: int) -> dict[str, Any]:
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        "CREATE TABLE cache (key TEXT PRIMARY KEY, value BLOB NOT NULL, expires_at REAL NOT NULL)"
-    )
+    conn.execute(SCHEMA_SQL)
+    conn.execute(EXPIRATION_INDEX_SQL)
     conn.execute(
         "INSERT INTO cache VALUES (?, ?, ?)",
-        ("hot-key", b"x" * 1024, time.time() + 3600),
+        (CACHE_KEY, CACHE_VALUE, time.time() + 3600),
     )
     run_results: list[dict[str, float]] = []
     for _ in range(runs):
@@ -212,7 +211,7 @@ def sqlite3_baseline(ops: int, runs: int) -> dict[str, Any]:
         started = time.perf_counter()
         for _ in range(ops):
             op_started = time.perf_counter_ns()
-            conn.execute(READ_SQL, ("hot-key", time.time())).fetchone()
+            conn.execute(READ_SQL, (CACHE_KEY, time.time())).fetchone()
             samples.append((time.perf_counter_ns() - op_started) / 1_000.0)
         run_results.append(summarize(samples, time.perf_counter() - started))
     conn.close()
