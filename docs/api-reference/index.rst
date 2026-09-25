@@ -10,6 +10,7 @@ Core Classes
    :maxdepth: 2
 
    connection
+   cache
    cursor
    row
    exceptions

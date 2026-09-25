@@ -30,6 +30,7 @@ Python GIL**, ensuring event loops never stall under load.
    guides/advanced-usage
    guides/migration-guide
    guides/compatibility
+   guides/cache
    guides/performance
 
 .. toctree::

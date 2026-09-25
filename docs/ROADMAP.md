@@ -166,7 +166,7 @@ Start with one prepared statement and zero/one scalar result. Reuse existing han
 
 **Goal:** Provide explicit APIs for cache workloads and improve aggregate throughput without requiring one async call per item.
 
-- [#42](https://github.com/eddiethedean/rapsqlite/issues/42) Cache-specific low-latency `get`/`set` operations with TTL handling
+- ✅ [#42](https://github.com/eddiethedean/rapsqlite/issues/42) Cache-specific low-latency `get`/`set` operations with TTL handling
 - [#43](https://github.com/eddiethedean/rapsqlite/issues/43) Bulk cache APIs and expiration cleanup batches
 - [#44](https://github.com/eddiethedean/rapsqlite/issues/44) Multiplexed read mode for concurrent cache workloads
 - Batched write and read benchmarks across representative payload sizes
