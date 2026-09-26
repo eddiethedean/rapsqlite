@@ -2,9 +2,10 @@
 
 use pyo3::prelude::*;
 use sqlx::pool::PoolConnection;
-use sqlx::{Executor, Row};
+use sqlx::{Executor, Statement};
 
 use crate::types::SqliteParam;
+use crate::ProgrammingError;
 
 type SqliteQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>;
 
@@ -291,36 +292,32 @@ pub(crate) async fn bind_and_fetch_optional_on_connection(
         .map_err(|e| crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query))
 }
 
-/// Fetch an optional row and retain result metadata when the query returns no
-/// rows. The metadata lookup is only needed for empty results, whose row shape
-/// is otherwise unavailable to the caller.
-pub(crate) async fn bind_and_fetch_optional_with_column_count_on_connection(
+/// Fetch the first scalar row after validating its result shape without
+/// executing the statement. Prepare through SQLx so the statement is cached
+/// and the authorizer is not invoked again when the query is executed.
+pub(crate) async fn bind_and_fetch_scalar_optional_on_connection(
     query: &str,
     params: &[SqliteParam],
     conn: &mut PoolConnection<sqlx::Sqlite>,
     path: &str,
     include_query: bool,
-) -> Result<(Option<sqlx::sqlite::SqliteRow>, usize), PyErr> {
+) -> Result<Option<sqlx::sqlite::SqliteRow>, PyErr> {
+    let statement = (&mut **conn).prepare(query).await.map_err(|error| {
+        crate::errors::map_sqlx_error_with_visibility(error, path, query, include_query)
+    })?;
+    let column_count = statement.columns().len();
+    drop(statement);
+    if column_count != 1 {
+        return Err(ProgrammingError::new_err(format!(
+            "fetch_scalar() requires exactly one result column; got {column_count}"
+        )));
+    }
+
     let query_builder = build_bound_query(query, params).map_err(|e| {
         crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query)
     })?;
-    let row = query_builder
+    query_builder
         .fetch_optional(&mut **conn)
         .await
-        .map_err(|e| {
-            crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query)
-        })?;
-    let column_count = if let Some(row) = row.as_ref() {
-        row.columns().len()
-    } else {
-        (&mut **conn)
-            .describe(query)
-            .await
-            .map_err(|e| {
-                crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query)
-            })?
-            .columns()
-            .len()
-    };
-    Ok((row, column_count))
+        .map_err(|e| crate::errors::map_sqlx_error_with_visibility(e, path, query, include_query))
 }

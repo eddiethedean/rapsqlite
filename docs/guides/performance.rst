@@ -194,12 +194,12 @@ so ``await conn.interrupt()`` can stop a long-running raw statement; ordinary
 task cancellation does not magically interrupt synchronous SQLite execution.
 With ``session_affinity=True``, raw statements are reused on the retained
 physical connection (up to 64 statements, with SQL text capped at 2,048 bytes
-per entry). The cache is cleared when that session is released, including
-connection close or after session affinity has been disabled and a subsequent
-operation completes. The affinity setter is synchronous, so the retained
-connection may remain until that next operation or ``close()``. Without session
-affinity, raw calls prepare and finalize on each acquired handle; statements
-inside explicit transactions are also prepared per operation.
+per entry). The cache is cleared when that session is released, including on
+connection close. Disabling session affinity releases an idle retained session
+immediately; if an operation currently holds it, that operation releases it
+when it completes. Without session affinity, raw calls prepare and finalize on
+each acquired handle; statements inside explicit transactions are also
+prepared per operation.
 
 .. code-block:: python
 
@@ -231,6 +231,11 @@ retained connection consumes pool capacity and reduces sharing under
 concurrency. It is opt-in and should be benchmarked with the intended pool
 size. Transactions always take priority and release the retained session while
 they are active.
+
+For in-memory databases, registered SQLite callbacks can also keep their
+callback-bound physical connection checked out, even when session affinity is
+disabled. This preserves the database while callbacks remain configured, but
+uses pool capacity until the callbacks are removed or the connection is closed.
 
 Diagnostics and benchmark discipline
 ------------------------------------

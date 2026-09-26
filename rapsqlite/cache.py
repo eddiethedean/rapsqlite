@@ -6,10 +6,14 @@ import asyncio
 import math
 import re
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Protocol, TypeVar
 
 
 _Result = TypeVar("_Result")
+_INITIALIZING_CACHES: ContextVar[frozenset[object]] = ContextVar(
+    "rapsqlite_initializing_caches", default=frozenset()
+)
 
 
 class _CacheConnection(Protocol):
@@ -52,6 +56,9 @@ class SQLiteCache:
     ) -> None:
         self._table_name = self._validate_table_name(table_name)
         self._connection = connection
+        # A regular asyncio.Lock coalesces concurrent setup, but an init hook
+        # can re-enter this cache while setup is awaiting the connection. The
+        # context marker makes that same logical initialization re-entrant.
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
 
@@ -62,17 +69,31 @@ class SQLiteCache:
         operation, so this method is optional when lazy setup is acceptable.
         """
 
+        if self in _INITIALIZING_CACHES.get():
+            if not self._initialized:
+                await self._initialize_schema()
+            return
         async with self._initialize_lock:
-            await self._initialize_schema_locked()
+            await self._initialize_schema_guarded()
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
+        if self in _INITIALIZING_CACHES.get():
+            await self._initialize_schema()
+            return
         async with self._initialize_lock:
             if not self._initialized:
-                await self._initialize_schema_locked()
+                await self._initialize_schema_guarded()
 
-    async def _initialize_schema_locked(self) -> None:
+    async def _initialize_schema_guarded(self) -> None:
+        token = _INITIALIZING_CACHES.set(_INITIALIZING_CACHES.get() | {self})
+        try:
+            await self._initialize_schema()
+        finally:
+            _INITIALIZING_CACHES.reset(token)
+
+    async def _initialize_schema(self) -> None:
         # The table may be rolled back with its surrounding transaction. Mark it
         # initialized optimistically to avoid repeating CREATE IF NOT EXISTS on
         # every operation; _run_cache_operation repairs the state on a missing
@@ -90,10 +111,12 @@ class SQLiteCache:
         except Exception as error:
             if "no such table:" not in str(error).lower():
                 raise
+            if self in _INITIALIZING_CACHES.get():
+                raise
 
         async with self._initialize_lock:
             self._initialized = False
-            await self._initialize_schema_locked()
+            await self._initialize_schema_guarded()
         return await operation()
 
     async def get(self, key: str) -> bytes | None:

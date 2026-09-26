@@ -2,11 +2,11 @@
 
 This roadmap describes the release-oriented development plan for `rapsqlite`, a true async SQLite library for Python built with Rust, Tokio, and SQLx.
 
-The roadmap uses minor `0.x` releases as delivery phases. The latest release tag is `v0.5.0`; Phase 0.5 is complete and Phase 0.6 is in progress.
+The roadmap uses minor `0.x` releases as delivery phases. The latest release tag is `v0.5.1`; Phase 0.5 is complete and Phase 0.6 is in progress.
 
 ## Current Status
 
-**Latest tag:** `v0.5.0` ✅
+**Latest tag:** `v0.5.1` ✅
 **Current development phase:** `0.6` — Cache APIs, batching, and concurrent workloads 📋 in progress
 **Next phase:** `0.7` — Pooling, observability, and reliability 📋
 
@@ -85,9 +85,12 @@ In scope:
 - Add narrow scalar/BLOB and reusable-query paths for repeated operations.
 - Prototype a raw SQLite path only behind an explicit opt-in until cancellation and event-loop behavior are proven.
 
-Out of scope for 0.5:
+### Scope adjustment
 
-- Cache-specific `get`/`set` semantics and TTL APIs (#42).
+- Cache-specific `get`/`set` semantics and TTL APIs ([#42](https://github.com/eddiethedean/rapsqlite/issues/42)) were originally planned for 0.6, but shipped early in `v0.5.0` (see the 0.6 status below).
+
+### Remaining non-goals for 0.5
+
 - Bulk operations and pipelining-style batching (#43).
 - Multiplexed concurrent reads (#44).
 - A general pool redesign or a claim that rapsqlite is faster than Redis for every workload.

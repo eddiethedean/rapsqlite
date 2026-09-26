@@ -17,15 +17,18 @@ pub(crate) fn next_savepoint_name() -> String {
 }
 
 use crate::connection::{
-    clear_active_handle, ensure_not_closed, CallbackContext, ConnectionExecutionState,
+    cleanup_failed_transaction_connection, clear_active_handle, ensure_not_closed,
+    finish_transaction_callback_connection, sqlite_connection_in_transaction, CallbackContext,
+    ConnectionExecutionState,
 };
 use crate::conversion::{
     build_description_empty_result, build_description_tuple, row_to_py_with_factory,
 };
 use crate::pool::{
-    acquire_with_pragmas, callbacks_enabled, ensure_callback_connection,
-    execute_init_hook_if_needed, get_or_create_pool, lock_session_connection,
-    release_session_connection, PoolConnectionSlot, PoolHandle, SessionConnectionSlot,
+    acquire_with_pragmas, callbacks_enabled, capture_init_hook_reentrancy,
+    ensure_callback_connection, execute_init_hook_if_needed, get_or_create_pool,
+    lock_session_connection, release_session_connection, InitHookState, PoolConnectionSlot,
+    PoolHandle, SessionConnectionSlot,
 };
 use crate::query::{bind_and_execute_on_connection, bind_and_fetch_all_on_connection};
 use crate::types::{SqliteParam, TraceCallback, TransactionState, TransactionStateTracker};
@@ -78,6 +81,7 @@ impl ExecuteContextManager {
             let connection_timeout_secs = Arc::clone(&state.connection_timeout_secs);
             let idle_timeout_secs = Arc::clone(&state.idle_timeout_secs);
             let transaction_state = Arc::clone(&state.transaction_state);
+            let transaction_start_lock = Arc::clone(&state.transaction_start_lock);
             let transaction_connection = Arc::clone(&state.transaction_connection);
             let callback_connection = Arc::clone(&state.callback_connection);
             let trace_callback = Arc::clone(&state.trace_callback);
@@ -87,6 +91,8 @@ impl ExecuteContextManager {
             let last_rowid = Arc::clone(&state.last_rowid);
             let last_changes = Arc::clone(&state.last_changes);
             let connection = slf.borrow(py).connection.clone_ref(py);
+            let init_hook_reentrant =
+                capture_init_hook_reentrancy(&init_hook_present, &init_hook_called, &connection)?;
             let connection_for_fetch = connection.clone_ref(py);
             let cursor = slf.borrow(py).cursor.clone_ref(py);
             let timeout = Arc::clone(&state.timeout);
@@ -112,9 +118,13 @@ impl ExecuteContextManager {
                 ensure_not_closed(&closed)?;
                 // For non-SELECT queries, execute immediately when entering context
                 if !is_select {
-                    // Check if we're currently executing init_hook FIRST (before checking transaction state)
-                    // If we're inside init_hook, we should use pool connection, not transaction connection
-                    let hook_already_called = init_hook_called.load(Ordering::Acquire);
+                    // Capture whether this operation entered while another
+                    // task was running the hook. Those waiters must follow
+                    // first-use transaction routing after the barrier; calls
+                    // made after hook completion retain the established
+                    // session/autocommit behavior.
+                    let hook_already_called = init_hook_called.is_started();
+                    let hook_was_in_progress = init_hook_called.is_in_progress();
 
                     // Only check for Active state, not Starting (Starting means transaction is being set up).
                     // When inside init_hook and transaction is Active, use transaction_connection so we don't
@@ -139,6 +149,7 @@ impl ExecuteContextManager {
                         &init_hook,
                         &init_hook_present,
                         &init_hook_called,
+                        init_hook_reentrant,
                         connection,
                     )
                     .await?;
@@ -146,13 +157,32 @@ impl ExecuteContextManager {
                     // Re-check transaction state after init_hook (state may have changed during hook execution).
                     // When inside init_hook and transaction is Active, use transaction_connection so init_hook's
                     // conn.execute() runs on the same connection (avoids pool timeout when pool size is 1).
-                    let in_transaction_after_hook = transaction_state.is_exact_active().await;
+                    let mut in_transaction_after_hook = transaction_state.is_routing_active().await;
 
                     // Python-level trace callback (avoid sqlite3_trace_v2, which can invoke
                     // callbacks on non-Python threads).
                     maybe_trace_sql(&trace_callback, &query);
 
                     let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
+                    let starts_raw_transaction = is_begin_query(&query);
+                    let starts_implicit_transaction = !init_hook_reentrant
+                        && is_dml_query(&query)
+                        && (!hook_already_called || hook_was_in_progress);
+                    let _transaction_start_guard = if !in_transaction_after_hook
+                        && !has_callbacks_flag
+                        && (starts_raw_transaction || starts_implicit_transaction)
+                    {
+                        let guard = transaction_start_lock.lock().await;
+                        // A competing transaction start may have established
+                        // the connection transaction while this operation waited.
+                        // Raw BEGIN uses the same gate so it cannot retain the
+                        // session connection while a DML holds transaction_state
+                        // and waits for that connection.
+                        in_transaction_after_hook = transaction_state.is_routing_active().await;
+                        Some(guard)
+                    } else {
+                        None
+                    };
                     let _callback_operation_guard = if has_callbacks_flag {
                         Some(callback_context.callback_operation_lock.lock().await)
                     } else {
@@ -259,7 +289,7 @@ impl ExecuteContextManager {
                             &idle_timeout_secs,
                         )
                         .await?;
-                        let mut conn = conn_guard.0.take().ok_or_else(|| {
+                        let mut conn = conn_guard.take_connection().ok_or_else(|| {
                             OperationalError::new_err("Session connection not available")
                         })?;
                         let result = bind_and_execute_on_connection(
@@ -384,7 +414,10 @@ impl ExecuteContextManager {
                         drop(conn_guard);
                         crate::connection::discard_callback_connection(&callback_context).await;
                         outcome_result?
-                    } else if hook_already_called || !is_dml_query(&query) {
+                    } else if (hook_already_called && !hook_was_in_progress)
+                        || init_hook_reentrant
+                        || !is_dml_query(&query)
+                    {
                         // Inside init_hook, or DDL (CREATE/DROP etc.): use session connection.
                         let mut conn_guard = lock_session_connection(
                             &path,
@@ -423,69 +456,112 @@ impl ExecuteContextManager {
                     } else {
                         // Implicit transaction (aiosqlite compat): first DML (INSERT/UPDATE/DELETE)
                         // without explicit begin() starts a transaction; commit()/rollback() end it.
-                        // Use session connection for BEGIN then move it to transaction_connection.
-                        let mut conn_guard = lock_session_connection(
-                            &path,
-                            &pool,
-                            &session_connection,
-                            &pragmas,
-                            &pool_size,
-                            &connection_timeout_secs,
-                            &idle_timeout_secs,
-                        )
-                        .await?;
-                        let mut conn = conn_guard.0.take().ok_or_else(|| {
-                            OperationalError::new_err("Session connection not available")
-                        })?;
-                        let timeout_ms = {
-                            let g = timeout.lock().unwrap();
-                            (*g * 1000.0) as i64
-                        };
-                        let busy = format!("PRAGMA busy_timeout = {}", timeout_ms);
-                        sqlx::query(&busy)
-                            .execute(&mut *conn)
-                            .await
-                            .map_err(|e| map_sqlx_error(e, &path, &busy))?;
-                        let level = isolation_level
-                            .lock()
-                            .unwrap()
-                            .clone()
-                            .unwrap_or_else(|| "IMMEDIATE".to_string());
-                        let begin_sql = format!("BEGIN {level}");
-                        sqlx::query(&begin_sql)
-                            .execute(&mut *conn)
-                            .await
-                            .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
-                        let outcome = if use_fetch_for_returning {
-                            let rows = bind_and_fetch_all_on_connection(
-                                &query,
-                                &param_values,
-                                &mut conn,
-                                &path,
-                                include_query_in_errors,
-                            )
-                            .await?;
-                            DmlOutcome::Fetched(rows)
+                        // Reserve transaction state and its connection slot before BEGIN.
+                        // Once BEGIN succeeds, install the connection before executing DML,
+                        // so an error or cancellation leaves rollback() able to reach it.
+                        let mut state_guard = transaction_state.lock().await;
+                        if state_guard.is_active() {
+                            drop(state_guard);
+                            let mut conn_guard = transaction_connection.lock().await;
+                            let conn = conn_guard.0.as_mut().ok_or_else(|| {
+                                OperationalError::new_err("Transaction connection not available")
+                            })?;
+                            if use_fetch_for_returning {
+                                let rows = bind_and_fetch_all_on_connection(
+                                    &query,
+                                    &param_values,
+                                    conn,
+                                    &path,
+                                    include_query_in_errors,
+                                )
+                                .await?;
+                                DmlOutcome::Fetched(rows)
+                            } else {
+                                let result = bind_and_execute_on_connection(
+                                    &query,
+                                    &param_values,
+                                    conn,
+                                    &path,
+                                    include_query_in_errors,
+                                )
+                                .await?;
+                                DmlOutcome::Executed(result)
+                            }
                         } else {
-                            let r = bind_and_execute_on_connection(
-                                &query,
-                                &param_values,
-                                &mut conn,
+                            *state_guard = TransactionState::Starting;
+                            let mut transaction_guard = transaction_connection.lock().await;
+                            let mut conn_guard = lock_session_connection(
                                 &path,
-                                include_query_in_errors,
+                                &pool,
+                                &session_connection,
+                                &pragmas,
+                                &pool_size,
+                                &connection_timeout_secs,
+                                &idle_timeout_secs,
                             )
                             .await?;
-                            DmlOutcome::Executed(r)
-                        };
-                        {
-                            let mut g = transaction_state.lock().await;
-                            *g = TransactionState::Active;
+                            let mut conn = conn_guard.take_connection().ok_or_else(|| {
+                                OperationalError::new_err("Session connection not available")
+                            })?;
+                            let timeout_ms = {
+                                let g = timeout.lock().unwrap();
+                                (*g * 1000.0) as i64
+                            };
+                            let busy = format!("PRAGMA busy_timeout = {}", timeout_ms);
+                            let level = isolation_level
+                                .lock()
+                                .unwrap()
+                                .clone()
+                                .unwrap_or_else(|| "IMMEDIATE".to_string());
+                            let begin_sql = format!("BEGIN {level}");
+                            let setup_result: Result<(), PyErr> = async {
+                                sqlx::query(&busy)
+                                    .execute(&mut *conn)
+                                    .await
+                                    .map_err(|e| map_sqlx_error(e, &path, &busy))?;
+                                sqlx::query(&begin_sql)
+                                    .execute(&mut *conn)
+                                    .await
+                                    .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
+                                Ok(())
+                            }
+                            .await;
+                            if let Err(error) = setup_result {
+                                drop(conn_guard);
+                                cleanup_failed_transaction_connection(&callback_context, conn)
+                                    .await;
+                                return Err(error);
+                            }
+
+                            transaction_guard.0 = Some(conn);
+                            *state_guard = TransactionState::Active;
+                            drop(state_guard);
+
+                            let conn = transaction_guard.0.as_mut().ok_or_else(|| {
+                                OperationalError::new_err("Transaction connection not available")
+                            })?;
+                            if use_fetch_for_returning {
+                                let rows = bind_and_fetch_all_on_connection(
+                                    &query,
+                                    &param_values,
+                                    conn,
+                                    &path,
+                                    include_query_in_errors,
+                                )
+                                .await?;
+                                DmlOutcome::Fetched(rows)
+                            } else {
+                                let result = bind_and_execute_on_connection(
+                                    &query,
+                                    &param_values,
+                                    conn,
+                                    &path,
+                                    include_query_in_errors,
+                                )
+                                .await?;
+                                DmlOutcome::Executed(result)
+                            }
                         }
-                        {
-                            let mut g = transaction_connection.lock().await;
-                            g.0 = Some(conn);
-                        }
-                        outcome
                     };
 
                     // Raw COMMIT/ROLLBACK from SQLAlchemy: reset state. Callback
@@ -501,9 +577,12 @@ impl ExecuteContextManager {
                         clear_active_handle(&callback_connection);
                         clear_active_handle(&transaction_connection);
                         let mut conn_guard = transaction_connection.lock().await;
-                        if let Some(mut conn) = conn_guard.0.take() {
+                        if let Some(conn) = conn_guard.0.take() {
                             if has_callbacks_flag {
-                                conn.close_on_drop();
+                                finish_transaction_callback_connection(&callback_context, conn)
+                                    .await;
+                            } else {
+                                drop(conn);
                             }
                         }
                     }
@@ -576,7 +655,7 @@ impl ExecuteContextManager {
                     // Check if init_hook is already being executed (to avoid deadlock)
                     // If init_hook is already called, we're likely inside an init_hook execution
                     // In this case, we should skip pool operations to avoid deadlock with begin()/transaction()
-                    let hook_already_called = init_hook_called.load(Ordering::Acquire);
+                    let hook_already_called = init_hook_called.is_started();
 
                     // Only get/create pool if not in transaction and hook not already called
                     // If hook is already called, we're inside init_hook execution and should
@@ -600,6 +679,7 @@ impl ExecuteContextManager {
                         &init_hook,
                         &init_hook_present,
                         &init_hook_called,
+                        init_hook_reentrant,
                         connection,
                     )
                     .await?;
@@ -622,7 +702,7 @@ impl ExecuteContextManager {
 
                     // Eager execution for SELECT: fetch now so "async for row in cursor" works (DBAPI spec).
                     // When inside init_hook and transaction is Active, use transaction_connection (same as non-SELECT).
-                    let in_transaction_after_hook = transaction_state.is_exact_active().await;
+                    let in_transaction_after_hook = transaction_state.is_routing_active().await;
                     let has_callbacks_flag = callbacks_enabled(&callback_context.callback_features);
                     let _callback_operation_guard = if has_callbacks_flag {
                         Some(callback_context.callback_operation_lock.lock().await)
@@ -777,7 +857,7 @@ pub(crate) struct TransactionContextManager {
     pub(crate) transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub(crate) connection: Py<Connection>,
     pub(crate) init_hook: Arc<StdMutex<Option<Py<PyAny>>>>, // Optional initialization hook
-    pub(crate) init_hook_called: Arc<AtomicBool>,
+    pub(crate) init_hook_called: Arc<InitHookState>,
     pub(crate) init_hook_present: Arc<AtomicBool>,
     pub(crate) timeout: Arc<StdMutex<f64>>, // SQLite busy_timeout in seconds
     pub(crate) isolation_level: Arc<StdMutex<Option<String>>>, // Phase 3.9: None | DEFERRED | IMMEDIATE | EXCLUSIVE
@@ -804,6 +884,8 @@ impl TransactionContextManager {
             let init_hook = Arc::clone(&slf.borrow(py).init_hook);
             let init_hook_called = Arc::clone(&slf.borrow(py).init_hook_called);
             let init_hook_present = Arc::clone(&slf.borrow(py).init_hook_present);
+            let init_hook_reentrant =
+                capture_init_hook_reentrancy(&init_hook_present, &init_hook_called, &connection)?;
             let timeout = Arc::clone(&slf.borrow(py).timeout);
             let isolation_level = Arc::clone(&slf.borrow(py).isolation_level);
             let explicit_transaction = Arc::clone(&slf.borrow(py).explicit_transaction);
@@ -827,7 +909,32 @@ impl TransactionContextManager {
                         if let Some(mut conn) = conn_guard.0.take() {
                             drop(trans_guard);
                             maybe_trace_sql(&trace_callback, "COMMIT");
-                            let _ = sqlx::query("COMMIT").execute(&mut *conn).await;
+                            if let Err(error) = sqlx::query("COMMIT").execute(&mut *conn).await {
+                                let still_in_transaction =
+                                    sqlite_connection_in_transaction(&mut conn)
+                                        .await
+                                        .unwrap_or(true);
+                                if still_in_transaction {
+                                    // Preserve the implicit transaction so a
+                                    // caller can roll it back after a failed
+                                    // deferred-constraint commit.
+                                    conn_guard.0 = Some(conn);
+                                } else {
+                                    drop(conn_guard);
+                                    if has_callbacks_flag {
+                                        finish_transaction_callback_connection(
+                                            &callback_context,
+                                            conn,
+                                        )
+                                        .await;
+                                    } else {
+                                        drop(conn);
+                                    }
+                                    *transaction_state.lock().await = TransactionState::None;
+                                    *explicit_transaction.lock().await = false;
+                                }
+                                return Err(map_sqlx_error(error, &path, "COMMIT"));
+                            }
                             let timeout_ms = {
                                 let g = timeout.lock().unwrap();
                                 (*g * 1000.0) as i64
@@ -849,6 +956,26 @@ impl TransactionContextManager {
                             if let Err(error) = begin_result {
                                 clear_active_handle(&callback_context.callback_connection);
                                 clear_active_handle(&transaction_connection);
+                                let still_in_transaction =
+                                    sqlite_connection_in_transaction(&mut conn)
+                                        .await
+                                        .unwrap_or(true);
+                                if still_in_transaction {
+                                    conn_guard.0 = Some(conn);
+                                } else {
+                                    drop(conn_guard);
+                                    if has_callbacks_flag {
+                                        finish_transaction_callback_connection(
+                                            &callback_context,
+                                            conn,
+                                        )
+                                        .await;
+                                    } else {
+                                        drop(conn);
+                                    }
+                                    *transaction_state.lock().await = TransactionState::None;
+                                    *explicit_transaction.lock().await = false;
+                                }
                                 return Err(error);
                             }
                             conn_guard.0 = Some(conn);
@@ -868,6 +995,7 @@ impl TransactionContextManager {
                 // Release session connection so we don't hold session + transaction
                 release_session_connection(&session_connection).await;
 
+                let mut reserved_transaction = false;
                 let result: Result<Py<PyAny>, PyErr> = async {
                     let pool_clone = get_or_create_pool(
                         &path,
@@ -879,16 +1007,15 @@ impl TransactionContextManager {
                     )
                     .await?;
 
-                    // Atomically reserve the transaction slot (init_hook runs after transaction is active)
-                    {
-                        let mut trans_guard = transaction_state.lock().await;
-                        if trans_guard.is_active() {
-                            return Err(OperationalError::new_err(
-                                "Transaction already in progress",
-                            ));
-                        }
-                        *trans_guard = TransactionState::Starting;
-                    } // Lock released
+                    // Keep the state lock through connection acquisition and
+                    // BEGIN so query routing cannot observe an empty transaction
+                    // connection while the transaction is being installed.
+                    let mut trans_guard = transaction_state.lock().await;
+                    if trans_guard.is_active() {
+                        return Err(OperationalError::new_err("Transaction already in progress"));
+                    }
+                    *trans_guard = TransactionState::Starting;
+                    reserved_transaction = true;
 
                     let pool_size_val = {
                         let g = pool_size.lock().unwrap();
@@ -914,9 +1041,6 @@ impl TransactionContextManager {
                         )
                         .await?
                     };
-                    if has_callbacks_flag {
-                        conn.close_on_drop();
-                    }
                     // Set PRAGMA busy_timeout on this connection to handle lock contention
                     // Convert timeout from seconds (float) to milliseconds (integer) for SQLite
                     let timeout_ms = {
@@ -924,10 +1048,6 @@ impl TransactionContextManager {
                         (*timeout_guard * 1000.0) as i64
                     };
                     let busy_timeout_query = format!("PRAGMA busy_timeout = {}", timeout_ms);
-                    sqlx::query(&busy_timeout_query)
-                        .execute(&mut *conn)
-                        .await
-                        .map_err(|e| map_sqlx_error(e, &path, &busy_timeout_query))?;
                     let level = isolation_level
                         .lock()
                         .unwrap()
@@ -935,23 +1055,29 @@ impl TransactionContextManager {
                         .unwrap_or_else(|| "IMMEDIATE".to_string());
                     let begin_sql = format!("BEGIN {level}");
                     maybe_trace_sql(&trace_callback, &begin_sql);
-                    sqlx::query(&begin_sql)
-                        .execute(&mut *conn)
-                        .await
-                        .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
+                    let setup_result: Result<(), PyErr> = async {
+                        sqlx::query(&busy_timeout_query)
+                            .execute(&mut *conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &busy_timeout_query))?;
+                        sqlx::query(&begin_sql)
+                            .execute(&mut *conn)
+                            .await
+                            .map_err(|e| map_sqlx_error(e, &path, &begin_sql))?;
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(error) = setup_result {
+                        cleanup_failed_transaction_connection(&callback_context, conn).await;
+                        return Err(error);
+                    }
                     {
                         let mut conn_guard = transaction_connection.lock().await;
                         conn_guard.0 = Some(conn);
                     }
-                    // Re-acquire lock to set transaction state and mark explicit
-                    {
-                        let mut trans_guard = transaction_state.lock().await;
-                        *trans_guard = TransactionState::Active;
-                    }
-                    {
-                        let mut ex_guard = explicit_transaction.lock().await;
-                        *ex_guard = true;
-                    }
+                    *trans_guard = TransactionState::Active;
+                    *explicit_transaction.lock().await = true;
+                    drop(trans_guard);
                     drop(_callback_operation_guard);
                     // Run init_hook after transaction is active so hook's conn.execute() uses this connection
                     #[allow(deprecated)]
@@ -960,6 +1086,7 @@ impl TransactionContextManager {
                         &init_hook,
                         &init_hook_present,
                         &init_hook_called,
+                        init_hook_reentrant,
                         connection_for_hook,
                     )
                     .await?;
@@ -968,19 +1095,18 @@ impl TransactionContextManager {
                 .await;
 
                 // On failure, release the reservation.
-                if result.is_err() {
+                if result.is_err() && reserved_transaction {
                     clear_active_handle(&callback_context.callback_connection);
                     clear_active_handle(&transaction_connection);
                     let mut trans_guard = transaction_state.lock().await;
-                    *trans_guard = TransactionState::None;
-                    let mut ex_guard = explicit_transaction.lock().await;
-                    *ex_guard = false;
                     let mut conn_guard = transaction_connection.lock().await;
-                    if let Some(mut conn) = conn_guard.0.take() {
-                        if has_callbacks_flag {
-                            conn.close_on_drop();
-                        }
+                    let conn = conn_guard.0.take();
+                    drop(conn_guard);
+                    if let Some(conn) = conn {
+                        cleanup_failed_transaction_connection(&callback_context, conn).await;
                     }
+                    *trans_guard = TransactionState::None;
+                    *explicit_transaction.lock().await = false;
                 }
 
                 result
@@ -1021,14 +1147,26 @@ impl TransactionContextManager {
                 })?;
                 let query = if rollback { "ROLLBACK" } else { "COMMIT" };
                 maybe_trace_sql(&trace_callback, query);
-                if has_callbacks_flag {
-                    conn.close_on_drop();
+                if let Err(error) = sqlx::query(query).execute(&mut *conn).await {
+                    if sqlite_connection_in_transaction(&mut conn)
+                        .await
+                        .unwrap_or(true)
+                    {
+                        conn_guard.0 = Some(conn);
+                    } else {
+                        drop(conn_guard);
+                        cleanup_failed_transaction_connection(&callback_context, conn).await;
+                        *trans_guard = TransactionState::None;
+                        drop(trans_guard);
+                        *explicit_transaction.lock().await = false;
+                    }
+                    return Err(map_sqlx_error(error, &path, query));
                 }
-                sqlx::query(query)
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(|e| map_sqlx_error(e, &path, query))?;
-                drop(conn);
+                if has_callbacks_flag {
+                    finish_transaction_callback_connection(&callback_context, conn).await;
+                } else {
+                    drop(conn);
+                }
                 *trans_guard = TransactionState::None;
                 drop(trans_guard);
                 let mut ex_guard = explicit_transaction.lock().await;

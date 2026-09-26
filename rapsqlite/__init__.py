@@ -206,7 +206,7 @@ def _connection_execute_iter(
 
 Connection.execute_iter = _connection_execute_iter
 
-__version__: str = "0.5.0"
+__version__: str = "0.5.1"
 __all__: list[str] = [
     "Connection",
     "ConnectionT",
@@ -258,7 +258,10 @@ def connect_memory(
     An unnamed database gets a unique process-local identity. A non-empty name
     shares one database among live ``connect_memory(name=...)`` connections
     with that same name. SQLite closes the database after the last connection
-    using that identity is closed or discarded.
+    using that identity is closed or discarded. While SQLite callbacks are
+    registered, rapsqlite may retain their physical connection as the database
+    keeper even when ``session_affinity`` is disabled; this consumes pool
+    capacity until the callbacks are removed or the connection is closed.
     """
     if name is None:
         identity = uuid.uuid4().hex

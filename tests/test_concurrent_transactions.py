@@ -17,6 +17,82 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.concurrency]
 
 
 @pytest.mark.asyncio
+async def test_fetch_waits_for_pending_begin_to_install_transaction_connection(
+    unique_table_prefix: str,
+) -> None:
+    database_name = f"{unique_table_prefix}_pending_begin"
+    holder = rapsqlite.connect_memory(name=database_name, pool_size=1)
+    waiting = rapsqlite.connect_memory(name=database_name, pool_size=1)
+    begin_task: asyncio.Task[None] | None = None
+    fetch_task: asyncio.Future[Any] | None = None
+
+    try:
+        await holder.begin()
+        begin_task = asyncio.create_task(waiting.begin())
+        # The holder owns the only pooled connection, so the second begin must
+        # have reserved its Starting state and be waiting for pool capacity.
+        await asyncio.sleep(0.05)
+        assert not begin_task.done()
+
+        fetch_task = asyncio.ensure_future(waiting.fetch_scalar("SELECT 1"))
+        await asyncio.sleep(0.02)
+        fetch_waited_for_begin = not fetch_task.done()
+
+        await holder.rollback()
+        await begin_task
+        fetch_result = await asyncio.gather(fetch_task, return_exceptions=True)
+
+        assert fetch_waited_for_begin
+        assert fetch_result == [1]
+        await waiting.rollback()
+    finally:
+        if begin_task is not None and not begin_task.done():
+            await holder.rollback()
+            await begin_task
+        if fetch_task is not None and not fetch_task.done():
+            await asyncio.gather(fetch_task, return_exceptions=True)
+        await holder.close()
+        await waiting.close()
+
+
+@pytest.mark.asyncio
+async def test_raw_begin_racing_first_implicit_write_does_not_deadlock() -> None:
+    async with rapsqlite.connect_memory(pool_size=1, session_affinity=True) as db:
+        await db.execute("CREATE TABLE transaction_start_race (value INTEGER)")
+        await db.commit()
+
+        async def execute(query: str) -> None:
+            await db.execute(query)
+
+        for _ in range(128):
+            begin_task = asyncio.create_task(execute("BEGIN"))
+            # Let raw BEGIN reach its asynchronous SQLite execution before the
+            # first implicit DML attempts to reserve transaction state.
+            await asyncio.sleep(0)
+            write_task = asyncio.create_task(
+                execute("INSERT INTO transaction_start_race VALUES (1)")
+            )
+
+            begin_result, write_result = await asyncio.wait_for(
+                asyncio.gather(begin_task, write_task, return_exceptions=True),
+                timeout=2,
+            )
+            assert write_result is None
+            if isinstance(begin_result, Exception):
+                # If the write wins and starts the transaction, SQLite rejects
+                # the nested BEGIN.
+                assert isinstance(begin_result, Error)
+                assert "transaction" in str(begin_result).lower()
+                assert not await db.in_transaction_async()
+            else:
+                assert await db.in_transaction_async()
+
+            await db.rollback()
+
+        assert await db.fetch_scalar("SELECT COUNT(*) FROM transaction_start_race") == 0
+
+
+@pytest.mark.asyncio
 async def test_concurrent_begin_attempts(test_db: str, unique_table_prefix: str):
     """Test that concurrent begin() calls are properly serialized."""
     tbl = unique_table_prefix

@@ -9,7 +9,7 @@ use libsqlite3_sys::{
     sqlite3_finalize, sqlite3_last_insert_rowid, sqlite3_prepare_v2, sqlite3_reset, sqlite3_step,
     sqlite3_total_changes, SQLITE_BLOB, SQLITE_DONE, SQLITE_ERROR, SQLITE_FLOAT, SQLITE_INTEGER,
     SQLITE_MISMATCH, SQLITE_MISUSE, SQLITE_NULL, SQLITE_OK, SQLITE_RANGE, SQLITE_ROW,
-    SQLITE_STATIC, SQLITE_TEXT,
+    SQLITE_STATIC, SQLITE_TEXT, SQLITE_TOOBIG,
 };
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
@@ -115,6 +115,65 @@ fn exec_simple(db: *mut sqlite3, sql: &str) -> Result<(), (i32, String)> {
     Ok(())
 }
 
+/// Bind a parameter without narrowing an arbitrary Rust buffer length at the
+/// SQLite C boundary. SQLite's text/blob APIs take a signed `c_int` length;
+/// wrapping a larger `usize` can turn it negative and make SQLite read beyond
+/// the Rust-owned buffer.
+fn bind_sqlite_param(
+    db: *mut sqlite3,
+    stmt: *mut libsqlite3_sys::sqlite3_stmt,
+    index: c_int,
+    param: &SqliteParam,
+) -> Result<(), (i32, String)> {
+    let rc = match param {
+        SqliteParam::Null => unsafe { sqlite3_bind_null(stmt, index) },
+        SqliteParam::Int(value) => unsafe { sqlite3_bind_int64(stmt, index, *value) },
+        SqliteParam::Real(value) => unsafe { sqlite3_bind_double(stmt, index, *value) },
+        SqliteParam::Text(value) => {
+            let bytes = value.as_bytes();
+            let length = checked_bind_length(bytes.len())?;
+            let text_ptr = bytes.as_ptr();
+            let ptr = {
+                #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+                {
+                    text_ptr
+                }
+                #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
+                {
+                    text_ptr as *const c_char
+                }
+            };
+            unsafe { sqlite3_bind_text(stmt, index, ptr, length, SQLITE_STATIC()) }
+        }
+        SqliteParam::Blob(value) => {
+            let length = checked_bind_length(value.len())?;
+            unsafe {
+                sqlite3_bind_blob(
+                    stmt,
+                    index,
+                    value.as_ptr() as *const std::ffi::c_void,
+                    length,
+                    SQLITE_STATIC(),
+                )
+            }
+        }
+    };
+    if rc == SQLITE_OK {
+        Ok(())
+    } else {
+        Err((rc, errmsg_from_db(db)))
+    }
+}
+
+fn checked_bind_length(length: usize) -> Result<c_int, (i32, String)> {
+    c_int::try_from(length).map_err(|_| {
+        (
+            SQLITE_TOOBIG,
+            "text or BLOB parameter exceeds SQLite's supported bind length".to_string(),
+        )
+    })
+}
+
 /// Core batch loop: BEGIN, prepare, bind/step/reset per row, finalize, COMMIT.
 /// Single transaction for the whole batch (matches aiosqlite / sqlite3.executemany).
 /// Returns (total_changes, last_insert_rowid) or (rc, error_message). No PyErr (Send-safe).
@@ -177,44 +236,10 @@ pub(crate) fn execute_many_raw_core(
 
         for (i, p) in param_set.iter().enumerate() {
             let idx = (i + 1) as c_int;
-            let rc_bind = match p {
-                SqliteParam::Null => unsafe { sqlite3_bind_null(stmt, idx) },
-                SqliteParam::Int(v) => unsafe { sqlite3_bind_int64(stmt, idx, *v) },
-                SqliteParam::Real(v) => unsafe { sqlite3_bind_double(stmt, idx, *v) },
-                SqliteParam::Text(s) => {
-                    let bytes = s.as_bytes();
-                    // SQLITE_STATIC: buffer valid until sqlite3_step() returns; no copy.
-                    // libsqlite3-sys bindings: Linux aarch64 (manylinux) expects *const u8; others *const c_char (i8).
-                    let text_ptr = bytes.as_ptr();
-                    let ptr = {
-                        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-                        {
-                            text_ptr
-                        }
-                        #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
-                        {
-                            text_ptr as *const c_char
-                        }
-                    };
-                    unsafe {
-                        sqlite3_bind_text(stmt, idx, ptr, bytes.len() as c_int, SQLITE_STATIC())
-                    }
-                }
-                SqliteParam::Blob(b) => unsafe {
-                    // SQLITE_STATIC: buffer valid until sqlite3_step() returns; no copy.
-                    sqlite3_bind_blob(
-                        stmt,
-                        idx,
-                        b.as_ptr() as *const std::ffi::c_void,
-                        b.len() as c_int,
-                        SQLITE_STATIC(),
-                    )
-                },
-            };
-            if rc_bind != SQLITE_OK {
+            if let Err(error) = bind_sqlite_param(db, stmt, idx, p) {
                 let _ = unsafe { sqlite3_finalize(stmt) };
                 let _ = exec_simple(db, "ROLLBACK");
-                return Err((rc_bind, errmsg_from_db(db)));
+                return Err(error);
             }
         }
 
@@ -329,48 +354,7 @@ pub(crate) fn fetch_scalar_raw_core(
     let result = (|| {
         for (index, param) in params.iter().enumerate() {
             let bind_index = (index + 1) as c_int;
-            let rc_bind = match param {
-                SqliteParam::Null => unsafe { sqlite3_bind_null(stmt, bind_index) },
-                SqliteParam::Int(value) => unsafe { sqlite3_bind_int64(stmt, bind_index, *value) },
-                SqliteParam::Real(value) => unsafe {
-                    sqlite3_bind_double(stmt, bind_index, *value)
-                },
-                SqliteParam::Text(value) => {
-                    let bytes = value.as_bytes();
-                    let text_ptr = bytes.as_ptr();
-                    let ptr = {
-                        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-                        {
-                            text_ptr
-                        }
-                        #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
-                        {
-                            text_ptr as *const c_char
-                        }
-                    };
-                    unsafe {
-                        sqlite3_bind_text(
-                            stmt,
-                            bind_index,
-                            ptr,
-                            bytes.len() as c_int,
-                            SQLITE_STATIC(),
-                        )
-                    }
-                }
-                SqliteParam::Blob(value) => unsafe {
-                    sqlite3_bind_blob(
-                        stmt,
-                        bind_index,
-                        value.as_ptr() as *const std::ffi::c_void,
-                        value.len() as c_int,
-                        SQLITE_STATIC(),
-                    )
-                },
-            };
-            if rc_bind != SQLITE_OK {
-                return Err((rc_bind, errmsg_from_db(db)));
-            }
+            bind_sqlite_param(db, stmt, bind_index, param)?;
         }
 
         match unsafe { sqlite3_step(stmt) } {
@@ -433,4 +417,17 @@ pub(crate) fn fetch_scalar_raw_core(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checked_bind_length, SQLITE_TOOBIG};
+    use std::os::raw::c_int;
+
+    #[test]
+    fn raw_bind_lengths_must_fit_sqlite_c_int() {
+        assert_eq!(checked_bind_length(c_int::MAX as usize), Ok(c_int::MAX));
+        let error = checked_bind_length(usize::MAX).unwrap_err();
+        assert_eq!(error.0, SQLITE_TOOBIG);
+    }
 }

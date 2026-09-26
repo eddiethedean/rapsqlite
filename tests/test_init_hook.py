@@ -293,6 +293,52 @@ async def test_init_hook_in_transaction(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_first_fetch_scalar_uses_transaction_started_by_init_hook(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "init_hook_transaction_routing.db"
+    db_path.touch()
+
+    async with _isolated_connection(db_path) as seed:
+        await seed.execute("CREATE TABLE state (value INTEGER)")
+        await seed.execute("INSERT INTO state VALUES (1)")
+        await seed.commit()
+
+    async def init_hook(conn: Any) -> None:
+        await conn.begin()
+        await conn.execute("UPDATE state SET value = 2")
+
+    conn = _isolated_connection(db_path, init_hook=init_hook)
+    try:
+        # The first operation must observe the uncommitted update on the
+        # transaction connection established by the init hook.
+        assert await conn.fetch_scalar("SELECT value FROM state") == 2
+        await conn.rollback()
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_first_schema_introspection_uses_transaction_started_by_init_hook(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "init_hook_schema_routing.db"
+    db_path.touch()
+
+    async def init_hook(conn: Any) -> None:
+        await conn.begin()
+        await conn.execute("CREATE TABLE uncommitted_schema (value INTEGER)")
+
+    conn = _isolated_connection(db_path, init_hook=init_hook)
+    try:
+        # The schema exists only on the transaction connection until commit.
+        assert "uncommitted_schema" in await conn.get_tables()
+        await conn.rollback()
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_init_hook_with_other_operations(tmp_path: Path):
     """Test init_hook works with subsequent operations."""
     db_path = tmp_path / "test.db"
@@ -504,9 +550,6 @@ async def test_init_hook_with_set_pragma(tmp_path: Path):
         assert "test" in tables
 
 
-@pytest.mark.skip(
-    reason="init_hook + begin(): Transaction connection not available when hook runs (known limitation)"
-)
 @pytest.mark.asyncio
 async def test_init_hook_with_begin(tmp_path: Path):
     """Test init_hook is triggered by begin().
@@ -532,9 +575,6 @@ async def test_init_hook_with_begin(tmp_path: Path):
         assert len(result) == 1
 
 
-@pytest.mark.skip(
-    reason="init_hook + transaction(): Transaction connection not available when hook runs (known limitation)"
-)
 @pytest.mark.asyncio
 async def test_init_hook_with_transaction_context_manager(tmp_path: Path):
     """Test init_hook is triggered by transaction context manager.
@@ -654,6 +694,88 @@ async def test_init_hook_concurrent_first_access(tmp_path: Path):
         # Verify all inserts succeeded (table was created by init_hook)
         result = await conn.fetch_all("SELECT COUNT(*) FROM test")
         assert result[0][0] == 10
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_use_waits_for_init_hook(tmp_path: Path):
+    """Concurrent operations must not run before the first init hook completes."""
+    db_path = tmp_path / "init-barrier.db"
+    db_path.touch()
+    hook_started = asyncio.Event()
+    release_hook = asyncio.Event()
+
+    async def init_hook(conn: Any):
+        hook_started.set()
+        await release_hook.wait()
+        await conn.execute("CREATE TABLE initialized (value INTEGER)")
+        await conn.execute("INSERT INTO initialized VALUES (42)")
+
+    async with _isolated_connection(db_path, init_hook=init_hook) as conn:
+        conn.pool_size = 2
+        first = asyncio.ensure_future(conn.fetch_scalar("SELECT 1"))
+        second: asyncio.Future[Any] | None = None
+        try:
+            await asyncio.wait_for(hook_started.wait(), timeout=5)
+            second = asyncio.ensure_future(
+                conn.fetch_scalar("SELECT value FROM initialized")
+            )
+
+            # The second request must remain behind the initialization barrier.
+            # With the old started/done flag, it returns immediately with a
+            # missing-table error while the hook is still waiting.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(second), timeout=0.05)
+
+            release_hook.set()
+            assert await first == 1
+            assert await second == 42
+        finally:
+            release_hook.set()
+            pending = [first]
+            if second is not None:
+                pending.append(second)
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_dml_waits_for_init_hook_and_shares_implicit_tx(
+    tmp_path: Path,
+):
+    db_path = tmp_path / "init-barrier-dml.db"
+    db_path.touch()
+    hook_started = asyncio.Event()
+    release_hook = asyncio.Event()
+
+    async def init_hook(conn: Any) -> None:
+        hook_started.set()
+        await release_hook.wait()
+        await conn.execute("CREATE TABLE initialized (value INTEGER)")
+
+    async with _isolated_connection(db_path, init_hook=init_hook) as conn:
+        conn.pool_size = 2
+        conn.timeout = 0
+        first = asyncio.ensure_future(
+            conn.execute("INSERT INTO initialized VALUES (1)")
+        )
+        second: asyncio.Future[Any] | None = None
+        try:
+            await asyncio.wait_for(hook_started.wait(), timeout=5)
+            second = asyncio.ensure_future(
+                conn.execute("INSERT INTO initialized VALUES (2)")
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(second), timeout=0.05)
+
+            release_hook.set()
+            await asyncio.gather(first, second)
+            await conn.rollback()
+            assert await conn.fetch_scalar("SELECT COUNT(*) FROM initialized") == 0
+        finally:
+            release_hook.set()
+            pending = [first]
+            if second is not None:
+                pending.append(second)
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 @pytest.mark.asyncio

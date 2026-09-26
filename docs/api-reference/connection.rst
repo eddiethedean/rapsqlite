@@ -42,6 +42,11 @@ The database is process-local and disappears when the last connection using
 that identity is closed or discarded. Existing ``connect(":memory:")``
 behavior is unchanged.
 
+While SQLite callbacks are registered on a ``connect_memory()`` connection,
+rapsqlite may retain the callback-bound physical connection to keep the
+in-memory database alive, even when session affinity is disabled. This consumes
+pool capacity until the callbacks are removed or the connection is closed.
+
 Callback Exception Handling
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
