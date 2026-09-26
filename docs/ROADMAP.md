@@ -2,11 +2,11 @@
 
 This roadmap describes the release-oriented development plan for `rapsqlite`, a true async SQLite library for Python built with Rust, Tokio, and SQLx.
 
-The roadmap uses minor `0.x` releases as delivery phases. The latest release tag is `v0.5.0`; Phase 0.5 is complete and Phase 0.6 is in progress.
+The roadmap uses minor `0.x` releases as delivery phases. The latest release tag is `v0.5.1`; Phase 0.5 is complete and Phase 0.6 is in progress.
 
 ## Current Status
 
-**Latest tag:** `v0.5.0` ✅
+**Latest tag:** `v0.5.1` ✅
 **Current development phase:** `0.6` — Cache APIs, batching, and concurrent workloads 📋 in progress
 **Next phase:** `0.7` — Pooling, observability, and reliability 📋
 

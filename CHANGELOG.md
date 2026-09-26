@@ -11,10 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **v0.2.x**: Phase 2 — Feature-complete drop-in replacement
 - **v0.3.x**: Phase 3 — Advanced features & aiosqlite parity (latest: v0.3.3)
 - **v0.4.x**: Compatibility, security, and release stabilization (released as v0.4.0)
-- **v0.5.x**: Low-latency execution and session affinity - **Latest: v0.5.0**
+- **v0.5.x**: Low-latency execution and session affinity - **Latest: v0.5.1**
 - **v1.0.0**: Stable production API release after the 0.x phases
 
-## [Unreleased]
+## [0.5.1] - 2026-09-26
 
 ### Fixed
 
@@ -838,6 +838,7 @@ _Note: v1.0.0 release details will be added after Phase 4 completion._
 
 [0.2.0]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.2.0
 [0.4.0]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.4.0
+[0.5.1]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.5.1
 [0.5.0]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.5.0
 [0.1.1]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.1.1
 [0.1.0]: https://github.com/eddiethedean/rapsqlite/releases/tag/v0.1.0

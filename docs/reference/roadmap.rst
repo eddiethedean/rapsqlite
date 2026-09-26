@@ -6,7 +6,7 @@ This roadmap outlines the development plan for ``rapsqlite``.
 Current Status
 --------------
 
-**Latest tag:** ``v0.5.0``
+**Latest tag:** ``v0.5.1``
 **Current phase:** ``0.6`` — Cache APIs, batching, and concurrent workloads (in progress)
 **Next phase:** ``0.7`` — Pooling, observability, and reliability
 
