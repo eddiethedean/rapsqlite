@@ -6,7 +6,7 @@ This roadmap outlines the development plan for ``rapsqlite``.
 Current Status
 --------------
 
-**Latest tag:** ``v0.5.1``
+**Latest tag:** ``v0.5.1`` (released 2026-09-26; published to PyPI)
 **Current phase:** ``0.6`` — Cache APIs, batching, and concurrent workloads (in progress)
 **Next phase:** ``0.7`` — Pooling, observability, and reliability
 
@@ -23,7 +23,7 @@ Release Phases
 --------------
 
 * **0.4** — Compatibility, security, and release stabilization; complete in ``v0.4.0``.
-* **0.5** — Low-latency execution and session affinity; complete and released as ``v0.5.0`` with hot-path reductions (#36, #41, #45, and #46), scalar/BLOB paths (#39), session affinity (#38), prepared queries (#37), and an opt-in raw path (#35).
+* **0.5** — Low-latency execution and session affinity; complete with the ``v0.5.0`` feature release and ``v0.5.1`` maintenance release. The patch release passed its release CI and published eight platform wheels plus the source distribution to PyPI; release changes were squash-merged in `PR #50 <https://github.com/eddiethedean/rapsqlite/pull/50>`_. The phase includes hot-path reductions (#36, #41, #45, and #46), scalar/BLOB paths (#39), session affinity (#38), prepared queries (#37), and an opt-in raw path (#35).
 * **0.6** — Cache-specific APIs, bulk operations, and multiplexed concurrent reads. Cache get/set with TTL (#42) shipped in ``v0.5.0``; bulk APIs and multiplexed reads (#43–#44) remain open.
 * **0.7** — Pooling, observability, reliability, stress testing, and platform validation.
 * **0.8** — Type utilities, framework integrations, database tooling, and advanced SQLite helpers.

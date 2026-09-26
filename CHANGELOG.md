@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.1] - 2026-09-26
 
+Released from tag [`v0.5.1`](https://github.com/eddiethedean/rapsqlite/releases/tag/v0.5.1)
+on 2026-09-26. [Release CI](https://github.com/eddiethedean/rapsqlite/actions/runs/36254044503)
+passed and published eight platform wheels plus the source distribution to
+[PyPI](https://pypi.org/project/rapsqlite/0.5.1/). The release changes were
+squash-merged through [PR #50](https://github.com/eddiethedean/rapsqlite/pull/50)
+as `7d25b426d8f1e84c81118ad4df545d601bd9a046`; the release tag points to
+`722ea689179dfad72b95c36094f2927869ae1a03`.
+
 ### Fixed
 
 - Hardened callback and initialization-hook lifecycle for in-memory connections,

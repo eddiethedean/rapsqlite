@@ -126,6 +126,12 @@ blanket speedup claim.
 - ✅ Publish the `v0.5.0` tag and supported platform wheels; [release CI](https://github.com/eddiethedean/rapsqlite/actions/runs/36168514584) passed after retrying a transient PyPI upload failure for the macOS ARM wheel.
 - ✅ Update release notes and benchmark documentation with measured results and workload-specific caveats.
 
+### 0.5.1 maintenance release result
+
+- ✅ Tag `v0.5.1` was published on 2026-09-26. [Release CI](https://github.com/eddiethedean/rapsqlite/actions/runs/36254044503) passed and published eight platform wheels plus the source distribution to [PyPI](https://pypi.org/project/rapsqlite/0.5.1/).
+- ✅ The release changes were squash-merged through [PR #50](https://github.com/eddiethedean/rapsqlite/pull/50) as `7d25b426d8f1e84c81118ad4df545d601bd9a046`. The `v0.5.1` tag remains on release commit `722ea689179dfad72b95c36094f2927869ae1a03`.
+- ✅ The patch release hardened callback and initialization-hook lifecycles, concurrent transaction startup, implicit writes, cache initialization, connection/session release, and reapplication of configured PRAGMAs to replacement physical connections.
+
 ### Delivery order
 
 The issues are intentionally ordered by risk and dependency. The first workstream should establish the measurement baseline; the remaining workstreams can then be delivered independently where their prerequisites are satisfied.
@@ -256,7 +262,7 @@ All currently open GitHub issues are assigned to a future release phase:
 | 0.2.x | Feature-complete drop-in foundation | ✅ Complete |
 | 0.3.x | Advanced features and aiosqlite parity | ✅ Complete; latest pre-0.4 tag `v0.3.3` |
 | 0.4.x | Post-0.3.3 compatibility, security, and release stabilization | ✅ Complete; latest pre-0.5 tag `v0.4.0` |
-| 0.5.x | Low-latency execution and session affinity | ✅ Complete; released as `v0.5.0` |
+| 0.5.x | Low-latency execution and session affinity | ✅ Complete; `v0.5.0` feature release and `v0.5.1` maintenance release |
 | 0.6.x | Cache APIs, batching, and concurrent workloads | 📋 In progress; #42 shipped in `v0.5.0`, #43 and #44 remain |
 | 0.7.x | Pooling, observability, and reliability | 📋 Planned |
 | 0.8.x | Type, framework, and database tooling | 📋 Planned |
