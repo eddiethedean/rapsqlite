@@ -145,51 +145,18 @@ async def test_multiple_parameters_round_trip(
 )
 async def test_transaction_atomicity(test_db: str, table_name: str, count: int):
     """Test that transactions are atomic - all or nothing."""
-    # Avoid SQL keywords and ensure valid table name
-    sql_keywords = {
-        "as",
-        "select",
-        "from",
-        "where",
-        "insert",
-        "update",
-        "delete",
-        "create",
-        "table",
-        "drop",
-        "on",
-        "or",
-        "in",
-        "is",
-        "to",
-        "by",
-        "no",
-        "of",
-        "do",
-        "if",
-        "all",
-        "and",
-        "end",
-        "for",
-        "not",
-        "key",
-        "row",
-        "set",
-        "add",
-        "asc",
-        "null",
-    }
-    assume(" " not in table_name)  # Avoid spaces in table names
-    assume(table_name.isalnum())  # Only alphanumeric
-    assume(table_name.lower() not in sql_keywords)  # Avoid SQL keywords
+    # Quote generated identifiers so every lowercase name, including reserved
+    # SQL keywords such as "then", remains a valid table name.
+    quoted_table_name = f'"{table_name}"'
 
     async with connect(test_db) as db:
         await db.execute(
-            f"CREATE TABLE IF NOT EXISTS {table_name} (id INTEGER PRIMARY KEY, value INTEGER)"
+            f"CREATE TABLE IF NOT EXISTS {quoted_table_name} "
+            "(id INTEGER PRIMARY KEY, value INTEGER)"
         )
 
         # Count before
-        rows_before = await db.fetch_all(f"SELECT COUNT(*) FROM {table_name}")
+        rows_before = await db.fetch_all(f"SELECT COUNT(*) FROM {quoted_table_name}")
         count_before = rows_before[0][0] if rows_before else 0
 
         # Start transaction
@@ -197,7 +164,9 @@ async def test_transaction_atomicity(test_db: str, table_name: str, count: int):
         try:
             # Insert rows
             for i in range(count):
-                await db.execute(f"INSERT INTO {table_name} (value) VALUES (?)", [i])
+                await db.execute(
+                    f"INSERT INTO {quoted_table_name} (value) VALUES (?)", [i]
+                )
 
             # Rollback
             await db.rollback()
@@ -206,7 +175,7 @@ async def test_transaction_atomicity(test_db: str, table_name: str, count: int):
             raise
 
         # Count after - should be same as before
-        rows_after = await db.fetch_all(f"SELECT COUNT(*) FROM {table_name}")
+        rows_after = await db.fetch_all(f"SELECT COUNT(*) FROM {quoted_table_name}")
         count_after = rows_after[0][0] if rows_after else 0
         assert count_after == count_before
 

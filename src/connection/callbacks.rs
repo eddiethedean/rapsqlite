@@ -9,17 +9,22 @@ use tokio::sync::Mutex;
 
 use libsqlite3_sys::{
     sqlite3_aggregate_context, sqlite3_context, sqlite3_create_collation_v2,
-    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free, sqlite3_interrupt,
-    sqlite3_load_extension, sqlite3_progress_handler, sqlite3_result_error, sqlite3_result_null,
-    sqlite3_set_authorizer, sqlite3_user_data, sqlite3_value, SQLITE_DENY, SQLITE_DETERMINISTIC,
-    SQLITE_OK, SQLITE_UTF8,
+    sqlite3_create_function_v2, sqlite3_enable_load_extension, sqlite3_free,
+    sqlite3_get_autocommit, sqlite3_interrupt, sqlite3_load_extension, sqlite3_progress_handler,
+    sqlite3_result_error, sqlite3_result_null, sqlite3_set_authorizer, sqlite3_user_data,
+    sqlite3_value, SQLITE_DENY, SQLITE_DETERMINISTIC, SQLITE_OK, SQLITE_UTF8,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyString, PyTuple};
+use sqlx::pool::PoolConnection;
 use sqlx::sqlite::SqliteConnection;
+use sqlx::Sqlite;
 
 use crate::conversion::{py_to_sqlite_c_result, sqlite_c_value_to_py};
-use crate::pool::{ensure_callback_connection, has_callbacks, PoolConnectionSlot, PoolHandle};
+use crate::pool::{
+    close_pool_connection_on_drop, ensure_callback_connection, has_callbacks,
+    release_session_connection, PoolConnectionSlot, PoolHandle, SessionConnectionSlot,
+};
 use crate::types::{ProgressHandler, TraceCallback, UserAggregates, UserCollations, UserFunctions};
 use crate::utils::cstr_from_c_char_ptr;
 use crate::OperationalError;
@@ -38,6 +43,7 @@ pub(crate) struct CallbackContext {
     pub connection_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
+    pub session_connection: SessionConnectionSlot,
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_operation_lock: Arc<Mutex<()>>,
     pub callback_connection_required: Arc<StdMutex<bool>>,
@@ -136,12 +142,57 @@ pub(crate) async fn discard_callback_connection(ctx: &CallbackContext) {
     if ctx.skip_release {
         return;
     }
+    let callbacks_active = crate::pool::callbacks_enabled(&ctx.callback_features);
+    if retain_callback_connection_for_session(ctx) {
+        if callbacks_active {
+            return;
+        }
+        move_callback_connection_to_session(ctx).await;
+        return;
+    }
+    if callbacks_active && is_memory_database_path(&ctx.path) {
+        // A callback-bound handle is the in-memory database's keeper when no
+        // session-affine handle is retained. Keep it checked out rather than
+        // destroying the database after every callback operation.
+        return;
+    }
     clear_active_handle(&ctx.callback_connection);
     let mut guard = ctx.callback_connection.lock().await;
-    if let Some(conn) = guard.0.as_mut() {
-        conn.close_on_drop();
+    if let Some(mut conn) = guard.0.take() {
+        // Once callbacks have all been removed, the physical handle is safe to
+        // return to the pool. Closing it would discard the last in-memory DB
+        // connection even though the logical connection remains open.
+        if callbacks_active || !is_memory_database_path(&ctx.path) {
+            conn.close_on_drop();
+        }
     }
-    guard.0.take();
+}
+
+/// Release an idle callback-bound connection after session affinity is disabled.
+/// An operation already holding the callback lock will observe the new setting
+/// in `discard_callback_connection` when it finishes.
+pub(crate) fn release_callback_connection_if_idle(ctx: &CallbackContext) {
+    crate::pool::refresh_callback_features(ctx);
+    let callbacks_active = crate::pool::callbacks_enabled(&ctx.callback_features);
+    if ctx.session_connection.retain() || (callbacks_active && is_memory_database_path(&ctx.path)) {
+        return;
+    }
+    let Ok(_operation_guard) = ctx.callback_operation_lock.try_lock() else {
+        return;
+    };
+    let Ok(mut guard) = ctx.callback_connection.try_lock() else {
+        return;
+    };
+    clear_active_handle(&ctx.callback_connection);
+    if let Some(connection) = guard.0.take() {
+        if callbacks_active {
+            close_pool_connection_on_drop(connection);
+        } else {
+            // All SQLite callbacks have been removed, so returning the handle
+            // to the pool cannot leak callback state into another connection.
+            drop(connection);
+        }
+    }
 }
 
 async fn finish_callback_update(ctx: &CallbackContext) {
@@ -149,6 +200,295 @@ async fn finish_callback_update(ctx: &CallbackContext) {
     if !ctx.skip_release {
         discard_callback_connection(ctx).await;
     }
+}
+
+fn retain_callback_connection_for_session(ctx: &CallbackContext) -> bool {
+    ctx.session_connection.retain()
+}
+
+fn is_memory_database_path(path: &str) -> bool {
+    path == ":memory:" || path.starts_with("sqlite::memory:") || path.contains("mode=memory")
+}
+
+pub(crate) fn should_retain_callback_connection(ctx: &CallbackContext) -> bool {
+    ctx.session_connection.retain() || is_memory_database_path(&ctx.path)
+}
+
+fn transfer_session_for_single_slot_pool(ctx: &CallbackContext) -> bool {
+    retain_callback_connection_for_session(ctx) && *ctx.pool_size.lock().unwrap() == Some(1)
+}
+
+/// Transfer the retained session lease to the callback slot instead of
+/// checking out a second handle from a one-connection pool.
+async fn move_session_connection_to_callback(ctx: &CallbackContext) {
+    let connection = {
+        let mut session_guard = ctx.session_connection.lock().await;
+        // The slot lock excludes raw_fetch_scalar while cached sqlite3_stmt
+        // pointers are finalized and the associated handle is transferred.
+        ctx.session_connection.raw_statement_cache().clear();
+        session_guard.0.take()
+    };
+    if let Some(connection) = connection {
+        let mut callback_guard = ctx.callback_connection.lock().await;
+        if callback_guard.0.is_none() {
+            callback_guard.0 = Some(connection);
+        }
+    }
+}
+
+/// Return the callback handle to the affinity slot after the last callback has
+/// been removed, preserving the lifetime of a shared in-memory database.
+async fn move_callback_connection_to_session(ctx: &CallbackContext) {
+    let connection = {
+        let mut callback_guard = ctx.callback_connection.lock().await;
+        clear_active_handle(&ctx.callback_connection);
+        callback_guard.0.take()
+    };
+    if let Some(connection) = connection {
+        let mut session_guard = ctx.session_connection.lock().await;
+        // Clear under the slot lock for the same reason as the forward
+        // handoff: an in-flight raw operation may be using a cached statement.
+        ctx.session_connection.raw_statement_cache().clear();
+        if session_guard.0.is_none() {
+            session_guard.0 = Some(connection);
+        }
+    }
+}
+
+pub(crate) async fn finish_transaction_callback_connection(
+    ctx: &CallbackContext,
+    connection: PoolConnection<Sqlite>,
+) {
+    let mut connection = Some(connection);
+    if should_retain_callback_connection(ctx) {
+        let mut guard = ctx.callback_connection.lock().await;
+        if guard.0.is_none() {
+            guard.0 = connection.take();
+        }
+    }
+    if let Some(mut connection) = connection {
+        connection.close_on_drop();
+        drop(connection);
+    }
+}
+
+/// Clean up a transaction connection after setup or its init hook fails.
+/// Roll back before returning an ordinary handle to the pool; a connection
+/// with an open transaction must never be reused as an unrelated session.
+pub(crate) async fn sqlite_connection_in_transaction(
+    connection: &mut PoolConnection<Sqlite>,
+) -> Result<bool, sqlx::Error> {
+    let sqlite_connection: &mut SqliteConnection = connection;
+    let mut handle = sqlite_connection.lock_handle().await?;
+    Ok(unsafe { sqlite3_get_autocommit(handle.as_raw_handle().as_ptr()) == 0 })
+}
+
+pub(crate) async fn cleanup_failed_transaction_connection(
+    ctx: &CallbackContext,
+    mut connection: PoolConnection<Sqlite>,
+) {
+    let in_transaction = match sqlite_connection_in_transaction(&mut connection).await {
+        Ok(in_transaction) => in_transaction,
+        Err(_) => {
+            connection.close_on_drop();
+            drop(connection);
+            return;
+        }
+    };
+    if in_transaction
+        && sqlx::query("ROLLBACK")
+            .execute(&mut *connection)
+            .await
+            .is_err()
+    {
+        connection.close_on_drop();
+        drop(connection);
+        return;
+    }
+
+    crate::pool::refresh_callback_features(ctx);
+    if crate::pool::callbacks_enabled(&ctx.callback_features) {
+        finish_transaction_callback_connection(ctx, connection).await;
+    } else {
+        drop(connection);
+    }
+}
+
+/// Remove this Connection's SQLite callback registrations from a physical
+/// handle before returning it to the shared pool. Returns `false` when the
+/// handle has a loaded extension, which cannot be unloaded safely and therefore
+/// must be closed instead of reused by another logical Connection.
+pub(crate) async fn clear_connection_callback_registrations(
+    ctx: &CallbackContext,
+    connection: &mut PoolConnection<Sqlite>,
+) -> Result<bool, PyErr> {
+    if !ctx.loaded_extensions.lock().unwrap().is_empty() {
+        return Ok(false);
+    }
+
+    let functions = {
+        let guard = ctx.user_functions.lock().unwrap();
+        guard
+            .iter()
+            .map(|(name, (nargs, _, _))| (name.clone(), *nargs))
+            .collect::<Vec<_>>()
+    };
+    let aggregates = {
+        let guard = ctx.user_aggregates.lock().unwrap();
+        guard
+            .iter()
+            .map(|(name, (nargs, _))| (name.clone(), *nargs))
+            .collect::<Vec<_>>()
+    };
+    let collations = {
+        let guard = ctx.user_collations.lock().unwrap();
+        guard.keys().cloned().collect::<Vec<_>>()
+    };
+
+    let sqlite_connection: &mut SqliteConnection = connection;
+    let mut handle = sqlite_connection.lock_handle().await.map_err(|error| {
+        OperationalError::new_err(format!(
+            "Failed to lock SQLite handle for callback cleanup: {error}"
+        ))
+    })?;
+    let raw_db = handle.as_raw_handle().as_ptr();
+
+    for (name, nargs) in functions.into_iter().chain(aggregates) {
+        let name = std::ffi::CString::new(name).map_err(|error| {
+            OperationalError::new_err(format!("Invalid callback name during cleanup: {error}"))
+        })?;
+        let result = unsafe {
+            sqlite3_create_function_v2(
+                raw_db,
+                name.as_ptr(),
+                nargs,
+                SQLITE_UTF8,
+                std::ptr::null_mut(),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        if result != SQLITE_OK {
+            return Err(OperationalError::new_err(format!(
+                "Failed to remove SQLite function during connection cleanup (code {result})"
+            )));
+        }
+    }
+
+    for collation in collations {
+        let name = std::ffi::CString::new(collation).map_err(|error| {
+            OperationalError::new_err(format!("Invalid collation name during cleanup: {error}"))
+        })?;
+        let result = unsafe {
+            sqlite3_create_collation_v2(
+                raw_db,
+                name.as_ptr(),
+                SQLITE_UTF8,
+                std::ptr::null_mut(),
+                None,
+                None,
+            )
+        };
+        if result != SQLITE_OK {
+            return Err(OperationalError::new_err(format!(
+                "Failed to remove SQLite collation during connection cleanup (code {result})"
+            )));
+        }
+    }
+
+    let result = unsafe { sqlite3_set_authorizer(raw_db, None, std::ptr::null_mut()) };
+    if result != SQLITE_OK {
+        return Err(OperationalError::new_err(format!(
+            "Failed to remove SQLite authorizer during connection cleanup (code {result})"
+        )));
+    }
+    unsafe {
+        sqlite3_progress_handler(raw_db, 0, None, std::ptr::null_mut());
+    }
+    let result = unsafe { sqlite3_enable_load_extension(raw_db, 0) };
+    if result != SQLITE_OK {
+        return Err(OperationalError::new_err(format!(
+            "Failed to disable SQLite extension loading during connection cleanup (code {result})"
+        )));
+    }
+
+    Ok(true)
+}
+
+/// Sanitize a callback-bound handle before returning it to the pool. If
+/// cleanup fails, or an extension is loaded, close the physical handle so its
+/// state cannot be observed by another logical Connection.
+pub(crate) async fn release_callback_connection_after_cleanup(
+    ctx: &CallbackContext,
+    mut connection: PoolConnection<Sqlite>,
+) -> Result<(), PyErr> {
+    match clear_connection_callback_registrations(ctx, &mut connection).await {
+        Ok(true) => {
+            drop(connection);
+            Ok(())
+        }
+        Ok(false) => {
+            connection.close_on_drop();
+            drop(connection);
+            Ok(())
+        }
+        Err(error) => {
+            connection.close_on_drop();
+            drop(connection);
+            Err(error)
+        }
+    }
+}
+
+/// Release logical SQLite callback state after every physical handle has either
+/// been sanitized or closed. Aggregate and collation registrations keep raw
+/// Python pointers in their logical registries, so those owners need explicit
+/// drops.
+pub(crate) fn clear_callback_registries(ctx: &CallbackContext) {
+    ctx.user_functions.lock().unwrap().clear();
+
+    let aggregate_pointers = ctx
+        .user_aggregates
+        .lock()
+        .unwrap()
+        .drain()
+        .map(|(_, (_, pointer))| pointer)
+        .collect::<Vec<_>>();
+    let collation_pointers = ctx
+        .user_collations
+        .lock()
+        .unwrap()
+        .drain()
+        .map(|(_, pointer)| pointer)
+        .collect::<Vec<_>>();
+    #[allow(deprecated)]
+    Python::attach(|_py| unsafe {
+        for pointer in aggregate_pointers.into_iter().chain(collation_pointers) {
+            if pointer != 0 {
+                drop(Box::from_raw(pointer as *mut Py<PyAny>));
+            }
+        }
+    });
+
+    ctx.trace_callback.replace(None);
+    *ctx.authorizer_callback.lock().unwrap() = None;
+    *ctx.progress_handler.lock().unwrap() = None;
+    let authorizer_pointer = std::mem::take(&mut *ctx.authorizer_callback_ctx_ptr.lock().unwrap());
+    let progress_pointer = std::mem::take(&mut *ctx.progress_handler_ctx_ptr.lock().unwrap());
+    drop_py_callback_ptr(authorizer_pointer);
+    drop_py_callback_ptr(progress_pointer);
+    crate::pool::refresh_callback_features(ctx);
+}
+
+/// Fully clear callback and extension state when the Connection itself closes.
+pub(crate) fn clear_callback_state(ctx: &CallbackContext) {
+    clear_callback_registries(ctx);
+    *ctx.callback_connection_required.lock().unwrap() = false;
+    ctx.loaded_extensions.lock().unwrap().clear();
+    *ctx.extension_loading_allowed.lock().unwrap() = false;
+    crate::pool::refresh_callback_features(ctx);
 }
 
 /// Callback changes made during a transaction must target its existing handle.
@@ -162,6 +502,12 @@ async fn prepare_callback_target(ctx: &mut CallbackContext) -> Result<(), PyErr>
         ctx.callback_connection = Arc::clone(&ctx.transaction_connection);
         ctx.skip_release = true;
         Box::pin(rebind_callbacks(ctx.clone())).await?;
+    } else {
+        if transfer_session_for_single_slot_pool(ctx) {
+            move_session_connection_to_callback(ctx).await;
+        } else {
+            release_session_connection(&ctx.session_connection).await;
+        }
     }
     Ok(())
 }
@@ -194,22 +540,6 @@ pub(crate) async fn set_progress_handler_impl(
         Some(Arc::clone(&ctx.callback_operation_lock).lock_owned().await)
     };
     prepare_callback_target(&mut ctx).await?;
-
-    if callback.is_none() {
-        let all_cleared = !has_callbacks(
-            &ctx.callback_connection_required,
-            &ctx.user_functions,
-            &ctx.user_aggregates,
-            &ctx.user_collations,
-            &ctx.trace_callback,
-            &ctx.authorizer_callback,
-            &ctx.progress_handler,
-        );
-        if all_cleared && !ctx.skip_release {
-            discard_callback_connection(&ctx).await;
-            return Ok(());
-        }
-    }
 
     ensure_callback_connection(
         &ctx.path,
@@ -319,7 +649,7 @@ pub(crate) async fn set_progress_handler_impl(
         if all_cleared {
             drop(handle);
             drop(conn_guard);
-            discard_callback_connection(&ctx).await;
+            finish_callback_update(&ctx).await;
             return Ok(());
         }
     }
@@ -431,7 +761,7 @@ pub(crate) async fn create_collation_impl(
         if all_cleared {
             drop(handle);
             drop(conn_guard);
-            discard_callback_connection(&ctx).await;
+            finish_callback_update(&ctx).await;
         }
         finish_callback_update(&ctx).await;
         return Ok(());
@@ -547,22 +877,6 @@ pub(crate) async fn set_authorizer_impl(
         Some(Arc::clone(&ctx.callback_operation_lock).lock_owned().await)
     };
     prepare_callback_target(&mut ctx).await?;
-
-    if callback.is_none() {
-        let all_cleared = !has_callbacks(
-            &ctx.callback_connection_required,
-            &ctx.user_functions,
-            &ctx.user_aggregates,
-            &ctx.user_collations,
-            &ctx.trace_callback,
-            &ctx.authorizer_callback,
-            &ctx.progress_handler,
-        );
-        if all_cleared && !ctx.skip_release {
-            discard_callback_connection(&ctx).await;
-            return Ok(());
-        }
-    }
 
     ensure_callback_connection(
         &ctx.path,
@@ -707,7 +1021,7 @@ pub(crate) async fn set_authorizer_impl(
         if all_cleared {
             drop(handle);
             drop(conn_guard);
-            discard_callback_connection(&ctx).await;
+            finish_callback_update(&ctx).await;
             return Ok(());
         }
     }
@@ -1403,8 +1717,9 @@ pub(crate) async fn create_aggregate_impl(
 }
 
 /// Reinstall this logical Connection's callback configuration on its current
-/// checked-out physical connection. Callback-enabled connections are discarded
-/// after each operation so idle wrappers do not reserve pool capacity.
+/// checked-out physical connection. Callback connections are normally discarded
+/// after each operation; session-affine connections retain the handle as the
+/// in-memory database keeper.
 pub(crate) async fn rebind_callbacks(ctx: CallbackContext) -> Result<(), PyErr> {
     let result = rebind_callbacks_inner(ctx.clone()).await;
     if result.is_err() && !ctx.skip_release {
@@ -1414,6 +1729,13 @@ pub(crate) async fn rebind_callbacks(ctx: CallbackContext) -> Result<(), PyErr> 
 }
 
 async fn rebind_callbacks_inner(ctx: CallbackContext) -> Result<(), PyErr> {
+    if !ctx.skip_release {
+        if transfer_session_for_single_slot_pool(&ctx) {
+            move_session_connection_to_callback(&ctx).await;
+        } else {
+            release_session_connection(&ctx.session_connection).await;
+        }
+    }
     ensure_callback_connection(
         &ctx.path,
         &ctx.pool,

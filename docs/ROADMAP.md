@@ -85,9 +85,12 @@ In scope:
 - Add narrow scalar/BLOB and reusable-query paths for repeated operations.
 - Prototype a raw SQLite path only behind an explicit opt-in until cancellation and event-loop behavior are proven.
 
-Out of scope for 0.5:
+### Scope adjustment
 
-- Cache-specific `get`/`set` semantics and TTL APIs (#42).
+- Cache-specific `get`/`set` semantics and TTL APIs ([#42](https://github.com/eddiethedean/rapsqlite/issues/42)) were originally planned for 0.6, but shipped early in `v0.5.0` (see the 0.6 status below).
+
+### Remaining non-goals for 0.5
+
 - Bulk operations and pipelining-style batching (#43).
 - Multiplexed concurrent reads (#44).
 - A general pool redesign or a claim that rapsqlite is faster than Redis for every workload.

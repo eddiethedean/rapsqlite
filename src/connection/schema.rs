@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
 use crate::pool::{
-    acquire_with_pragmas, execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
-    PoolConnectionSlot, PoolHandle,
+    execute_init_hook_if_needed, get_or_create_pool, has_callbacks,
+    lock_session_connection_from_pool, InitHookState, PoolConnectionSlot, PoolHandle,
+    SessionConnectionSlot,
 };
 use crate::query::bind_and_fetch_all_on_connection;
 use crate::types::{
@@ -43,6 +44,7 @@ pub(crate) struct SchemaContext {
     pub idle_timeout_secs: Arc<StdMutex<Option<u64>>>,
     pub transaction_state: Arc<TransactionStateTracker>,
     pub transaction_connection: Arc<Mutex<PoolConnectionSlot>>,
+    pub session_connection: SessionConnectionSlot,
     pub callback_connection: Arc<Mutex<PoolConnectionSlot>>,
     pub callback_connection_required: Arc<StdMutex<bool>>,
     pub user_functions: UserFunctions,
@@ -52,8 +54,9 @@ pub(crate) struct SchemaContext {
     pub authorizer_callback: Arc<StdMutex<Option<Py<PyAny>>>>,
     pub progress_handler: ProgressHandler,
     pub init_hook: Arc<StdMutex<Option<Py<PyAny>>>>,
-    pub init_hook_called: Arc<AtomicBool>,
+    pub init_hook_called: Arc<InitHookState>,
     pub init_hook_present: Arc<AtomicBool>,
+    pub init_hook_reentrant: bool,
     pub include_query_in_errors: Arc<StdMutex<bool>>,
     pub closed: Arc<StdMutex<bool>>,
     pub connection_self: Py<Connection>,
@@ -76,7 +79,7 @@ async fn run_introspection_query_with_params(
     ensure_not_closed(&ctx.closed)?;
     let include_query_in_errors = *ctx.include_query_in_errors.lock().unwrap();
 
-    let in_transaction = ctx.transaction_state.is_routing_active().await;
+    let mut in_transaction = ctx.transaction_state.is_routing_active().await;
 
     if !in_transaction {
         get_or_create_pool(
@@ -96,9 +99,11 @@ async fn run_introspection_query_with_params(
         &ctx.init_hook,
         &ctx.init_hook_present,
         &ctx.init_hook_called,
+        ctx.init_hook_reentrant,
         connection_for_hook,
     )
     .await?;
+    in_transaction = ctx.transaction_state.is_routing_active().await;
 
     let has_callbacks_flag = has_callbacks(
         &ctx.callback_connection_required,
@@ -152,28 +157,21 @@ async fn run_introspection_query_with_params(
             &ctx.idle_timeout_secs,
         )
         .await?;
-        let pool_size_val = *ctx.pool_size.lock().map_err(|_| {
-            crate::InternalError::new_err("internal error: mutex poisoned in schema")
-        })?;
-        let timeout_val = *ctx.connection_timeout_secs.lock().map_err(|_| {
-            crate::InternalError::new_err("internal error: mutex poisoned in schema")
-        })?;
-        let mut conn = acquire_with_pragmas(
-            &pool_clone,
-            &ctx.pragmas,
+        let mut conn_guard = lock_session_connection_from_pool(
             &ctx.path,
-            pool_size_val,
-            timeout_val,
+            &pool_clone,
+            &ctx.session_connection,
+            &ctx.pragmas,
+            &ctx.pool_size,
+            &ctx.connection_timeout_secs,
         )
         .await?;
-        bind_and_fetch_all_on_connection(
-            query,
-            params,
-            &mut conn,
-            &ctx.path,
-            include_query_in_errors,
-        )
-        .await?
+        let conn = conn_guard
+            .0
+            .as_mut()
+            .ok_or_else(|| OperationalError::new_err("Session connection not available"))?;
+        bind_and_fetch_all_on_connection(query, params, conn, &ctx.path, include_query_in_errors)
+            .await?
     };
 
     Ok(rows)

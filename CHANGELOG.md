@@ -14,6 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **v0.5.x**: Low-latency execution and session affinity - **Latest: v0.5.0**
 - **v1.0.0**: Stable production API release after the 0.x phases
 
+## [Unreleased]
+
+### Fixed
+
+- Hardened callback and initialization-hook lifecycle for in-memory connections,
+  including keeping callback-bound connections alive and routing first operations
+  through transactions started by initialization hooks.
+- Fixed races and deadlocks involving concurrent transaction startup, implicit
+  writes, cache initialization, and connection/session release.
+- Ensured dynamically configured PRAGMAs are applied to replacement physical
+  connections and can be restored after direct SQL overrides.
+
 ## [0.5.0] - 2026-09-25
 
 Phase 0.5 release. Same-machine performance measurements and their

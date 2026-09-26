@@ -17,10 +17,55 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::types::{ProgressHandler, TraceCallback, UserAggregates, UserCollations, UserFunctions};
 use crate::OperationalError;
+
+/// Shared initialization barrier for a Connection's optional Python init hook.
+/// `started` preserves the fast routing checks; `completion` lets unrelated
+/// first-use operations wait while allowing reentrant hook calls to proceed.
+pub(crate) struct InitHookState {
+    started: AtomicBool,
+    completion: OnceCell<Result<(), Arc<str>>>,
+}
+
+impl InitHookState {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: AtomicBool::new(false),
+            completion: OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn is_started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_in_progress(&self) -> bool {
+        self.is_started() && self.completion.get().is_none()
+    }
+}
+
+/// Snapshot Python's task-local reentrancy marker at the synchronous API
+/// boundary, before the operation is moved onto the async runtime.
+pub(crate) fn capture_init_hook_reentrancy(
+    init_hook_present: &AtomicBool,
+    init_hook_state: &InitHookState,
+    connection: &Py<crate::Connection>,
+) -> PyResult<bool> {
+    if !init_hook_present.load(Ordering::Acquire) || init_hook_state.completion.get().is_some() {
+        return Ok(false);
+    }
+
+    #[allow(deprecated)]
+    Python::attach(|py| -> PyResult<bool> {
+        py.import("rapsqlite._init_hook")?
+            .getattr("_is_active")?
+            .call1((connection.bind(py),))?
+            .extract()
+    })
+}
 
 fn sqlite_url_for_path(path: &str) -> String {
     if path == ":memory:" {
@@ -69,6 +114,24 @@ fn drop_on_background_tokio<T: Send + 'static>(value: T) {
     });
 }
 
+/// Close a pooled connection even when called from synchronous Python code
+/// outside a Tokio runtime. SQLx requires a Tokio context for
+/// `close_on_drop`, so close it on a background runtime when necessary.
+pub(crate) fn close_pool_connection_on_drop(mut connection: PoolConnection<sqlx::Sqlite>) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        connection.close_on_drop();
+        drop(connection);
+        return;
+    }
+
+    std::thread::spawn(move || match tokio::runtime::Runtime::new() {
+        Ok(runtime) => {
+            let _ = runtime.block_on(connection.close());
+        }
+        Err(_) => drop(connection),
+    });
+}
+
 /// Wrapper around `Option<PoolConnection>` that, when dropped outside a Tokio context,
 /// forgets the connection instead of dropping it. This prevents sqlx's `PoolConnection::Drop`
 /// from running without a runtime (e.g. during Python GC/shutdown).
@@ -77,6 +140,12 @@ pub(crate) struct PoolConnectionSlot(pub(crate) Option<PoolConnection<sqlx::Sqli
 
 impl Drop for PoolConnectionSlot {
     fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl PoolConnectionSlot {
+    fn release(&mut self) {
         if let Some(pc) = self.0.take() {
             if tokio::runtime::Handle::try_current().is_err() {
                 drop_on_background_tokio(pc);
@@ -277,6 +346,7 @@ pub(crate) struct SessionConnectionSlot {
     raw_statement_cache: Arc<RawStatementCache>,
     slot: Arc<Mutex<PoolConnectionSlot>>,
     retain: Arc<AtomicBool>,
+    retain_transition: Arc<StdMutex<()>>,
 }
 
 impl SessionConnectionSlot {
@@ -285,6 +355,7 @@ impl SessionConnectionSlot {
             raw_statement_cache: Arc::new(RawStatementCache::default()),
             slot: Arc::new(Mutex::new(PoolConnectionSlot::default())),
             retain: Arc::new(AtomicBool::new(false)),
+            retain_transition: Arc::new(StdMutex::new(())),
         }
     }
 
@@ -293,7 +364,20 @@ impl SessionConnectionSlot {
     }
 
     pub(crate) fn set_retain(&self, retain: bool) {
+        let _transition = self
+            .retain_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.retain.store(retain, Ordering::Release);
+        if !retain {
+            // The property setter is synchronous. Release immediately when the
+            // slot is idle; an operation already holding it observes the updated
+            // atomic flag in SessionConnectionGuard::drop and releases it there.
+            if let Ok(mut slot) = self.slot.try_lock() {
+                self.raw_statement_cache.clear();
+                slot.release();
+            }
+        }
     }
 
     pub(crate) fn retain(&self) -> bool {
@@ -313,31 +397,62 @@ impl SessionConnectionSlot {
 /// to SQLx when the operation finishes so idle Connection wrappers do not consume
 /// the pool's bounded capacity.
 pub(crate) struct SessionConnectionGuard {
-    guard: tokio::sync::OwnedMutexGuard<PoolConnectionSlot>,
-    retain: bool,
+    guard: Option<tokio::sync::OwnedMutexGuard<PoolConnectionSlot>>,
+    retain: Arc<AtomicBool>,
     raw_statement_cache: Arc<RawStatementCache>,
+    retain_transition: Arc<StdMutex<()>>,
 }
 
 impl Deref for SessionConnectionGuard {
     type Target = PoolConnectionSlot;
 
     fn deref(&self) -> &Self::Target {
-        &self.guard
+        self.guard
+            .as_deref()
+            .expect("session connection guard already released")
     }
 }
 
 impl DerefMut for SessionConnectionGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.guard
+        self.guard
+            .as_deref_mut()
+            .expect("session connection guard already released")
+    }
+}
+
+impl SessionConnectionGuard {
+    /// Transfer the physical connection to a transaction while invalidating any
+    /// raw statements cached against its SQLite handle. The statements must be
+    /// finalized before SQLx can return or close the connection independently.
+    pub(crate) fn take_connection(&mut self) -> Option<PoolConnection<sqlx::Sqlite>> {
+        self.raw_statement_cache.clear();
+        self.guard
+            .as_deref_mut()
+            .expect("session connection guard already released")
+            .0
+            .take()
     }
 }
 
 impl Drop for SessionConnectionGuard {
     fn drop(&mut self) {
-        if !self.retain {
+        // Serialize the retain check with set_retain(). Explicitly unlock the
+        // slot before releasing this transition lock so a concurrent setter
+        // can either release an idle connection itself or leave that work to
+        // this guard, with no check/unlock race.
+        let transition = self
+            .retain_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.retain.load(Ordering::Acquire) {
             self.raw_statement_cache.clear();
-            self.guard.0.take();
+            if let Some(guard) = self.guard.as_deref_mut() {
+                guard.release();
+            }
         }
+        drop(self.guard.take());
+        drop(transition);
     }
 }
 
@@ -524,6 +639,15 @@ fn pragmas_are_applied(connection_id: usize, fingerprint: u64) -> bool {
         .unwrap_or(false)
 }
 
+/// Forget state associated with a raw SQLite handle address when SQLx has
+/// created a new physical connection. SQLite may reuse an address after the
+/// previous handle is closed, so the address alone is not a stable identity.
+fn forget_applied_pragmas(connection_id: usize) {
+    if let Ok(mut applied) = applied_pragmas().lock() {
+        applied.remove(&connection_id);
+    }
+}
+
 fn mark_pragmas_applied(connection_id: usize, fingerprint: u64) {
     if let Ok(mut applied) = applied_pragmas().lock() {
         // Physical handles are normally reused by SQLx. Keep this bounded in case a
@@ -614,28 +738,29 @@ pub(crate) async fn get_or_create_pool(
         opts = opts.idle_timeout(Some(Duration::from_secs(idle)));
     }
     let after_connect_pragmas = pragmas.lock().unwrap().clone();
-    if !after_connect_pragmas.is_empty() {
-        opts = opts.after_connect(move |conn, _| {
-            let pragmas = after_connect_pragmas.clone();
-            Box::pin(async move {
-                // SQLx invokes this hook exactly when a physical SQLite
-                // connection is created. Always apply the snapshot here; a
-                // raw sqlite3 pointer can be reused after a connection is
-                // replaced, so a pointer-only cache cannot safely identify a
-                // newly-created handle.
-                let connection_id = {
-                    let mut handle = conn.lock_handle().await?;
-                    handle.as_raw_handle().as_ptr() as usize
-                };
-                for (name, value) in &pragmas {
-                    let pragma_query = format!("PRAGMA {name} = {value}");
-                    sqlx::query(&pragma_query).execute(&mut *conn).await?;
-                }
+    opts = opts.after_connect(move |conn, _| {
+        let pragmas = after_connect_pragmas.clone();
+        Box::pin(async move {
+            // SQLx invokes this hook exactly when a physical SQLite
+            // connection is created. Raw sqlite3 addresses can be reused
+            // after a connection is replaced, so invalidate any state left
+            // behind for this address even when the initial PRAGMA snapshot
+            // is empty. Later set_pragma() calls are then applied on acquire.
+            let connection_id = {
+                let mut handle = conn.lock_handle().await?;
+                handle.as_raw_handle().as_ptr() as usize
+            };
+            forget_applied_pragmas(connection_id);
+            for (name, value) in &pragmas {
+                let pragma_query = format!("PRAGMA {name} = {value}");
+                sqlx::query(&pragma_query).execute(&mut *conn).await?;
+            }
+            if !pragmas.is_empty() {
                 mark_pragmas_applied(connection_id, pragma_fingerprint(&pragmas));
-                Ok(())
-            })
-        });
-    }
+            }
+            Ok(())
+        })
+    });
     let url = sqlite_url_for_path(path);
     let new_pool = opts.connect(&url).await.map_err(|e| {
         OperationalError::new_err(format!("Failed to connect to database at {path}: {e}"))
@@ -712,56 +837,68 @@ pub(crate) async fn ensure_callback_connection(
 pub(crate) async fn execute_init_hook_if_needed(
     init_hook: &Arc<StdMutex<Option<Py<PyAny>>>>,
     init_hook_present: &AtomicBool,
-    init_hook_called: &AtomicBool,
+    init_hook_state: &InitHookState,
+    reentrant: bool,
     connection: Py<crate::Connection>,
 ) -> Result<(), PyErr> {
     if !init_hook_present.load(Ordering::Acquire) {
         return Ok(());
     }
-    // Mark before running to preserve re-entrancy behavior: if the hook itself
-    // calls the Connection, nested operations must not wait on the same hook.
-    if init_hook_called.swap(true, Ordering::AcqRel) {
+
+    // Once initialization is complete, the common path needs no Python/GIL
+    // round-trip to check whether this operation is reentrant.
+    if let Some(result) = init_hook_state.completion.get() {
+        return match result.as_ref() {
+            Ok(()) => Ok(()),
+            Err(error) => Err(OperationalError::new_err(error.to_string())),
+        };
+    }
+
+    // This was captured at the synchronous Python API boundary. Looking up a
+    // ContextVar from a Tokio worker thread would observe a different context.
+    if reentrant {
         return Ok(());
     }
 
-    // Check if init_hook is set and call it if needed
-    // Note: Python::attach is used here because this is a sync helper function
-    // called from async contexts. The deprecation warning is acceptable here.
-    #[allow(deprecated)]
-    let hook_opt: Option<Py<PyAny>> = Python::attach(|py| {
-        let guard = init_hook.lock().unwrap();
-        guard.as_ref().map(|h| h.clone_ref(py))
-    });
+    let result = init_hook_state
+        .completion
+        .get_or_init(|| async {
+            init_hook_state.started.store(true, Ordering::Release);
 
-    if let Some(hook) = hook_opt {
-        // Call the hook with the Connection object and await the coroutine
-        // Note: Python::attach is used here because this is a sync helper function
-        // called from async contexts. The deprecation warning is acceptable here.
-        #[allow(deprecated)]
-        let coro_future = Python::attach(|py| -> PyResult<_> {
-            let hook_bound = hook.bind(py);
-            let conn_bound = connection.bind(py);
+            #[allow(deprecated)]
+            let hook_opt = Python::attach(|py| {
+                let guard = init_hook.lock().unwrap();
+                guard.as_ref().map(|hook| hook.clone_ref(py))
+            });
+            let Some(hook) = hook_opt else {
+                return Ok(());
+            };
 
-            // Call the hook with Connection as argument
-            let coro = hook_bound
-                .call1((conn_bound,))
-                .map_err(|e| OperationalError::new_err(format!("Failed to call init_hook: {e}")))?;
-
-            // Convert Python coroutine to Rust future (into_future expects Bound)
-            into_future(coro).map_err(|e| {
-                OperationalError::new_err(format!(
-                    "Failed to convert init_hook coroutine to future: {e}"
-                ))
+            #[allow(deprecated)]
+            let coro_future = Python::attach(|py| -> PyResult<_> {
+                let coro = py
+                    .import("rapsqlite._init_hook")?
+                    .getattr("_run_hook")?
+                    .call1((hook.bind(py), connection.bind(py)))?;
+                into_future(coro).map_err(|error| {
+                    OperationalError::new_err(format!(
+                        "Failed to convert init_hook coroutine to future: {error}"
+                    ))
+                })
             })
-        })?;
+            .map_err(|error| Arc::<str>::from(error.to_string()))?;
 
-        // Await the future
-        coro_future.await.map_err(|e| {
-            OperationalError::new_err(format!("init_hook raised an exception: {e}"))
-        })?;
+            coro_future.await.map_err(|error| {
+                Arc::<str>::from(format!("init_hook raised an exception: {error}"))
+            })?;
+            Ok(())
+        })
+        .await;
+
+    match result.as_ref() {
+        Ok(()) => Ok(()),
+        Err(error) => Err(OperationalError::new_err(error.to_string())),
     }
-
-    Ok(())
 }
 
 /// Fast wrapper for hot paths: most connections have no init hook, so an atomic
@@ -769,10 +906,18 @@ pub(crate) async fn execute_init_hook_if_needed(
 pub(crate) async fn execute_init_hook_if_needed_fast(
     init_hook: &Arc<StdMutex<Option<Py<PyAny>>>>,
     init_hook_present: &AtomicBool,
-    init_hook_called: &AtomicBool,
+    init_hook_state: &InitHookState,
+    reentrant: bool,
     connection: Py<crate::Connection>,
 ) -> Result<(), PyErr> {
-    execute_init_hook_if_needed(init_hook, init_hook_present, init_hook_called, connection).await
+    execute_init_hook_if_needed(
+        init_hook,
+        init_hook_present,
+        init_hook_state,
+        reentrant,
+        connection,
+    )
+    .await
 }
 
 /// Ensure the Connection has a session connection from the pool (acquire and store if None).
@@ -831,9 +976,10 @@ pub(crate) async fn lock_session_connection_from_pool(
         apply_pragmas_to_connection(conn, &pragmas_list, path).await?;
     }
     Ok(SessionConnectionGuard {
-        retain: session_connection.retain(),
-        guard,
+        retain: Arc::clone(&session_connection.retain),
+        guard: Some(guard),
         raw_statement_cache: session_connection.raw_statement_cache(),
+        retain_transition: Arc::clone(&session_connection.retain_transition),
     })
 }
 
@@ -904,4 +1050,22 @@ pub(crate) fn refresh_callback_features(ctx: &crate::connection::CallbackContext
         features |= CALLBACK_FEATURE_PROGRESS;
     }
     ctx.callback_features.store(features, Ordering::Release);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{forget_applied_pragmas, mark_pragmas_applied, pragmas_are_applied};
+
+    #[test]
+    fn fresh_connection_invalidates_reused_raw_handle_address() {
+        let reused_address = usize::MAX - 1024;
+        let fingerprint = 0x5a17;
+
+        mark_pragmas_applied(reused_address, fingerprint);
+        assert!(pragmas_are_applied(reused_address, fingerprint));
+
+        forget_applied_pragmas(reused_address);
+
+        assert!(!pragmas_are_applied(reused_address, fingerprint));
+    }
 }

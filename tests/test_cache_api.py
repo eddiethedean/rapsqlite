@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import pytest
 
-from rapsqlite import SQLiteCache, connect_memory
+from rapsqlite import Connection, SQLiteCache, connect_memory
 
 
 class _TransactionalCacheConnection:
@@ -33,6 +33,24 @@ async def test_cache_basic_get_set_delete_and_lazy_initialization() -> None:
         assert await cache.delete("key") is True
         assert await cache.delete("key") is False
         assert await cache.get("key") is None
+
+
+@pytest.mark.asyncio
+async def test_cache_initialization_hook_can_reenter_cache() -> None:
+    cache: SQLiteCache | None = None
+
+    async def init_hook(_connection: Any) -> None:
+        assert cache is not None
+        await cache.set("written-by-hook", b"hook-value")
+
+    conn = Connection(":memory:", init_hook=init_hook)
+    conn.session_affinity = True
+    cache = SQLiteCache(conn)
+    try:
+        assert await asyncio.wait_for(cache.get("missing"), timeout=3) is None
+        assert await cache.get("written-by-hook") == b"hook-value"
+    finally:
+        await conn.close()
 
 
 @pytest.mark.asyncio

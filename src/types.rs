@@ -122,7 +122,7 @@ pub(crate) type TraceCallback = Arc<TraceCallbackState>;
 const MAX_ADAPTER_DEPTH: usize = 10;
 
 /// Transaction state tracking.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum TransactionState {
     None,
     /// A transaction is in the process of starting (connection is being acquired / BEGIN pending).
@@ -140,6 +140,7 @@ pub(crate) struct TransactionStateTracker {
 
 pub(crate) struct TransactionStateGuard<'a> {
     guard: tokio::sync::MutexGuard<'a, TransactionState>,
+    initial_state: TransactionState,
     routing_active: &'a AtomicBool,
     _reservation: TransactionStateReservation<'a>,
 }
@@ -164,8 +165,11 @@ impl TransactionStateTracker {
     pub(crate) async fn lock(&self) -> TransactionStateGuard<'_> {
         self.state_lockers.fetch_add(1, Ordering::AcqRel);
         let reservation = TransactionStateReservation(&self.state_lockers);
+        let guard = self.state.lock().await;
+        let initial_state = *guard;
         TransactionStateGuard {
-            guard: self.state.lock().await,
+            guard,
+            initial_state,
             routing_active: &self.routing_active,
             _reservation: reservation,
         }
@@ -209,6 +213,14 @@ impl DerefMut for TransactionStateGuard<'_> {
 
 impl Drop for TransactionStateGuard<'_> {
     fn drop(&mut self) {
+        // Transaction starters keep this guard while acquiring and installing
+        // their connection. If their future is cancelled before reaching
+        // Active, release the reservation instead of leaving the tracker stuck
+        // in Starting forever.
+        if self.initial_state == TransactionState::None && *self.guard == TransactionState::Starting
+        {
+            *self.guard = TransactionState::None;
+        }
         self.routing_active
             .store(self.guard.is_active(), Ordering::Release);
     }

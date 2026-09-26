@@ -132,6 +132,42 @@ async def test_pool_config_with_set_pragma(test_db: str):
         assert db.connection_timeout == 3
 
 
+@pytest.mark.asyncio
+async def test_set_pragma_reapplies_value_after_direct_pragma_override() -> None:
+    async with rapsqlite.connect_memory(session_affinity=True) as db:
+        await db.set_pragma("foreign_keys", False)
+        await db.execute("PRAGMA foreign_keys = ON")
+        assert await db.fetch_scalar("PRAGMA foreign_keys") == 1
+
+        await db.set_pragma("foreign_keys", False)
+
+        assert await db.fetch_scalar("PRAGMA foreign_keys") == 0
+
+
+@pytest.mark.asyncio
+async def test_set_pragma_is_applied_after_idle_connection_replacement(
+    test_db: str,
+) -> None:
+    async with connect(test_db, pool_size=1, idle_timeout=1) as db:
+        # Create the pool before adding the setting so its initial PRAGMA
+        # snapshot is empty.
+        assert await db.fetch_scalar("SELECT 1") == 1
+        await db.set_pragma("foreign_keys", True)
+        assert await db.fetch_scalar("PRAGMA foreign_keys") == 1
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        metrics = await db.pool_metrics()
+        while metrics["size"] != 0 and loop.time() < deadline:
+            await asyncio.sleep(0.05)
+            metrics = await db.pool_metrics()
+        assert metrics["size"] == 0
+
+        # A new physical connection must receive the dynamically configured
+        # PRAGMA even though the pool was created with no initial settings.
+        assert await db.fetch_scalar("PRAGMA foreign_keys") == 1
+
+
 # ---- execute_many ----
 
 
